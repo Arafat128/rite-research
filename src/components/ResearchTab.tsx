@@ -21,6 +21,7 @@ import {
   ritualChain,
 } from "@/lib/ritual";
 import { ResearchReport } from "@/components/ResearchReport";
+import { ResearchLoading } from "@/components/ResearchLoading";
 
 type Phase = "idle" | "paying" | "researching" | "settling" | "done" | "error";
 
@@ -761,7 +762,12 @@ export function ResearchTab() {
         )}
       </div>
 
-      {status && (
+      {/* Branded wait UI while pay → Surf → seal */}
+      {(phase === "paying" || phase === "researching" || phase === "settling") && (
+        <ResearchLoading phase={phase} status={status} />
+      )}
+
+      {status && phase !== "paying" && phase !== "researching" && phase !== "settling" && (
         <p
           className={`mt-5 max-w-2xl whitespace-pre-wrap text-center text-sm ${
             phase === "error" ? "text-red-300" : "text-white/75"
@@ -771,14 +777,14 @@ export function ResearchTab() {
         </p>
       )}
 
-      {meta.paymentTx && (
+      {meta.paymentTx && phase !== "paying" && phase !== "researching" && (
         <div className="mt-3 flex flex-wrap justify-center gap-3 text-xs text-[#c8ff4a]/90">
           <a href={txUrl(meta.paymentTx)} target="_blank" rel="noreferrer" className="underline">
             Payment tx ↗
           </a>
           {meta.settleTx && (
             <a href={txUrl(meta.settleTx)} target="_blank" rel="noreferrer" className="underline">
-              Settle tx ↗
+              Seal tx ↗
             </a>
           )}
           {meta.researchId && <span>#{meta.researchId}</span>}
@@ -787,7 +793,9 @@ export function ResearchTab() {
         </div>
       )}
 
-      {report ? <ResearchReport content={report} /> : null}
+      {report && phase !== "researching" && phase !== "settling" ? (
+        <ResearchReport content={report} />
+      ) : null}
     </section>
   );
 }
