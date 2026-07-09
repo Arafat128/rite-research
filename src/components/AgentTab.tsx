@@ -48,6 +48,7 @@ import { sanitizeHttpUrl } from "@/lib/safeUrl";
 import {
   BLOCK_TIME_SEC,
   computeDue,
+  formatChainTime,
   formatCountdown,
   formatInterval,
   scheduleToBlocks,
@@ -195,6 +196,13 @@ export function AgentTab() {
     null
   );
   const [autoWakeReady, setAutoWakeReady] = useState<boolean | null>(null);
+  /** Lightweight status map for agent chips (avoid full panel for dead) */
+  const [agentMeta, setAgentMeta] = useState<
+    Record<
+      string,
+      { status: number; kind: number; name: string; balance: string }
+    >
+  >({});
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
   const dataDef = DATA_KINDS.find((k) => k.id === dataKind)!;
@@ -296,21 +304,38 @@ export function AgentTab() {
       }
       setAgentIds(ids);
 
-      let pick: bigint | null =
-        selectedId != null && ids.some((id) => id === selectedId)
-          ? selectedId
-          : ids.length
-            ? ids[ids.length - 1]
-            : null;
-
-      if (selectedId != null && (pick == null || pick !== selectedId)) {
-        if (ids.length === 0) {
-          setSelectedId(null);
-          pick = null;
+      // Load meta for chips + prefer LIVE agents for default selection
+      const meta: Record<
+        string,
+        { status: number; kind: number; name: string; balance: string }
+      > = {};
+      for (const id of ids) {
+        const row = await readAgentOnChain(id);
+        if (row) {
+          meta[id.toString()] = {
+            status: row.status,
+            kind: row.kind,
+            name: row.name,
+            balance: row.balance.toString(),
+          };
         }
-      } else {
-        setSelectedId(pick);
       }
+      setAgentMeta(meta);
+
+      const liveIds = ids.filter((id) => meta[id.toString()]?.status !== 4);
+      const selectedStillOwned =
+        selectedId != null && ids.some((id) => id === selectedId);
+
+      let pick: bigint | null = null;
+      if (selectedStillOwned) {
+        pick = selectedId;
+      } else if (liveIds.length) {
+        pick = liveIds[liveIds.length - 1];
+      } else if (ids.length) {
+        pick = ids[ids.length - 1];
+      }
+
+      setSelectedId(pick);
 
       if (pick != null) {
         const a = await readAgentOnChain(pick);
@@ -329,6 +354,15 @@ export function AgentTab() {
           setWatchlist(await readWatchlist(pick));
           setTicksLeft(await readTicksRemaining(pick));
           setTicks(await loadMergedTicks(pick.toString(), a));
+          setAgentMeta((prev) => ({
+            ...prev,
+            [pick!.toString()]: {
+              status: a.status,
+              kind: a.kind,
+              name: a.name,
+              balance: a.balance.toString(),
+            },
+          }));
         }
       } else {
         setAgent(null);
@@ -657,10 +691,19 @@ export function AgentTab() {
     } catch (e: unknown) {
       setErr(errMsg(e, "withdraw"));
       setMsg("");
-      // Re-sync panel after failed attempt (often agent already dead / empty)
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
-          if (a) setAgent(a);
+          if (!a) return;
+          setAgent(a);
+          setAgentMeta((prev) => ({
+            ...prev,
+            [selectedId.toString()]: {
+              status: a.status,
+              kind: a.kind,
+              name: a.name,
+              balance: a.balance.toString(),
+            },
+          }));
         });
       }
     }
@@ -716,22 +759,44 @@ export function AgentTab() {
       if (receipt.status !== "success") {
         throw new Error("Kill transaction reverted on-chain");
       }
-      // Optimistically mark dead so kill/withdraw buttons hide immediately
-      setAgent({
+      // Collapse to compact DEAD card immediately (no full control panel)
+      const deadView = {
         ...live,
         status: 4,
         balance: BigInt(0),
-      });
+      };
+      setAgent(deadView);
+      setAgentMeta((prev) => ({
+        ...prev,
+        [selectedId.toString()]: {
+          status: 4,
+          kind: live.kind,
+          name: live.name,
+          balance: "0",
+        },
+      }));
       setMsg(
-        `Agent #${selectedId} killed · ${refundLabel} RIT refunded to your wallet · tx ${hash.slice(0, 10)}…`
+        `Agent #${selectedId} killed · ${refundLabel} RIT refunded · showing compact DEAD card`
       );
+      setErr("");
       await refresh();
     } catch (e: unknown) {
-      setErr(errMsg(e, "killAgent"));
+      const msg = errMsg(e, "killAgent");
+      setErr(msg);
       setMsg("");
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
-          if (a) setAgent(a);
+          if (!a) return;
+          setAgent(a);
+          setAgentMeta((prev) => ({
+            ...prev,
+            [selectedId.toString()]: {
+              status: a.status,
+              kind: a.kind,
+              name: a.name,
+              balance: a.balance.toString(),
+            },
+          }));
         });
       }
     }
@@ -1157,25 +1222,47 @@ export function AgentTab() {
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-white/45">Your agents:</span>
               {agentIds.map((id) => {
-                const reg = getAppAgent(id.toString());
+                const key = id.toString();
+                const reg = getAppAgent(key);
+                const meta = agentMeta[key];
+                const dead = meta?.status === 4;
+                const selected = selectedId === id;
                 return (
                   <button
-                    key={id.toString()}
+                    key={key}
                     type="button"
-                    onClick={() => setSelectedId(id)}
+                    onClick={() => {
+                      setSelectedId(id);
+                      setErr("");
+                      setMsg("");
+                    }}
                     className={`rounded-full px-3 py-1 text-xs ${
-                      selectedId === id
-                        ? "bg-[#c8ff4a] font-semibold text-black"
-                        : "border border-white/15 bg-black/30 text-white/70"
+                      selected
+                        ? dead
+                          ? "bg-zinc-400 font-semibold text-black"
+                          : "bg-[#c8ff4a] font-semibold text-black"
+                        : dead
+                          ? "border border-zinc-500/40 bg-zinc-900/50 text-zinc-400"
+                          : "border border-white/15 bg-black/30 text-white/70"
                     }`}
+                    title={
+                      dead
+                        ? `Agent #${key} DEAD`
+                        : meta
+                          ? `Agent #${key} · ${statusText(meta.status)}`
+                          : `Agent #${key}`
+                    }
                   >
-                    #{id.toString()}
-                    {reg
+                    #{key}
+                    {dead ? " · DEAD" : ""}
+                    {!dead && reg
                       ? ` · ${AGENT_KIND_LABELS[reg.agentKind] || "?"} · ${
                           DATA_KINDS.find((k) => k.id === reg.dataKind)?.short ||
                           reg.dataKind
                         }`
-                      : ""}
+                      : !dead && meta
+                        ? ` · ${AGENT_KIND_LABELS[meta.kind as AgentKindId] || "?"}`
+                        : ""}
                   </button>
                 );
               })}
@@ -1189,7 +1276,101 @@ export function AgentTab() {
             </div>
           )}
 
-          {agent && selectedId != null && (
+          {/* DEAD agent — compact card only (no schedule/fund/kill clutter) */}
+          {agent && selectedId != null && agent.status === 4 && (
+            <div className="glass rounded-2xl border border-zinc-500/30 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-base font-semibold text-white/90">
+                    {agent.name}
+                  </div>
+                  <div className="mt-0.5 text-xs text-white/40">
+                    #{selectedId.toString()} ·{" "}
+                    {AGENT_KIND_LABELS[agent.kind] || "Agent"}
+                    {agent.runCount > BigInt(0)
+                      ? ` · finished ${agent.runCount.toString()} tick(s)`
+                      : " · killed"}
+                  </div>
+                </div>
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-bold ${statusColor(4)}`}
+                >
+                  DEAD
+                </span>
+              </div>
+
+              <p className="mt-3 text-[12px] leading-relaxed text-white/50">
+                This agent is finished. Controls (schedule, wake, kill) are
+                hidden.{" "}
+                {agent.balance > BigInt(0)
+                  ? "Withdraw residual RIT below, then deploy a new agent if you want to keep tracking."
+                  : "Balance is 0 (already refunded). Deploy a new agent to continue."}
+              </p>
+
+              {agent.balance > BigInt(0) ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-amber-100/80">
+                    Residual{" "}
+                    <b className="text-[#c8ff4a]">
+                      {formatEther(agent.balance)} RIT
+                    </b>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={writing}
+                    onClick={() => void withdrawSelected(agent.balance)}
+                    className="btn-primary rounded-lg px-4 py-2 text-sm"
+                  >
+                    {writing ? "Confirm…" : "Withdraw remaining"}
+                  </button>
+                </div>
+              ) : (
+                <p className="mt-3 text-[11px] text-white/35">
+                  No residual balance · use Deploy above for a new agent
+                </p>
+              )}
+
+              {ticks.length > 0 && (
+                <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-2">
+                  <summary className="cursor-pointer text-[11px] text-white/45">
+                    Past tick seals ({ticks.length})
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    {ticks.slice(0, 5).map((t) => (
+                      <div
+                        key={`${t.runCount}-${t.txHash || t.at}`}
+                        className="text-[11px] text-white/55"
+                      >
+                        Tick #{t.runCount}
+                        {t.snapshot?.kindLabel
+                          ? ` · ${t.snapshot.kindLabel}`
+                          : ""}
+                        {t.txHash &&
+                          t.txHash !==
+                            "0x0000000000000000000000000000000000000000000000000000000000000000" && (
+                            <>
+                              {" "}
+                              ·{" "}
+                              <a
+                                href={txUrl(t.txHash)}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[#c8ff4a] underline"
+                              >
+                                tx
+                              </a>
+                            </>
+                          )}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
+
+          {/* LIVE / active agent — full controls */}
+          {agent && selectedId != null && agent.status !== 4 && (
             <div className="glass rounded-2xl p-5">
               <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -1262,35 +1443,10 @@ export function AgentTab() {
                 />
                 <Stat
                   label="Last wake"
-                  value={
-                    agent.lastRunAt > BigInt(0)
-                      ? new Date(
-                          Number(agent.lastRunAt) * 1000
-                        ).toLocaleString()
-                      : "never"
-                  }
+                  value={formatChainTime(agent.lastRunAt)}
                 />
               </div>
 
-              {agent.status === 4 && (
-                <div className="mb-4 rounded-xl border border-zinc-500/40 bg-zinc-900/50 p-3 text-sm text-zinc-200">
-                  <p>
-                    This agent is <b>DEAD</b>
-                    {agent.runCount > BigInt(0)
-                      ? ` after ${agent.runCount.toString()} tick(s)`
-                      : " (killed by owner)"}
-                    .
-                  </p>
-                  <p className="mt-1 text-[12px] text-white/55">
-                    {agent.balance > BigInt(0)
-                      ? `Remaining balance ${formatEther(agent.balance)} RIT can still be withdrawn below.`
-                      : "On-chain balance is 0 — any funds were already refunded to the owner wallet when the agent died/was killed. Kill and withdraw cannot run again. Deploy a new agent to continue."}
-                  </p>
-                </div>
-              )}
-
-              {agent.status !== 4 && (
-                <>
                   <div className="mb-4 rounded-xl border border-[#c8ff4a]/20 bg-black/25 p-3">
                     <div className="mb-2 text-xs font-semibold text-[#c8ff4a]">
                       Auto-wake schedule
@@ -1473,7 +1629,8 @@ export function AgentTab() {
                     </div>
                     <p className="mb-2 text-[11px] text-white/45">
                       Permanent stop (Persistent or Sovereign). Remaining
-                      balance is refunded to your wallet.
+                      balance is refunded to your wallet. Panel collapses to a
+                      small DEAD card after kill.
                     </p>
                     <button
                       type="button"
@@ -1484,35 +1641,11 @@ export function AgentTab() {
                       Kill agent · refund balance
                     </button>
                   </div>
-                </>
-              )}
-
-              {agent.status === 4 && agent.balance > BigInt(0) && (
-                <div className="mt-4 rounded-xl border border-amber-400/30 bg-black/25 p-3">
-                  <p className="mb-2 text-[11px] text-amber-100/80">
-                    Dead agent still holds {formatEther(agent.balance)} RIT —
-                    withdraw it (does not re-kill).
-                  </p>
-                  <button
-                    type="button"
-                    disabled={writing}
-                    onClick={() => void withdrawSelected(agent.balance)}
-                    className="btn-primary w-full rounded-lg py-2 text-sm"
-                  >
-                    Withdraw remaining balance
-                  </button>
-                </div>
-              )}
-              {agent.status === 4 && agent.balance <= BigInt(0) && (
-                <div className="mt-2 text-center text-[11px] text-white/40">
-                  No residual balance · deploy a new agent to start again
-                </div>
-              )}
             </div>
           )}
 
-          {/* Only show after runTick is confirmed on-chain */}
-          {ticking && (
+          {/* Only show after runTick is confirmed — live agents only */}
+          {ticking && agent && agent.status !== 4 && (
             <div className="glass rounded-2xl p-6 text-center">
               <p className="text-sm font-semibold text-[#c8ff4a]">
                 Waiting for runTick confirmation…
@@ -1525,6 +1658,8 @@ export function AgentTab() {
           )}
 
           {!ticking &&
+            agent &&
+            agent.status !== 4 &&
             (lastSnapshot ||
               (ticks[0]?.snapshot &&
                 (ticks[0].snapshot.rows?.length > 0 ||
@@ -1555,7 +1690,7 @@ export function AgentTab() {
             </div>
           )}
 
-          {ticks.length > 0 && (
+          {ticks.length > 0 && agent && agent.status !== 4 && (
             <div className="glass rounded-2xl p-5">
               <h3 className="mb-3 text-sm font-semibold text-[#c8ff4a]">
                 Tick results

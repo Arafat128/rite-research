@@ -9,6 +9,25 @@ export const BLOCK_TIME_SEC = Math.max(
   Number(process.env.NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC || "2") || 2
 );
 
+/**
+ * Ritual `block.timestamp` is milliseconds (not unix seconds).
+ * Normalize any chain timestamp to unix seconds for Date / schedule math.
+ */
+export function chainTimeToSec(ts: bigint | number): number {
+  const n = typeof ts === "bigint" ? Number(ts) : Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  // > ~year 2001 in milliseconds
+  if (n > 1e12) return Math.floor(n / 1000);
+  return Math.floor(n);
+}
+
+/** Format chain timestamp for UI (handles ms or sec). */
+export function formatChainTime(ts: bigint | number): string {
+  const sec = chainTimeToSec(ts);
+  if (sec <= 0) return "never";
+  return new Date(sec * 1000).toLocaleString();
+}
+
 export type ScheduleUnit = "blocks" | "minutes" | "hours";
 
 export type ScheduleInput = {
@@ -54,13 +73,14 @@ export type DueInfo = {
 /**
  * Time-based due check using lastRunAt + interval from blocks.
  * lastRunAt === 0 → due immediately (never run).
+ * lastRunAt may be Ritual ms timestamp — normalized via chainTimeToSec.
  */
 export function computeDue(
   lastRunAt: bigint | number,
   wakeIntervalBlocks: bigint | number,
   nowSec = Math.floor(Date.now() / 1000)
 ): DueInfo {
-  const last = typeof lastRunAt === "bigint" ? Number(lastRunAt) : lastRunAt;
+  const last = chainTimeToSec(lastRunAt);
   const intervalSec = blocksToSeconds(wakeIntervalBlocks);
   const nextRunAt = last === 0 ? nowSec : last + intervalSec;
   const secondsUntilDue = Math.max(0, nextRunAt - nowSec);
@@ -74,13 +94,20 @@ export function computeDue(
 
 export function formatCountdown(seconds: number): string {
   if (seconds <= 0) return "due now";
-  if (seconds < 60) return `${seconds}s`;
+  if (!Number.isFinite(seconds) || seconds > 86400 * 365 * 5) {
+    return "—";
+  }
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
   if (seconds < 3600) {
     const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
+    const s = Math.floor(seconds % 60);
     return `${m}m ${s}s`;
   }
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return `${h}h ${m}m`;
+  if (seconds < 86400 * 2) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${h}h ${m}m`;
+  }
+  const d = Math.floor(seconds / 86400);
+  return `${d}d`;
 }
