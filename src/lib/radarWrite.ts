@@ -7,6 +7,9 @@
  *  1) simulateContract → clear custom-error messages
  *  2) estimateContractGas + buffer
  *  3) attach legacy gasPrice so the wallet does not need feeHistory
+ *
+ * Note: Some deployed Radar builds (e.g. 0x5ed8…) have NO killAgent in bytecode.
+ * Use supportsKillAgent() and soft-close (withdraw + pause) on those.
  */
 
 import {
@@ -23,6 +26,35 @@ import {
   radarAgentAbi,
   ritualChain,
 } from "@/lib/ritual";
+
+/** killAgent(uint256) selector */
+const KILL_AGENT_SELECTOR = "4b9f3075";
+
+let _killSupportCache: { address: string; ok: boolean } | null = null;
+
+/**
+ * True if the configured Radar bytecode includes killAgent(uint256).
+ * Older mainnet/testnet deploys only had withdraw — kill always reverts there.
+ */
+export async function supportsKillAgent(): Promise<boolean> {
+  if (!RADAR_CONTRACT) return false;
+  const addr = RADAR_CONTRACT.toLowerCase();
+  if (_killSupportCache?.address === addr) return _killSupportCache.ok;
+  try {
+    const client = getRitualReadClient(true);
+    const code = await client.getBytecode({
+      address: RADAR_CONTRACT as Address,
+    });
+    const ok = Boolean(
+      code && code.toLowerCase().includes(KILL_AGENT_SELECTOR)
+    );
+    _killSupportCache = { address: addr, ok };
+    return ok;
+  } catch {
+    _killSupportCache = { address: addr, ok: false };
+    return false;
+  }
+}
 
 const ERROR_HINTS: Record<string, string> = {
   NotOwner:

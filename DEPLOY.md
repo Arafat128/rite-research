@@ -14,7 +14,7 @@ Copy from `.env.example` into Vercel Project → Settings → Environment Variab
 | `NEXT_PUBLIC_EXPLORER_URL` | Public | `https://explorer.ritualfoundation.org` |
 | `NEXT_PUBLIC_RESEARCH_FEE` | Public | `0.005` |
 | `NEXT_PUBLIC_RESEARCH_CONTRACT` | Public | Live: `0xd3469a23b2a08b237bc6c0522845eb1b508e5352` |
-| `NEXT_PUBLIC_RADAR_CONTRACT` | Public | Live: `0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30` |
+| `NEXT_PUBLIC_RADAR_CONTRACT` | Public | Prefer kill-capable: `0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f` (older `0x5ed8…` has **no** `killAgent`) |
 | `NEXT_PUBLIC_BOUNTY_CONTRACT` | Public | Live: `0xbc4bc83298950cbda52837cd806d41ad7c3c36bf` |
 | `NEXT_PUBLIC_FEE_RECIPIENT` | Public | Your treasury wallet (50% of fees) |
 | `FEE_RECIPIENT_ADDRESS` | Server/deploy | Same as treasury |
@@ -36,11 +36,12 @@ Do **not** set `PRIVATE_KEY` on Vercel.
 
 | | |
 |--|--|
-| Address | `0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30` |
-| Persistent deploy fee | **0.1 RITUAL** (never dies) · 50/50 split |
+| Address (with `killAgent`) | `0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f` |
+| Older deploy (no `killAgent`) | `0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30` — UI soft-closes via withdraw+pause |
+| Persistent deploy fee | **0.1 RITUAL** (never dies by tick count) · 50/50 split |
 | Sovereign deploy fee | **0.01 RITUAL** (dies after **3** ticks) · 50/50 split |
 | Run fee | 0.005 RITUAL per tick · 50/50 split |
-| Explorer | https://explorer.ritualfoundation.org/address/0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30 |
+| Explorer | https://explorer.ritualfoundation.org/address/0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f |
 
 ### BountyPool (auto bounty — one winner)
 

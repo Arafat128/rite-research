@@ -56,8 +56,10 @@ import {
 } from "@/lib/agentSchedule";
 import {
   getAppAgent,
+  isAgentClosed,
   listAppAgents,
   listTicks,
+  markAgentClosed,
   registerAppAgent,
   saveTick,
   type AppAgentRecord,
@@ -78,6 +80,7 @@ import {
   assertWalletCanPayGas,
   decodeRadarRevert,
   prepareRadarWrite,
+  supportsKillAgent,
 } from "@/lib/radarWrite";
 
 /** Load chain/keeper ticks and merge with this browser's localStorage history. */
@@ -203,6 +206,14 @@ export function AgentTab() {
       { status: number; kind: number; name: string; balance: string }
     >
   >({});
+  /** False on older Radar deploys without killAgent in bytecode */
+  const [canKillOnChain, setCanKillOnChain] = useState<boolean | null>(null);
+
+  /** On-chain Dead OR soft-closed (withdraw+pause on contracts without killAgent) */
+  const agentFinished =
+    agent != null &&
+    selectedId != null &&
+    (agent.status === 4 || isAgentClosed(selectedId.toString()));
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
   const dataDef = DATA_KINDS.find((k) => k.id === dataKind)!;
@@ -304,6 +315,13 @@ export function AgentTab() {
       }
       setAgentIds(ids);
 
+      // Does this Radar bytecode include killAgent? (older deploys do not)
+      try {
+        setCanKillOnChain(await supportsKillAgent());
+      } catch {
+        setCanKillOnChain(false);
+      }
+
       // Load meta for chips + prefer LIVE agents for default selection
       const meta: Record<
         string,
@@ -312,8 +330,10 @@ export function AgentTab() {
       for (const id of ids) {
         const row = await readAgentOnChain(id);
         if (row) {
+          const finished =
+            row.status === 4 || isAgentClosed(id.toString());
           meta[id.toString()] = {
-            status: row.status,
+            status: finished ? 4 : row.status,
             kind: row.kind,
             name: row.name,
             balance: row.balance.toString(),
@@ -716,7 +736,6 @@ export function AgentTab() {
       await ensureWallet();
       if (!address) throw new Error("Wallet not ready");
 
-      // Always re-read before kill — UI can be stale after a successful kill
       const live = await readAgentOnChain(selectedId);
       if (!live) {
         throw new Error(
@@ -730,42 +749,103 @@ export function AgentTab() {
           "Connected wallet is not the owner of this agent. Switch account in MetaMask."
         );
       }
-      if (live.status === 4) {
+      if (live.status === 4 || isAgentClosed(selectedId.toString())) {
         throw new Error(
           live.balance > BigInt(0)
-            ? `Agent is already dead. Use “Withdraw remaining balance” to pull ${formatEther(live.balance)} RIT.`
-            : "Agent is already dead and balance is 0 — kill already completed and refunded your RIT to this wallet. Deploy a new agent to continue."
+            ? `Agent is already closed. Use “Withdraw remaining” to pull ${formatEther(live.balance)} RIT.`
+            : "Agent is already closed and balance is 0. Deploy a new agent to continue."
         );
       }
 
       const refundLabel = formatEther(live.balance);
+      const hasKill = await supportsKillAgent();
+      setCanKillOnChain(hasKill);
+
+      if (hasKill) {
+        const ok = window.confirm(
+          `Kill agent #${selectedId.toString()} (${live.name})?\n\n` +
+            `Permanent on-chain DEAD. Full balance (${refundLabel} RIT) is refunded to your wallet.\n` +
+            `Gas is paid from your wallet (not the agent).`
+        );
+        if (!ok) return;
+
+        setMsg(`Confirm killAgent #${selectedId} (refund ${refundLabel} RIT)…`);
+        const hash = await radarWrite({
+          functionName: "killAgent",
+          args: [selectedId],
+          gasFloor: BigInt(150_000),
+        });
+        const receipt = await waitTx(hash);
+        if (receipt.status !== "success") {
+          throw new Error("Kill transaction reverted on-chain");
+        }
+        markAgentClosed(selectedId.toString());
+        setAgent({ ...live, status: 4, balance: BigInt(0) });
+        setAgentMeta((prev) => ({
+          ...prev,
+          [selectedId.toString()]: {
+            status: 4,
+            kind: live.kind,
+            name: live.name,
+            balance: "0",
+          },
+        }));
+        setMsg(
+          `Agent #${selectedId} killed · ${refundLabel} RIT refunded · compact DEAD card`
+        );
+        setErr("");
+        await refresh();
+        return;
+      }
+
+      // --- Soft close: this Radar bytecode has NO killAgent (e.g. 0x5ed8…) ---
       const ok = window.confirm(
-        `Kill agent #${selectedId.toString()} (${live.name})?\n\n` +
-          `This is permanent. Full balance (${refundLabel} RIT) is refunded to your wallet.\n` +
-          `No more ticks or activation.\n\n` +
-          `Note: gas is paid from your wallet balance (not the agent).`
+        `Close agent #${selectedId.toString()} (${live.name})?\n\n` +
+          `This Radar contract does not include killAgent (older deploy).\n` +
+          `We will:\n` +
+          `  1) Withdraw full balance (${refundLabel} RIT) to your wallet\n` +
+          `  2) Pause the agent so it cannot tick\n\n` +
+          `You may confirm 1–2 MetaMask popups. Gas from wallet.`
       );
       if (!ok) return;
 
-      setMsg(
-        `Confirm killAgent #${selectedId} (refund ${refundLabel} RIT)…`
-      );
-      const hash = await radarWrite({
-        functionName: "killAgent",
-        args: [selectedId],
-        gasFloor: BigInt(150_000),
-      });
-      const receipt = await waitTx(hash);
-      if (receipt.status !== "success") {
-        throw new Error("Kill transaction reverted on-chain");
+      let withdrew = BigInt(0);
+      if (live.balance > BigInt(0)) {
+        setMsg(
+          `Confirm withdraw ${refundLabel} RIT from agent #${selectedId}…`
+        );
+        const wHash = await radarWrite({
+          functionName: "withdraw",
+          args: [selectedId, live.balance],
+          gasFloor: BigInt(120_000),
+        });
+        const wRec = await waitTx(wHash);
+        if (wRec.status !== "success") {
+          throw new Error("Withdraw during close failed");
+        }
+        withdrew = live.balance;
       }
-      // Collapse to compact DEAD card immediately (no full control panel)
-      const deadView = {
-        ...live,
+
+      // Pause if still Active (status 1)
+      const after = await readAgentOnChain(selectedId);
+      if (after && after.status === 1) {
+        setMsg(`Confirm pause agent #${selectedId}…`);
+        const pHash = await radarWrite({
+          functionName: "setPaused",
+          args: [selectedId],
+        });
+        const pRec = await waitTx(pHash);
+        if (pRec.status !== "success") {
+          throw new Error("Pause during close failed");
+        }
+      }
+
+      markAgentClosed(selectedId.toString());
+      setAgent({
+        ...(after || live),
         status: 4,
         balance: BigInt(0),
-      };
-      setAgent(deadView);
+      });
       setAgentMeta((prev) => ({
         ...prev,
         [selectedId.toString()]: {
@@ -776,13 +856,30 @@ export function AgentTab() {
         },
       }));
       setMsg(
-        `Agent #${selectedId} killed · ${refundLabel} RIT refunded · showing compact DEAD card`
+        `Agent #${selectedId} closed` +
+          (withdrew > BigInt(0)
+            ? ` · withdrew ${formatEther(withdrew)} RIT`
+            : "") +
+          ` · paused (this contract has no killAgent)`
       );
       setErr("");
       await refresh();
     } catch (e: unknown) {
       const msg = errMsg(e, "killAgent");
-      setErr(msg);
+      // Friendly rewrite of generic MetaMask kill revert on old bytecode
+      const lower = msg.toLowerCase();
+      if (
+        lower.includes("killagent") ||
+        lower.includes("execution reverted") ||
+        lower.includes("would revert")
+      ) {
+        setErr(
+          "Close failed. This Radar may lack killAgent — click Close again to use withdraw+pause, or Refresh. " +
+            msg
+        );
+      } else {
+        setErr(msg);
+      }
       setMsg("");
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
@@ -791,7 +888,10 @@ export function AgentTab() {
           setAgentMeta((prev) => ({
             ...prev,
             [selectedId.toString()]: {
-              status: a.status,
+              status:
+                a.status === 4 || isAgentClosed(selectedId.toString())
+                  ? 4
+                  : a.status,
               kind: a.kind,
               name: a.name,
               balance: a.balance.toString(),
@@ -1225,7 +1325,8 @@ export function AgentTab() {
                 const key = id.toString();
                 const reg = getAppAgent(key);
                 const meta = agentMeta[key];
-                const dead = meta?.status === 4;
+                const dead =
+                  meta?.status === 4 || isAgentClosed(key);
                 const selected = selectedId === id;
                 return (
                   <button
@@ -1276,8 +1377,8 @@ export function AgentTab() {
             </div>
           )}
 
-          {/* DEAD agent — compact card only (no schedule/fund/kill clutter) */}
-          {agent && selectedId != null && agent.status === 4 && (
+          {/* Finished agent — compact card only (no schedule/fund/kill clutter) */}
+          {agent && selectedId != null && agentFinished && (
             <div className="glass rounded-2xl border border-zinc-500/30 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -1287,24 +1388,25 @@ export function AgentTab() {
                   <div className="mt-0.5 text-xs text-white/40">
                     #{selectedId.toString()} ·{" "}
                     {AGENT_KIND_LABELS[agent.kind] || "Agent"}
-                    {agent.runCount > BigInt(0)
-                      ? ` · finished ${agent.runCount.toString()} tick(s)`
-                      : " · killed"}
+                    {agent.status === 4
+                      ? agent.runCount > BigInt(0)
+                        ? ` · finished ${agent.runCount.toString()} tick(s)`
+                        : " · killed"
+                      : " · closed (withdraw + pause)"}
                   </div>
                 </div>
                 <span
                   className={`rounded-full px-3 py-1 text-xs font-bold ${statusColor(4)}`}
                 >
-                  DEAD
+                  {agent.status === 4 ? "DEAD" : "CLOSED"}
                 </span>
               </div>
 
               <p className="mt-3 text-[12px] leading-relaxed text-white/50">
-                This agent is finished. Controls (schedule, wake, kill) are
-                hidden.{" "}
+                This agent is finished. Full controls are hidden.{" "}
                 {agent.balance > BigInt(0)
                   ? "Withdraw residual RIT below, then deploy a new agent if you want to keep tracking."
-                  : "Balance is 0 (already refunded). Deploy a new agent to continue."}
+                  : "Balance is 0. Deploy a new agent to continue."}
               </p>
 
               {agent.balance > BigInt(0) ? (
@@ -1370,7 +1472,7 @@ export function AgentTab() {
           )}
 
           {/* LIVE / active agent — full controls */}
-          {agent && selectedId != null && agent.status !== 4 && (
+          {agent && selectedId != null && !agentFinished && (
             <div className="glass rounded-2xl p-5">
               <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -1625,12 +1727,14 @@ export function AgentTab() {
 
                   <div className="mt-4 rounded-xl border border-red-400/30 bg-red-950/30 p-3">
                     <div className="mb-1 text-xs font-semibold text-red-300">
-                      Kill agent
+                      {canKillOnChain === false
+                        ? "Close agent"
+                        : "Kill agent"}
                     </div>
                     <p className="mb-2 text-[11px] text-white/45">
-                      Permanent stop (Persistent or Sovereign). Remaining
-                      balance is refunded to your wallet. Panel collapses to a
-                      small DEAD card after kill.
+                      {canKillOnChain === false
+                        ? "This Radar contract has no killAgent function. Close withdraws all balance and pauses the agent (1–2 wallet confirms)."
+                        : "Permanent on-chain stop. Remaining balance is refunded. Panel collapses to a small DEAD card after."}
                     </p>
                     <button
                       type="button"
@@ -1638,14 +1742,18 @@ export function AgentTab() {
                       onClick={() => void killSelected()}
                       className="w-full rounded-xl border border-red-400/50 bg-red-500/20 py-2.5 text-sm font-semibold text-red-200 hover:bg-red-500/30"
                     >
-                      Kill agent · refund balance
+                      {writing
+                        ? "Confirm in wallet…"
+                        : canKillOnChain === false
+                          ? "Close agent · withdraw & pause"
+                          : "Kill agent · refund balance"}
                     </button>
                   </div>
             </div>
           )}
 
           {/* Only show after runTick is confirmed — live agents only */}
-          {ticking && agent && agent.status !== 4 && (
+          {ticking && agent && !agentFinished && (
             <div className="glass rounded-2xl p-6 text-center">
               <p className="text-sm font-semibold text-[#c8ff4a]">
                 Waiting for runTick confirmation…
@@ -1659,7 +1767,7 @@ export function AgentTab() {
 
           {!ticking &&
             agent &&
-            agent.status !== 4 &&
+            !agentFinished &&
             (lastSnapshot ||
               (ticks[0]?.snapshot &&
                 (ticks[0].snapshot.rows?.length > 0 ||
@@ -1671,7 +1779,11 @@ export function AgentTab() {
             />
           )}
 
-          {!ticking && ticks.length === 0 && agent && agent.status === 1 && (
+          {!ticking &&
+            ticks.length === 0 &&
+            agent &&
+            !agentFinished &&
+            agent.status === 1 && (
             <div className="glass rounded-2xl p-5 text-sm text-white/55">
               <h3 className="mb-2 text-sm font-semibold text-[#c8ff4a]">
                 No ticks yet
@@ -1690,7 +1802,7 @@ export function AgentTab() {
             </div>
           )}
 
-          {ticks.length > 0 && agent && agent.status !== 4 && (
+          {ticks.length > 0 && agent && !agentFinished && (
             <div className="glass rounded-2xl p-5">
               <h3 className="mb-3 text-sm font-semibold text-[#c8ff4a]">
                 Tick results

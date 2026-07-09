@@ -109,3 +109,24 @@ export function saveTick(rec: TickRecord) {
   all.unshift(rec);
   writeJson(TICK_KEY, all.slice(0, 40));
 }
+
+/** Soft-closed agents on Radar deployments that lack killAgent */
+const CLOSED_KEY = "rite_closed_agents_v1";
+
+export function isAgentClosed(agentId: string): boolean {
+  const all = readJson<string[]>(CLOSED_KEY, []);
+  return all.includes(agentId);
+}
+
+export function markAgentClosed(agentId: string) {
+  const all = readJson<string[]>(CLOSED_KEY, []);
+  if (!all.includes(agentId)) {
+    all.push(agentId);
+    writeJson(CLOSED_KEY, all);
+  }
+}
+
+export function unmarkAgentClosed(agentId: string) {
+  const all = readJson<string[]>(CLOSED_KEY, []).filter((id) => id !== agentId);
+  writeJson(CLOSED_KEY, all);
+}
