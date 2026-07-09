@@ -460,9 +460,11 @@ export function AgentTab() {
     try {
       setErr("");
       setTicking(true);
+      // Hide previous tick panel while this wake is pending confirm
+      setLastSnapshot(null);
       await ensureWallet();
 
-      setMsg(`Waking · Surf Data API · ${decoded.kind}…`);
+      setMsg(`Fetching ${decoded.kind} off-chain (not shown until tick is confirmed)…`);
       const res = await fetch("/api/agent/data", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -480,8 +482,8 @@ export function AgentTab() {
         throw new Error(data.error || "Data API fetch failed");
       }
 
+      // Hold snapshot in memory only — never render until runTick succeeds
       const snapshot = data.snapshot;
-      setLastSnapshot(snapshot);
 
       const digestPayload = JSON.stringify({
         kind: snapshot.kind,
@@ -493,7 +495,9 @@ export function AgentTab() {
       });
       const digest = keccak256(stringToBytes(digestPayload));
 
-      setMsg("Data ready · confirm runTick to seal on-chain…");
+      setMsg(
+        "Confirm runTick in wallet to charge fee and unlock data. Rejecting cancels this wake — no data shown."
+      );
       const hash = await writeContractAsync({
         address: RADAR_CONTRACT,
         abi: radarAgentAbi,
@@ -501,8 +505,12 @@ export function AgentTab() {
         args: [selectedId, digest],
         chainId: ritualChain.id,
       });
-      await waitTx(hash);
+      const receipt = await waitTx(hash);
+      if (receipt.status !== "success") {
+        throw new Error("runTick transaction reverted");
+      }
 
+      // ONLY after on-chain confirm: persist + show
       const newCount = agent.runCount + BigInt(1);
       const rec: TickRecord = {
         agentId: selectedId.toString(),
@@ -516,7 +524,6 @@ export function AgentTab() {
       setTicks(listTicks(selectedId.toString()));
       setLastSnapshot(snapshot);
 
-      // Optimistic local status so a flaky RPC refresh can't hide success
       const died =
         agent.kind === AGENT_KIND.Sovereign &&
         agent.maxRuns > BigInt(0) &&
@@ -542,10 +549,14 @@ export function AgentTab() {
           : `Tick #${newCount} sealed · ${snapshot.summary.slice(0, 72)} · fee ${feeLabel} RIT`
       );
 
-      // Background soft refresh — failures must not surface as user errors
       void refresh({ soft: true });
     } catch (e: unknown) {
-      setErr(errMsg(e));
+      // Drop any pending data — user cancelled or tx failed
+      setLastSnapshot(null);
+      setErr(
+        errMsg(e) +
+          " — Data is only shown after you confirm runTick. Try Wake again and approve the transaction."
+      );
       setMsg("");
     } finally {
       setTicking(false);
@@ -969,15 +980,35 @@ export function AgentTab() {
                       onClick={runDataTick}
                       className="btn-primary rounded-xl py-2.5 text-sm"
                     >
-                      {ticking ? "Waking…" : "Wake · pull Data API"}
+                      {ticking ? "Confirm tick in wallet…" : "Wake · pull Data API"}
                     </button>
                   </div>
+                  {ticking && (
+                    <p className="mt-3 text-center text-[11px] text-amber-200/80">
+                      Data is prepared off-chain but <b>not shown</b> until you
+                      approve <code className="text-[#c8ff4a]">runTick</code> in
+                      your wallet. Reject = no new data, no fee.
+                    </p>
+                  )}
                 </>
               )}
             </div>
           )}
 
-          {(lastSnapshot || ticks[0]?.snapshot) && (
+          {/* Only show after runTick is confirmed on-chain */}
+          {ticking && (
+            <div className="glass rounded-2xl p-6 text-center">
+              <p className="text-sm font-semibold text-[#c8ff4a]">
+                Waiting for runTick confirmation…
+              </p>
+              <p className="mt-2 text-xs text-white/50">
+                Approve the transaction to unlock this wake&apos;s data. Closing
+                or rejecting the wallet keeps previous results only.
+              </p>
+            </div>
+          )}
+
+          {!ticking && (lastSnapshot || ticks[0]?.snapshot) && (
             <DataSnapshotCard
               snapshot={lastSnapshot || ticks[0].snapshot}
               title="Latest tick data"
