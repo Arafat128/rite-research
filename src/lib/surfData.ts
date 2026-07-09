@@ -7,6 +7,8 @@
  * Agents wake on schedule and pull ONE locked data kind per agent.
  */
 
+import { resolveSurfBaseUrl, sanitizeDataTarget } from "@/lib/security";
+
 export type DataKindId =
   | "market_price"
   | "fear_greed"
@@ -89,10 +91,8 @@ export function getDataKind(id: string): DataKindDef | undefined {
   return DATA_KINDS.find((k) => k.id === id);
 }
 
-const DEFAULT_BASE = "https://api.asksurf.ai/gateway/v1";
-
 function baseUrl() {
-  return (process.env.SURF_API_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
+  return resolveSurfBaseUrl(process.env.SURF_API_BASE_URL);
 }
 
 function apiKey() {
@@ -254,12 +254,14 @@ function summarizeNews(json: Record<string, unknown>): Omit<SurfDataSnapshot, "k
   const data = Array.isArray(json.data) ? json.data : [];
   const items = data.map((row) => {
     const r = row as Record<string, unknown>;
-    const url = String(r.url ?? r.link ?? r.article_url ?? "").trim();
+    const urlRaw = String(r.url ?? r.link ?? r.article_url ?? "").trim();
+    // Only http(s) — validated again on render
+    const url = /^https?:\/\//i.test(urlRaw) ? urlRaw.slice(0, 2048) : "";
     return {
-      title: String(r.title ?? "—"),
-      source: String(r.source ?? "—"),
-      project: String(r.project_name ?? r.project ?? "—"),
-      url: url && /^https?:\/\//i.test(url) ? url : "",
+      title: String(r.title ?? "—").slice(0, 500),
+      source: String(r.source ?? "—").slice(0, 64),
+      project: String(r.project_name ?? r.project ?? "—").slice(0, 64),
+      url,
       published: r.published_at ?? r.timestamp,
       summary: String(r.summary ?? "").slice(0, 160),
     };
@@ -269,10 +271,7 @@ function summarizeNews(json: Record<string, unknown>): Omit<SurfDataSnapshot, "k
     Time: fmtTs(n.published),
     Source: n.source,
     Project: n.project,
-    // Full title as clickable link (open article)
-    Headline: n.url
-      ? { text: n.title, href: n.url }
-      : n.title,
+    Headline: n.url ? { text: n.title, href: n.url } : n.title,
   }));
 
   return {
@@ -390,18 +389,37 @@ export async function fetchSurfData(
   const kind = getDataKind(kindId);
   if (!kind) throw new Error(`Unknown data kind: ${kindId}`);
 
-  const t = (target || kind.defaultTarget).trim() || kind.defaultTarget;
+  const t =
+    sanitizeDataTarget(target || kind.defaultTarget, 48) || kind.defaultTarget;
   const path = kind.path(t);
   const endpoint = `${baseUrl()}${path}`;
+  // Defense: never call non-Surf hosts even if path is wrong
+  if (!endpoint.startsWith(baseUrl())) {
+    throw new Error("Invalid data endpoint");
+  }
 
-  const res = await fetch(endpoint, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${apiKey()}`,
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45_000);
+
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey()}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error("Surf Data API timed out");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 
   const text = await res.text();
   let json: Record<string, unknown>;
@@ -461,7 +479,8 @@ export async function fetchSurfData(
     summary: shaped.summary,
     rows: shaped.rows,
     highlights: shaped.highlights,
-    raw: json,
+    // raw omitted from client-facing payloads by API layer
+    raw: undefined,
   };
 }
 

@@ -12,10 +12,16 @@ import {
 } from "viem";
 import { ritualChain, researchDeskAbi, RESEARCH_CONTRACT } from "@/lib/ritual";
 import { runSurfResearch } from "@/lib/surf";
+import {
+  clampPrompt,
+  clientIp,
+  PROMPT_MIN,
+  publicErrorMessage,
+  rateLimit,
+} from "@/lib/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-/** Vercel Hobby allows up to 300s with fluid compute */
 export const maxDuration = 300;
 
 const publicClient = createPublicClient({
@@ -43,9 +49,10 @@ type RecordTuple = {
   settled: boolean;
 };
 
-/** Client already waits for confirmation — only poll briefly if receipt not yet visible. */
 async function getPaymentReceipt(txHash: Hex) {
-  const existing = await publicClient.getTransactionReceipt({ hash: txHash }).catch(() => null);
+  const existing = await publicClient
+    .getTransactionReceipt({ hash: txHash })
+    .catch(() => null);
   if (existing) return existing;
 
   return publicClient.waitForTransactionReceipt({
@@ -59,21 +66,48 @@ async function getPaymentReceipt(txHash: Hex) {
 /**
  * POST /api/research
  * Path A: { prompt, researcher, txHash }
- * Path B: { prompt, researcher, researchId } — claim after failed Surf
+ * Path B: { prompt, researcher, researchId }
  */
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as Body;
-    const prompt = (body.prompt || "").trim();
+    const ip = clientIp(req);
+    const rl = rateLimit(`research:${ip}`, 12, 60_000);
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many research requests. Try again shortly." },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rl.retryAfterSec) },
+        }
+      );
+    }
+
+    // Bound body size (abuse)
+    const cl = req.headers.get("content-length");
+    if (cl && Number(cl) > 64_000) {
+      return NextResponse.json({ error: "Request too large" }, { status: 413 });
+    }
+
+    let body: Body;
+    try {
+      body = (await req.json()) as Body;
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const prompt = clampPrompt(body.prompt || "");
     const researcher = body.researcher;
     const txHash = body.txHash;
     const researchIdRaw = body.researchId;
 
-    if (!prompt || prompt.length < 3) {
+    if (!prompt || prompt.length < PROMPT_MIN) {
       return NextResponse.json({ error: "Prompt too short" }, { status: 400 });
     }
     if (!researcher || !isAddress(researcher)) {
-      return NextResponse.json({ error: "Invalid researcher address" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid researcher address" },
+        { status: 400 }
+      );
     }
     if (!RESEARCH_CONTRACT) {
       return NextResponse.json(
@@ -92,9 +126,22 @@ export async function POST(req: NextRequest) {
     let researchId: string | null = null;
     let paymentTx: string | null = txHash || null;
 
-    // ---------- Path B: claim existing paid research id ----------
-    if (researchIdRaw !== undefined && researchIdRaw !== null && researchIdRaw !== "") {
-      const id = BigInt(researchIdRaw);
+    if (
+      researchIdRaw !== undefined &&
+      researchIdRaw !== null &&
+      researchIdRaw !== ""
+    ) {
+      let id: bigint;
+      try {
+        id = BigInt(researchIdRaw);
+        if (id <= BigInt(0)) throw new Error("bad id");
+      } catch {
+        return NextResponse.json(
+          { error: "Invalid research id" },
+          { status: 400 }
+        );
+      }
+
       let record: RecordTuple;
       try {
         record = (await publicClient.readContract({
@@ -105,7 +152,7 @@ export async function POST(req: NextRequest) {
         })) as RecordTuple;
       } catch {
         return NextResponse.json(
-          { error: `Research id #${researchIdRaw} not found on-chain` },
+          { error: `Research id #${id.toString()} not found on-chain` },
           { status: 404 }
         );
       }
@@ -126,9 +173,11 @@ export async function POST(req: NextRequest) {
         );
       }
       if (record.feePaid === BigInt(0)) {
-        return NextResponse.json({ error: "No fee recorded for this id" }, { status: 402 });
+        return NextResponse.json(
+          { error: "No fee recorded for this id" },
+          { status: 402 }
+        );
       }
-      // One report cycle per payment — no free re-fetch after seal
       if (record.settled) {
         return NextResponse.json(
           {
@@ -140,9 +189,7 @@ export async function POST(req: NextRequest) {
       }
 
       researchId = id.toString();
-    }
-    // ---------- Path A: verify new payment tx (fast) ----------
-    else if (txHash && isHex(txHash) && txHash.length === 66) {
+    } else if (txHash && isHex(txHash) && txHash.length === 66) {
       let receipt;
       try {
         receipt = await getPaymentReceipt(txHash);
@@ -157,7 +204,10 @@ export async function POST(req: NextRequest) {
       }
 
       if (receipt.status !== "success") {
-        return NextResponse.json({ error: "Payment transaction failed" }, { status: 402 });
+        return NextResponse.json(
+          { error: "Payment transaction failed" },
+          { status: 402 }
+        );
       }
       if (receipt.to?.toLowerCase() !== RESEARCH_CONTRACT.toLowerCase()) {
         return NextResponse.json(
@@ -170,7 +220,8 @@ export async function POST(req: NextRequest) {
       let eventPromptHash: string | null = null;
 
       for (const log of receipt.logs) {
-        if (log.address.toLowerCase() !== RESEARCH_CONTRACT.toLowerCase()) continue;
+        if (log.address.toLowerCase() !== RESEARCH_CONTRACT.toLowerCase())
+          continue;
         try {
           const decoded = decodeEventLog({
             abi: researchDeskAbi,
@@ -205,7 +256,10 @@ export async function POST(req: NextRequest) {
           { status: 403 }
         );
       }
-      if (eventPromptHash && eventPromptHash.toLowerCase() !== promptHash.toLowerCase()) {
+      if (
+        eventPromptHash &&
+        eventPromptHash.toLowerCase() !== promptHash.toLowerCase()
+      ) {
         return NextResponse.json(
           { error: "Prompt does not match on-chain promptHash" },
           { status: 400 }
@@ -222,9 +276,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ---------- Surf research ----------
     const result = await runSurfResearch(prompt);
     const resultHash = keccak256(stringToBytes(result.content));
+
+    const explorerBase = (
+      process.env.NEXT_PUBLIC_EXPLORER_URL ||
+      "https://explorer.ritualfoundation.org"
+    ).replace(/\/$/, "");
 
     return NextResponse.json({
       ok: true,
@@ -235,14 +293,11 @@ export async function POST(req: NextRequest) {
       report: result.content,
       paymentTx,
       claimed: Boolean(researchIdRaw),
-      explorerTx: paymentTx
-        ? `${process.env.NEXT_PUBLIC_EXPLORER_URL || "https://explorer.ritualfoundation.org"}/tx/${paymentTx}`
-        : null,
+      explorerTx: paymentTx ? `${explorerBase}/tx/${paymentTx}` : null,
     });
   } catch (e: unknown) {
     console.error("[api/research]", e);
-    const message = e instanceof Error ? e.message : "Research failed";
-    // Surface timeout-ish errors as 504 so the client can guide claim
+    const message = publicErrorMessage(e, "Research failed");
     const isTimeout = /timed out|timeout|504|AbortError/i.test(message);
     return NextResponse.json(
       { error: message },

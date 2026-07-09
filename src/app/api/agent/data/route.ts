@@ -5,19 +5,26 @@ import {
   getDataKind,
   type DataKindId,
 } from "@/lib/surfData";
+import {
+  clientIp,
+  publicErrorMessage,
+  rateLimit,
+  sanitizeDataTarget,
+} from "@/lib/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 /**
- * Surf DATA API proxy for persistent radar agents.
- * POST { kind, target } → structured snapshot (not Chat/Responses research).
+ * Surf DATA API proxy for radar agents.
+ * POST { kind, target } → structured snapshot (no raw upstream payload).
  */
 export async function GET() {
   return NextResponse.json({
     ok: true,
     product: "Surf Data API",
-    note: "Persistent agents pull one locked data kind per tick — not Chat/Responses.",
+    note: "Agents pull one locked data kind per tick — not Chat/Responses.",
     kinds: DATA_KINDS.map((k) => ({
       id: k.id,
       label: k.label,
@@ -30,10 +37,29 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as {
-      kind?: string;
-      target?: string;
-    };
+    const ip = clientIp(req);
+    const rl = rateLimit(`agent-data:${ip}`, 30, 60_000);
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many data requests. Try again shortly." },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rl.retryAfterSec) },
+        }
+      );
+    }
+
+    const cl = req.headers.get("content-length");
+    if (cl && Number(cl) > 16_000) {
+      return NextResponse.json({ error: "Request too large" }, { status: 413 });
+    }
+
+    let body: { kind?: string; target?: string };
+    try {
+      body = (await req.json()) as { kind?: string; target?: string };
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
 
     const kindId = (body.kind || "").trim() as DataKindId;
     if (!getDataKind(kindId)) {
@@ -45,17 +71,38 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const target = (body.target || "").trim();
+    if (!process.env.SURF_API_KEY) {
+      return NextResponse.json(
+        { error: "SURF_API_KEY not configured on server" },
+        { status: 500 }
+      );
+    }
+
+    const target = sanitizeDataTarget(body.target || "", 48);
     const snapshot = await fetchSurfData(kindId, target);
+
+    // Never send upstream raw payload to the browser
+    const safeSnapshot = {
+      kind: snapshot.kind,
+      kindLabel: snapshot.kindLabel,
+      target: snapshot.target,
+      fetchedAt: snapshot.fetchedAt,
+      endpoint: snapshot.endpoint,
+      summary: snapshot.summary,
+      rows: snapshot.rows,
+      highlights: snapshot.highlights,
+    };
 
     return NextResponse.json({
       ok: true,
       source: "surf-data-api",
-      snapshot,
+      snapshot: safeSnapshot,
     });
   } catch (e: unknown) {
     console.error("[api/agent/data]", e);
-    const message = e instanceof Error ? e.message : "Data fetch failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: publicErrorMessage(e, "Data fetch failed") },
+      { status: 500 }
+    );
   }
 }

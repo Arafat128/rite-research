@@ -44,6 +44,7 @@ import {
   type SnapshotCell,
   type SurfDataSnapshot,
 } from "@/lib/surfData";
+import { sanitizeHttpUrl } from "@/lib/safeUrl";
 import {
   getAppAgent,
   listAppAgents,
@@ -1114,7 +1115,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function SnapshotCellView({ cell, col }: { cell: SnapshotCell; col: string }) {
   const text = snapshotCellText(cell);
-  const href = snapshotCellHref(cell);
+  const href = sanitizeHttpUrl(snapshotCellHref(cell));
   const isHeadline = col === "Headline" || col === "Link" || col === "Title";
 
   if (href) {
@@ -1135,10 +1136,11 @@ function SnapshotCellView({ cell, col }: { cell: SnapshotCell; col: string }) {
   }
 
   // Autolink bare https URLs in plain cells
-  if (/^https?:\/\//i.test(text)) {
+  const bare = sanitizeHttpUrl(text);
+  if (bare) {
     return (
       <a
-        href={text}
+        href={bare}
         target="_blank"
         rel="noopener noreferrer"
         className="break-all font-medium text-[#b8f53a] underline decoration-[#b8f53a]/40 hover:text-[#d4ff6a]"

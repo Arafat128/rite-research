@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import type { ReactNode } from "react";
+import { sanitizeHttpUrl } from "@/lib/safeUrl";
 
 function isPipeRow(t: string): boolean {
   const s = t.trim();
@@ -244,20 +245,26 @@ const markdownComponents: Components = {
     <strong className="font-semibold text-[#f2ffe6]">{children}</strong>
   ),
   em: ({ children }) => <em className="italic text-[#cfe8c8]">{children}</em>,
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline break-words font-medium text-[#b8f53a] underline decoration-[#b8f53a]/45 underline-offset-[3px] hover:text-[#d4ff6a]"
-      title={href}
-    >
-      {children}
-      <span className="ml-0.5 text-[10px] opacity-60" aria-hidden>
-        ↗
-      </span>
-    </a>
-  ),
+  a: ({ href, children }) => {
+    const safe = sanitizeHttpUrl(href);
+    if (!safe) {
+      return <span className="text-[#d8e8d2]">{children}</span>;
+    }
+    return (
+      <a
+        href={safe}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline break-words font-medium text-[#b8f53a] underline decoration-[#b8f53a]/45 underline-offset-[3px] hover:text-[#d4ff6a]"
+        title={safe}
+      >
+        {children}
+        <span className="ml-0.5 text-[10px] opacity-60" aria-hidden>
+          ↗
+        </span>
+      </a>
+    );
+  },
   ul: ({ children }) => (
     <ul className="mb-4 list-disc space-y-2 pl-5 text-[14.5px] leading-[1.7] text-[#d8e8d2] marker:text-[#c8ff4a]/85">
       {children}

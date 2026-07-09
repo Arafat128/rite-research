@@ -5,25 +5,36 @@
  * Models: surf-1.5 | surf-1.5-instant | surf-1.5-thinking
  */
 
+import { resolveSurfBaseUrl } from "@/lib/security";
+
 export type SurfResearchResult = {
   content: string;
   model: string;
   raw?: unknown;
 };
 
-const DEFAULT_BASE = "https://api.asksurf.ai/gateway/v1";
 /** Instant is faster — better for Vercel serverless limits. Override with SURF_MODEL. */
 const DEFAULT_MODEL = "surf-1.5-instant";
 
 /** Keep under Vercel maxDuration with room for RPC verify */
-const SURF_FETCH_MS = Number(process.env.SURF_FETCH_TIMEOUT_MS || 240_000);
+const SURF_FETCH_MS = Math.min(
+  300_000,
+  Math.max(10_000, Number(process.env.SURF_FETCH_TIMEOUT_MS || 240_000) || 240_000)
+);
+
+const ALLOWED_MODELS = new Set([
+  "surf-1.5",
+  "surf-1.5-instant",
+  "surf-1.5-thinking",
+]);
 
 function baseUrl() {
-  return (process.env.SURF_API_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
+  return resolveSurfBaseUrl(process.env.SURF_API_BASE_URL);
 }
 
 function modelId() {
-  return process.env.SURF_MODEL || DEFAULT_MODEL;
+  const m = (process.env.SURF_MODEL || DEFAULT_MODEL).trim();
+  return ALLOWED_MODELS.has(m) ? m : DEFAULT_MODEL;
 }
 
 function apiKey() {
