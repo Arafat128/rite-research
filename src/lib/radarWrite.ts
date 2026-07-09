@@ -27,9 +27,10 @@ import {
 const ERROR_HINTS: Record<string, string> = {
   NotOwner:
     "Connected wallet is not the agent owner. Switch to the wallet that created this agent.",
-  AgentIsDead: "Agent is already dead.",
+  AgentIsDead:
+    "Agent is already dead on-chain. Kill only works once — any balance was refunded in the kill transaction. Deploy a new agent if you need another.",
   InsufficientBalance:
-    "Amount exceeds the agent’s on-chain balance (or balance is zero). Click Refresh and try again.",
+    "Nothing left to withdraw: agent on-chain balance is zero (already withdrawn or refunded on kill). Click Refresh.",
   UnknownAgent: "Agent not found on this Radar contract.",
   TransferFailed:
     "Contract could not send RITUAL to your wallet. Use a normal MetaMask account (EOA), not a smart-contract wallet without receive().",
@@ -39,6 +40,18 @@ const ERROR_HINTS: Record<string, string> = {
   InsufficientPayment: "Not enough RITUAL attached to cover the deploy fee.",
   BadName: "Invalid name or watchlist entry.",
   BadKind: "Invalid agent class.",
+};
+
+/** Known custom-error selectors (first 4 bytes) → name */
+const ERROR_SELECTORS: Record<string, string> = {
+  "0x5509c32c": "AgentIsDead",
+  "0xf4d678b8": "InsufficientBalance",
+  "0x30cd7471": "NotOwner",
+  "0x90b8ec18": "TransferFailed",
+  "0x1f2a2005": "ZeroAmount",
+  "0x0df2949d": "UnknownAgent",
+  "0x5c975bda": "BadStatus",
+  "0xb467aa13": "EmptyWatchlist",
 };
 
 function walkError(e: unknown): unknown[] {
@@ -61,43 +74,69 @@ function extractRevertData(e: unknown): Hex | undefined {
       data?: unknown;
       raw?: unknown;
       cause?: { data?: unknown };
+      details?: unknown;
+      metaMessages?: unknown;
+      message?: unknown;
+      shortMessage?: unknown;
     };
-    const candidates = [n.data, n.raw, n.cause?.data];
+    const candidates = [n.data, n.raw, n.cause?.data, n.details];
     for (const c of candidates) {
-      if (typeof c === "string" && c.startsWith("0x") && c.length >= 10) {
+      if (typeof c === "string" && /^0x[0-9a-fA-F]{8,}$/.test(c)) {
         return c as Hex;
       }
       if (c && typeof c === "object" && "data" in c) {
         const d = (c as { data?: unknown }).data;
-        if (typeof d === "string" && d.startsWith("0x") && d.length >= 10) {
+        if (typeof d === "string" && /^0x[0-9a-fA-F]{8,}$/.test(d)) {
           return d as Hex;
         }
       }
     }
+    // Sometimes only the 4-byte selector is embedded in a message string
+    const blob = `${n.message || ""} ${n.shortMessage || ""} ${n.details || ""}`;
+    const m = blob.match(/0x([0-9a-fA-F]{8})\b/);
+    if (m) return `0x${m[1]}` as Hex;
   }
   return undefined;
 }
 
+function hintForErrorName(name: string | undefined): string | null {
+  if (!name) return null;
+  if (ERROR_HINTS[name]) return ERROR_HINTS[name];
+  // viem sometimes puts "execution reverted" as the reason with no name
+  if (/execution reverted/i.test(name)) return null;
+  return `Contract reverted: ${name}`;
+}
+
 /** Map viem / MetaMask reverts into a short user-facing reason. */
-export function decodeRadarRevert(e: unknown): string {
+export function decodeRadarRevert(
+  e: unknown,
+  context?: "killAgent" | "withdraw" | "fundAgent" | "runTick" | string
+): string {
   for (const node of walkError(e)) {
     if (node instanceof BaseError) {
       const rev = node.walk((x) => x instanceof ContractFunctionRevertedError);
       if (rev instanceof ContractFunctionRevertedError) {
-        const name = rev.data?.errorName || rev.reason;
-        if (name && ERROR_HINTS[name]) return ERROR_HINTS[name];
-        if (name) return `Contract reverted: ${name}`;
-        if (rev.reason) return `Contract reverted: ${rev.reason}`;
+        const name = rev.data?.errorName;
+        const hinted = hintForErrorName(name);
+        if (hinted) return hinted;
+        // reason is often the useless string "execution reverted"
+        if (rev.reason && !/execution reverted/i.test(rev.reason)) {
+          const h2 = hintForErrorName(rev.reason);
+          if (h2) return h2;
+        }
       }
     }
   }
 
   const data = extractRevertData(e);
   if (data) {
+    const sel = data.slice(0, 10).toLowerCase();
+    const bySel = ERROR_SELECTORS[sel];
+    if (bySel && ERROR_HINTS[bySel]) return ERROR_HINTS[bySel];
     try {
       const decoded = decodeErrorResult({ abi: radarAgentAbi, data });
-      if (ERROR_HINTS[decoded.errorName]) return ERROR_HINTS[decoded.errorName];
-      return `Contract reverted: ${decoded.errorName}`;
+      const hinted = hintForErrorName(decoded.errorName);
+      if (hinted) return hinted;
     } catch {
       /* not a custom error */
     }
@@ -119,11 +158,29 @@ export function decodeRadarRevert(e: unknown): string {
     if (/gas|fee|estimate/i.test(raw) && /unavail|fail|intrinsic|underpriced/i.test(raw)) {
       return "MetaMask could not estimate gas on Ritual. Retry — the app now sets gas price explicitly. If it persists, switch network off/on Ritual Testnet (1979).";
     }
-    if (o.shortMessage) return o.shortMessage;
-    if (o.message) return o.message.slice(0, 220);
+    // Context-aware fallback when RPC only says "execution reverted"
+    if (/execution reverted/i.test(raw)) {
+      if (context === "killAgent") {
+        return ERROR_HINTS.AgentIsDead;
+      }
+      if (context === "withdraw") {
+        return ERROR_HINTS.InsufficientBalance;
+      }
+      return "Transaction would revert on-chain. Click Refresh — the agent may already be dead or have zero balance.";
+    }
+    if (o.shortMessage && !/execution reverted/i.test(o.shortMessage)) {
+      return o.shortMessage;
+    }
+    if (o.message && !/execution reverted/i.test(o.message)) {
+      return o.message.slice(0, 220);
+    }
   }
-  if (e instanceof Error) return e.message.slice(0, 220);
-  return String(e);
+  if (e instanceof Error && !/execution reverted/i.test(e.message)) {
+    return e.message.slice(0, 220);
+  }
+  if (context === "killAgent") return ERROR_HINTS.AgentIsDead;
+  if (context === "withdraw") return ERROR_HINTS.InsufficientBalance;
+  return "Transaction would revert. Click Refresh and check agent status/balance.";
 }
 
 export type RadarFeeOverrides = {
@@ -176,7 +233,7 @@ export async function prepareRadarWrite(opts: {
       chain: ritualChain,
     } as never);
   } catch (e) {
-    throw new Error(decodeRadarRevert(e));
+    throw new Error(decodeRadarRevert(e, opts.functionName));
   }
 
   let gas: bigint;
@@ -184,7 +241,7 @@ export async function prepareRadarWrite(opts: {
     gas = await client.estimateContractGas(base as never);
   } catch (e) {
     throw new Error(
-      decodeRadarRevert(e) ||
+      decodeRadarRevert(e, opts.functionName) ||
         "Gas estimation failed. Ensure you are on Ritual Testnet and own this agent."
     );
   }

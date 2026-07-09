@@ -134,14 +134,14 @@ function statusText(s: number) {
   return STATUS_LABELS[s] || "?";
 }
 
-function errMsg(e: unknown) {
+function errMsg(e: unknown, context?: string) {
   // Prefer decoded Radar reverts / gas hints over raw MetaMask noise
-  const decoded = decodeRadarRevert(e);
+  const decoded = decodeRadarRevert(e, context);
   if (decoded && decoded !== "undefined") return decoded;
+  if (e instanceof Error && e.message) return e.message;
   if (e && typeof e === "object" && "shortMessage" in e) {
     return String((e as { shortMessage?: string }).shortMessage);
   }
-  if (e instanceof Error) return e.message;
   return String(e);
 }
 
@@ -606,6 +606,9 @@ export function AgentTab() {
           "Could not read agent on-chain. Check Ritual RPC and try Refresh."
         );
       }
+      // Keep panel in sync so DEAD / 0 balance UI updates immediately
+      setAgent(live);
+
       if (live.owner.toLowerCase() !== address.toLowerCase()) {
         throw new Error(
           "Connected wallet is not the owner of this agent. Switch account in MetaMask."
@@ -613,7 +616,11 @@ export function AgentTab() {
       }
       const bal = live.balance;
       if (bal <= BigInt(0)) {
-        throw new Error("Agent has no balance to withdraw on-chain.");
+        throw new Error(
+          live.status === 4
+            ? "Nothing to withdraw — this agent is dead and its balance is already 0 (refunded when it was killed). Check your wallet history for the refund, then deploy a new agent if needed."
+            : "Agent on-chain balance is 0 — nothing to withdraw. Click Refresh."
+        );
       }
 
       let amount = amountWei;
@@ -648,46 +655,55 @@ export function AgentTab() {
       setWithdrawAmt("");
       await refresh();
     } catch (e: unknown) {
-      setErr(errMsg(e));
+      setErr(errMsg(e, "withdraw"));
       setMsg("");
+      // Re-sync panel after failed attempt (often agent already dead / empty)
+      if (selectedId != null) {
+        void readAgentOnChain(selectedId).then((a) => {
+          if (a) setAgent(a);
+        });
+      }
     }
   }
 
   async function killSelected() {
     if (selectedId == null || !agent) return;
-    if (agent.status === 4) {
-      setErr("Agent is already dead");
-      return;
-    }
-    const balLabel = formatEther(agent.balance);
-    const ok = window.confirm(
-      `Kill agent #${selectedId.toString()} (${agent.name})?\n\n` +
-        `This is permanent. Full balance (${balLabel} RIT) is refunded to your wallet.\n` +
-        `No more ticks or activation.\n\n` +
-        `Note: gas is paid from your wallet balance (not the agent).`
-    );
-    if (!ok) return;
     try {
       setErr("");
       await ensureWallet();
       if (!address) throw new Error("Wallet not ready");
 
+      // Always re-read before kill — UI can be stale after a successful kill
       const live = await readAgentOnChain(selectedId);
       if (!live) {
         throw new Error(
           "Could not read agent on-chain. Check Ritual RPC and try Refresh."
         );
       }
+      setAgent(live);
+
       if (live.owner.toLowerCase() !== address.toLowerCase()) {
         throw new Error(
           "Connected wallet is not the owner of this agent. Switch account in MetaMask."
         );
       }
       if (live.status === 4) {
-        throw new Error("Agent is already dead on-chain.");
+        throw new Error(
+          live.balance > BigInt(0)
+            ? `Agent is already dead. Use “Withdraw remaining balance” to pull ${formatEther(live.balance)} RIT.`
+            : "Agent is already dead and balance is 0 — kill already completed and refunded your RIT to this wallet. Deploy a new agent to continue."
+        );
       }
 
       const refundLabel = formatEther(live.balance);
+      const ok = window.confirm(
+        `Kill agent #${selectedId.toString()} (${live.name})?\n\n` +
+          `This is permanent. Full balance (${refundLabel} RIT) is refunded to your wallet.\n` +
+          `No more ticks or activation.\n\n` +
+          `Note: gas is paid from your wallet balance (not the agent).`
+      );
+      if (!ok) return;
+
       setMsg(
         `Confirm killAgent #${selectedId} (refund ${refundLabel} RIT)…`
       );
@@ -700,13 +716,24 @@ export function AgentTab() {
       if (receipt.status !== "success") {
         throw new Error("Kill transaction reverted on-chain");
       }
+      // Optimistically mark dead so kill/withdraw buttons hide immediately
+      setAgent({
+        ...live,
+        status: 4,
+        balance: BigInt(0),
+      });
       setMsg(
-        `Agent #${selectedId} killed · ${refundLabel} RIT refunded to your wallet`
+        `Agent #${selectedId} killed · ${refundLabel} RIT refunded to your wallet · tx ${hash.slice(0, 10)}…`
       );
       await refresh();
     } catch (e: unknown) {
-      setErr(errMsg(e));
+      setErr(errMsg(e, "killAgent"));
       setMsg("");
+      if (selectedId != null) {
+        void readAgentOnChain(selectedId).then((a) => {
+          if (a) setAgent(a);
+        });
+      }
     }
   }
 
@@ -1247,9 +1274,18 @@ export function AgentTab() {
 
               {agent.status === 4 && (
                 <div className="mb-4 rounded-xl border border-zinc-500/40 bg-zinc-900/50 p-3 text-sm text-zinc-200">
-                  This sovereign agent is <b>DEAD</b> after{" "}
-                  {agent.runCount.toString()} ticks. Deploy a new agent to
-                  continue tracking.
+                  <p>
+                    This agent is <b>DEAD</b>
+                    {agent.runCount > BigInt(0)
+                      ? ` after ${agent.runCount.toString()} tick(s)`
+                      : " (killed by owner)"}
+                    .
+                  </p>
+                  <p className="mt-1 text-[12px] text-white/55">
+                    {agent.balance > BigInt(0)
+                      ? `Remaining balance ${formatEther(agent.balance)} RIT can still be withdrawn below.`
+                      : "On-chain balance is 0 — any funds were already refunded to the owner wallet when the agent died/was killed. Kill and withdraw cannot run again. Deploy a new agent to continue."}
+                  </p>
                 </div>
               )}
 
@@ -1455,7 +1491,7 @@ export function AgentTab() {
                 <div className="mt-4 rounded-xl border border-amber-400/30 bg-black/25 p-3">
                   <p className="mb-2 text-[11px] text-amber-100/80">
                     Dead agent still holds {formatEther(agent.balance)} RIT —
-                    withdraw it.
+                    withdraw it (does not re-kill).
                   </p>
                   <button
                     type="button"
@@ -1465,6 +1501,11 @@ export function AgentTab() {
                   >
                     Withdraw remaining balance
                   </button>
+                </div>
+              )}
+              {agent.status === 4 && agent.balance <= BigInt(0) && (
+                <div className="mt-2 text-center text-[11px] text-white/40">
+                  No residual balance · deploy a new agent to start again
                 </div>
               )}
             </div>
