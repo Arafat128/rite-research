@@ -1,4 +1,12 @@
 {
   "framework": "nextjs",
-  "regions": ["iad1"]
+  "regions": ["iad1"],
+  "functions": {
+    "src/app/api/research/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/agent/data/route.ts": {
+      "maxDuration": 60
+    }
+  }
 }

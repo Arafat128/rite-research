@@ -14,21 +14,22 @@ import { ritualChain, researchDeskAbi, RESEARCH_CONTRACT } from "@/lib/ritual";
 import { runSurfResearch } from "@/lib/surf";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const dynamic = "force-dynamic";
+/** Vercel Hobby allows up to 300s with fluid compute */
+export const maxDuration = 300;
 
 const publicClient = createPublicClient({
   chain: ritualChain,
   transport: http(
-    process.env.NEXT_PUBLIC_RPC_URL || ritualChain.rpcUrls.default.http[0]
+    process.env.NEXT_PUBLIC_RPC_URL || ritualChain.rpcUrls.default.http[0],
+    { timeout: 20_000, retryCount: 2 }
   ),
 });
 
 type Body = {
   prompt: string;
   researcher: Address;
-  /** Payment tx from payForResearch (new pay path) */
   txHash?: Hex;
-  /** Existing on-chain research id — claim without paying again */
   researchId?: string | number;
 };
 
@@ -42,15 +43,23 @@ type RecordTuple = {
   settled: boolean;
 };
 
+/** Client already waits for confirmation — only poll briefly if receipt not yet visible. */
+async function getPaymentReceipt(txHash: Hex) {
+  const existing = await publicClient.getTransactionReceipt({ hash: txHash }).catch(() => null);
+  if (existing) return existing;
+
+  return publicClient.waitForTransactionReceipt({
+    hash: txHash,
+    confirmations: 1,
+    timeout: 25_000,
+    pollingInterval: 1_500,
+  });
+}
+
 /**
  * POST /api/research
- *
- * Path A (new pay): { prompt, researcher, txHash }
- *   → verify ResearchPaid on tx, then Surf
- *
- * Path B (claim paid credit): { prompt, researcher, researchId }
- *   → verify on-chain record owned by researcher + promptHash match + fee already paid
- *   → Surf without new payment (fixes failed Surf after successful pay)
+ * Path A: { prompt, researcher, txHash }
+ * Path B: { prompt, researcher, researchId } — claim after failed Surf
  */
 export async function POST(req: NextRequest) {
   try {
@@ -121,15 +130,21 @@ export async function POST(req: NextRequest) {
       }
 
       researchId = id.toString();
-      // already settled is OK to re-fetch report off-chain (user already paid)
     }
-    // ---------- Path A: verify new payment tx ----------
+    // ---------- Path A: verify new payment tx (fast) ----------
     else if (txHash && isHex(txHash) && txHash.length === 66) {
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: txHash,
-        confirmations: 1,
-        timeout: 120_000,
-      });
+      let receipt;
+      try {
+        receipt = await getPaymentReceipt(txHash);
+      } catch {
+        return NextResponse.json(
+          {
+            error:
+              "Payment tx not confirmed yet on Ritual RPC. Wait a few seconds, then use Claim free report with the same prompt (you already paid).",
+          },
+          { status: 408 }
+        );
+      }
 
       if (receipt.status !== "success") {
         return NextResponse.json({ error: "Payment transaction failed" }, { status: 402 });
@@ -197,7 +212,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ---------- Surf research (Responses API) ----------
+    // ---------- Surf research ----------
     const result = await runSurfResearch(prompt);
     const resultHash = keccak256(stringToBytes(result.content));
 
@@ -217,6 +232,11 @@ export async function POST(req: NextRequest) {
   } catch (e: unknown) {
     console.error("[api/research]", e);
     const message = e instanceof Error ? e.message : "Research failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // Surface timeout-ish errors as 504 so the client can guide claim
+    const isTimeout = /timed out|timeout|504|AbortError/i.test(message);
+    return NextResponse.json(
+      { error: message },
+      { status: isTimeout ? 504 : 500 }
+    );
   }
 }

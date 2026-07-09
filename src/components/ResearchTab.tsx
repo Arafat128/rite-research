@@ -281,9 +281,21 @@ export function ResearchTab() {
     try {
       data = await res.json();
     } catch {
+      if (res.status === 504 || res.status === 502 || res.status === 524) {
+        throw new Error(
+          `Research timed out (HTTP ${res.status}). Your fee is already on-chain — open Paid credits and use “Claim free report” with the same prompt.`
+        );
+      }
       throw new Error(`Research API HTTP ${res.status}`);
     }
-    if (!res.ok) throw new Error(data.error || `Research API failed (${res.status})`);
+    if (!res.ok) {
+      throw new Error(
+        data.error ||
+          (res.status === 504
+            ? "Research timed out. Use Claim free report — you already paid."
+            : `Research API failed (${res.status})`)
+      );
+    }
     return data;
   }
 

@@ -1,14 +1,8 @@
 /**
  * Surf 2.0 Responses API (server-side only).
  *
- * Chat completions was removed (HTTP 410). Use:
- *   POST {SURF_API_BASE_URL}/responses
- *
- * Base default: https://api.asksurf.ai/gateway/v1
- * Auth: Authorization: Bearer SURF_API_KEY
+ * POST {SURF_API_BASE_URL}/responses
  * Models: surf-1.5 | surf-1.5-instant | surf-1.5-thinking
- *
- * Docs: https://agents.asksurf.ai/docs · https://docs.asksurf.ai
  */
 
 export type SurfResearchResult = {
@@ -18,7 +12,11 @@ export type SurfResearchResult = {
 };
 
 const DEFAULT_BASE = "https://api.asksurf.ai/gateway/v1";
-const DEFAULT_MODEL = "surf-1.5";
+/** Instant is faster — better for Vercel serverless limits. Override with SURF_MODEL. */
+const DEFAULT_MODEL = "surf-1.5-instant";
+
+/** Keep under Vercel maxDuration with room for RPC verify */
+const SURF_FETCH_MS = Number(process.env.SURF_FETCH_TIMEOUT_MS || 240_000);
 
 function baseUrl() {
   return (process.env.SURF_API_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
@@ -35,7 +33,6 @@ function apiKey() {
 }
 
 function extractText(json: Record<string, unknown>): string | null {
-  // OpenAI Responses API common fields
   if (typeof json.output_text === "string" && json.output_text.trim()) {
     return json.output_text;
   }
@@ -46,7 +43,6 @@ function extractText(json: Record<string, unknown>): string | null {
     return json.content;
   }
 
-  // output: [{ type: "message", content: [{ type: "output_text", text: "..." }] }]
   const output = json.output;
   if (Array.isArray(output)) {
     const parts: string[] = [];
@@ -68,7 +64,6 @@ function extractText(json: Record<string, unknown>): string | null {
     if (parts.length) return parts.join("\n\n");
   }
 
-  // Legacy chat.completions shape (if proxy still returns it)
   const choices = json.choices as
     | Array<{ message?: { content?: string }; text?: string }>
     | undefined;
@@ -79,7 +74,7 @@ function extractText(json: Record<string, unknown>): string | null {
 }
 
 /**
- * Call Surf Responses API (required after chat/completions 410 removal).
+ * Call Surf Responses API with a hard timeout (prevents hanging until Vercel 504).
  */
 export async function runSurfResearch(prompt: string): Promise<SurfResearchResult> {
   const key = apiKey();
@@ -87,41 +82,67 @@ export async function runSurfResearch(prompt: string): Promise<SurfResearchResul
   const url = `${baseUrl()}/responses`;
 
   const system =
-    "You are a senior crypto research analyst powered by Surf. " +
-    "Write concise, structured project research using clean GitHub-Flavored Markdown. " +
-    "Rules: " +
-    "(1) Use ## and ### headings — never wrap the whole report in a code fence. " +
-    "(2) Use real GFM tables with a header row and a | --- | separator row. " +
-    "(3) Use **bold** for labels, numbered lists for catalysts, bullet lists for bullets. " +
-    "(4) Sections: Overview, Tokenomics, Catalysts, Risks (table: Risk | Severity | Why It Matters), Conclusion, Sources. " +
-    "(5) Be factual; flag uncertainty. Do not emit raw HTML.";
+    "Senior crypto research analyst. Clean GitHub-Flavored Markdown only. " +
+    "No code fences around the whole report. Use ## headings, **bold**, GFM tables " +
+    "(| col | with | --- | separator). Sections: Overview, Tokenomics, Catalysts, " +
+    "Risks (Risk | Severity | Why It Matters), Conclusion, Sources. Be concise and factual.";
 
-  // OpenAI Responses API body (string input + instructions is widely supported)
-  const body = {
+  // Keep body minimal — extra fields can 400 on some Surf gateways
+  const body: Record<string, unknown> = {
     model,
     instructions: system,
-    input: prompt,
+    input: prompt.slice(0, 4000),
     temperature: 0.3,
     stream: false,
   };
+  const maxTok = process.env.SURF_MAX_OUTPUT_TOKENS;
+  if (maxTok && Number(maxTok) > 0) {
+    body.max_output_tokens = Number(maxTok);
+  }
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SURF_FETCH_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(
+        `Surf research timed out after ${Math.round(SURF_FETCH_MS / 1000)}s. ` +
+          `Your fee is still on-chain — use Claim free report with the same prompt.`
+      );
+    }
+    throw new Error(
+      `Surf network error: ${e instanceof Error ? e.message : String(e)}`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 
   const text = await res.text();
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(text) as Record<string, unknown>;
   } catch {
+    // Gateway HTML 504/502 bodies
+    if (res.status === 504 || res.status === 502 || res.status === 524) {
+      throw new Error(
+        `Surf/gateway timed out (HTTP ${res.status}). Payment is safe — Claim free report with the same prompt.`
+      );
+    }
     throw new Error(
-      `Surf API non-JSON (${res.status}): ${text.slice(0, 280) || res.statusText}`
+      `Surf API non-JSON (${res.status}): ${text.slice(0, 200) || res.statusText}`
     );
   }
 
@@ -132,7 +153,7 @@ export async function runSurfResearch(prompt: string): Promise<SurfResearchResul
       (typeof errObj === "string" ? errObj : undefined) ||
       (typeof json.message === "string" ? json.message : undefined) ||
       (typeof json.detail === "string" ? json.detail : undefined) ||
-      text.slice(0, 280) ||
+      text.slice(0, 200) ||
       res.statusText;
     throw new Error(`Surf API ${res.status}: ${msg}`);
   }
