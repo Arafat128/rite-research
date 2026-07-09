@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Image from "next/image";
 
 export type ResearchLoadPhase = "paying" | "researching" | "settling";
 
@@ -31,7 +30,6 @@ const PHASE_META: Record<
   },
 };
 
-/** Timed lines while Surf works (researching only) */
 const RESEARCH_TICKS = [
   { afterMs: 0, text: "Fee confirmed · opening Surf research…" },
   { afterMs: 5_000, text: "Scanning markets & project signals…" },
@@ -60,32 +58,21 @@ export function ResearchLoading({ phase, status }: Props) {
     return line;
   }, [phase, elapsed, status, meta.hint]);
 
-  // Soft progress: phase base + time creep, caps under 95% until done
   const progress = useMemo(() => {
     if (phase === "paying") return Math.min(28, 8 + elapsed / 800);
     if (phase === "settling") return Math.min(92, 72 + elapsed / 400);
-    // researching: slow climb
     return Math.min(88, 30 + elapsed / 1200);
   }, [phase, elapsed]);
 
   const activeChip = Math.floor(elapsed / 2500) % meta.chips.length;
 
   return (
-    <div className="glass ritual-load mx-auto mt-8 w-full max-w-md overflow-hidden rounded-2xl p-6 sm:p-8">
-      <div className="relative mx-auto mb-5 flex h-36 w-36 items-center justify-center">
-        {/* glow rings */}
+    <div className="glass ritual-load relative z-[1] mx-auto mt-8 w-full max-w-md overflow-hidden rounded-2xl p-6 sm:p-8">
+      {/* Soft ring spinner — no logo image */}
+      <div className="relative mx-auto mb-5 flex h-20 w-20 items-center justify-center">
         <div className="ritual-ring ritual-ring-a" aria-hidden />
         <div className="ritual-ring ritual-ring-b" aria-hidden />
-        <div className="ritual-logo-wrap">
-          <Image
-            src="/ritual-logo.jpg"
-            alt="Ritual"
-            width={112}
-            height={112}
-            className="ritual-logo h-28 w-28 rounded-2xl object-contain"
-            priority
-          />
-        </div>
+        <div className="ritual-core-dot" aria-hidden />
       </div>
 
       <h3 className="text-center text-lg font-semibold tracking-tight text-[#c8ff4a]">
@@ -95,7 +82,6 @@ export function ResearchLoading({ phase, status }: Props) {
         {tickLine}
       </p>
 
-      {/* chips */}
       <div className="mt-4 flex flex-wrap justify-center gap-2">
         {meta.chips.map((chip, i) => (
           <span
@@ -111,7 +97,6 @@ export function ResearchLoading({ phase, status }: Props) {
         ))}
       </div>
 
-      {/* progress */}
       <div className="mt-5">
         <div className="mb-1.5 flex justify-between text-[10px] uppercase tracking-wide text-white/35">
           <span>

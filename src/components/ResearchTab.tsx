@@ -529,7 +529,11 @@ export function ResearchTab() {
   }
 
   return (
-    <section className="flex flex-col items-center">
+    <section className="ritual-tab-bg relative">
+      {/* Ritual knot — soft shadow watermark (not a floating logo) */}
+      <div className="ritual-watermark" aria-hidden />
+
+      <div className="relative z-[1] flex flex-col items-center">
       <h1 className="hero-title mb-4 text-center text-6xl font-semibold sm:text-8xl md:text-9xl">
         Rite
       </h1>
@@ -796,6 +800,7 @@ export function ResearchTab() {
       {report && phase !== "researching" && phase !== "settling" ? (
         <ResearchReport content={report} />
       ) : null}
+      </div>
     </section>
   );
 }
