@@ -73,6 +73,11 @@ import {
   readNextAgentId,
   type AgentView,
 } from "@/lib/radarRead";
+import {
+  assertWalletCanPayGas,
+  decodeRadarRevert,
+  prepareRadarWrite,
+} from "@/lib/radarWrite";
 
 /** Load chain/keeper ticks and merge with this browser's localStorage history. */
 async function loadMergedTicks(
@@ -130,6 +135,9 @@ function statusText(s: number) {
 }
 
 function errMsg(e: unknown) {
+  // Prefer decoded Radar reverts / gas hints over raw MetaMask noise
+  const decoded = decodeRadarRevert(e);
+  if (decoded && decoded !== "undefined") return decoded;
   if (e && typeof e === "object" && "shortMessage" in e) {
     return String((e as { shortMessage?: string }).shortMessage);
   }
@@ -408,6 +416,47 @@ export function AgentTab() {
     return client.waitForTransactionReceipt({ hash, confirmations: 1 });
   }
 
+  /**
+   * Write to Radar with simulate + explicit legacy gasPrice.
+   * Fixes MetaMask "gas unavailable" on Ritual for withdraw/kill refunds.
+   */
+  async function radarWrite(opts: {
+    functionName:
+      | "createAgent"
+      | "fundAgent"
+      | "withdraw"
+      | "killAgent"
+      | "setActive"
+      | "setPaused"
+      | "setWatchlist"
+      | "setWakeInterval"
+      | "runTick";
+    args?: readonly unknown[];
+    value?: bigint;
+    gasFloor?: bigint;
+  }) {
+    if (!address) throw new Error("Wallet not ready");
+    if (!RADAR_CONTRACT) throw new Error("Radar contract not configured");
+    const fees = await prepareRadarWrite({
+      account: address,
+      functionName: opts.functionName,
+      args: opts.args,
+      value: opts.value,
+      gasFloor: opts.gasFloor,
+    });
+    assertWalletCanPayGas(walletBal?.value, fees, opts.value ?? BigInt(0));
+    return writeContractAsync({
+      address: RADAR_CONTRACT,
+      abi: radarAgentAbi,
+      functionName: opts.functionName,
+      args: (opts.args ?? []) as never,
+      chainId: ritualChain.id,
+      gas: fees.gas,
+      gasPrice: fees.gasPrice,
+      ...(opts.value != null ? { value: opts.value } : {}),
+    } as never);
+  }
+
   async function createAgent() {
     try {
       setErr("");
@@ -434,13 +483,11 @@ export function AgentTab() {
       setMsg(
         `Confirm create · ${AGENT_KIND_LABELS[agentKind]} · deploy fee ${formatEther(deployFee)} RIT…`
       );
-      const hash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      const hash = await radarWrite({
         functionName: "createAgent",
         args: [name || `${def.short} Agent`, wake, agentKind],
         value,
-        chainId: ritualChain.id,
+        gasFloor: BigInt(250_000),
       });
       const receipt = await waitTx(hash);
       if (receipt.status !== "success") throw new Error("Create failed");
@@ -464,12 +511,9 @@ export function AgentTab() {
         throw new Error("Agent created but id not found in logs");
 
       setMsg("Locking data stream on-chain…");
-      const wlHash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      const wlHash = await radarWrite({
         functionName: "setWatchlist",
         args: [newId, trackCells],
-        chainId: ritualChain.id,
       });
       await waitTx(wlHash);
 
@@ -512,12 +556,9 @@ export function AgentTab() {
         unit: editSchedUnit,
       });
       setMsg(`Saving wake schedule ${formatInterval(blocks)}…`);
-      const hash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      const hash = await radarWrite({
         functionName: "setWakeInterval",
         args: [selectedId, blocks],
-        chainId: ritualChain.id,
       });
       await waitTx(hash);
       setMsg(`Schedule saved · ${formatInterval(blocks)}`);
@@ -537,13 +578,10 @@ export function AgentTab() {
       const value = parseEther(fundAmt || "0");
       if (value <= BigInt(0)) throw new Error("Enter fund amount > 0");
       setMsg("Confirm fundAgent in wallet…");
-      const hash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      const hash = await radarWrite({
         functionName: "fundAgent",
         args: [selectedId],
         value,
-        chainId: ritualChain.id,
       });
       await waitTx(hash);
       setMsg(`Funded +${fundAmt} RITUAL`);
@@ -559,8 +597,25 @@ export function AgentTab() {
     try {
       setErr("");
       await ensureWallet();
-      const bal = agent.balance;
-      if (bal <= BigInt(0)) throw new Error("Agent has no balance to withdraw");
+      if (!address) throw new Error("Wallet not ready");
+
+      // Fresh on-chain read — never trust stale UI balance for withdraw
+      const live = await readAgentOnChain(selectedId);
+      if (!live) {
+        throw new Error(
+          "Could not read agent on-chain. Check Ritual RPC and try Refresh."
+        );
+      }
+      if (live.owner.toLowerCase() !== address.toLowerCase()) {
+        throw new Error(
+          "Connected wallet is not the owner of this agent. Switch account in MetaMask."
+        );
+      }
+      const bal = live.balance;
+      if (bal <= BigInt(0)) {
+        throw new Error("Agent has no balance to withdraw on-chain.");
+      }
+
       let amount = amountWei;
       if (amount == null) {
         const raw = withdrawAmt.trim();
@@ -571,18 +626,24 @@ export function AgentTab() {
         }
       }
       if (amount <= BigInt(0)) throw new Error("Enter withdraw amount > 0");
-      if (amount > bal) throw new Error("Amount exceeds agent balance");
+      if (amount > bal) {
+        throw new Error(
+          `Amount exceeds on-chain balance (${formatEther(bal)} RIT). Use Withdraw all.`
+        );
+      }
+
       setMsg(
         `Confirm withdraw ${formatEther(amount)} RIT from agent #${selectedId}…`
       );
-      const hash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      const hash = await radarWrite({
         functionName: "withdraw",
         args: [selectedId, amount],
-        chainId: ritualChain.id,
+        gasFloor: BigInt(120_000),
       });
-      await waitTx(hash);
+      const receipt = await waitTx(hash);
+      if (receipt.status !== "success") {
+        throw new Error("Withdraw transaction reverted on-chain");
+      }
       setMsg(`Withdrew ${formatEther(amount)} RIT to your wallet`);
       setWithdrawAmt("");
       await refresh();
@@ -602,23 +663,45 @@ export function AgentTab() {
     const ok = window.confirm(
       `Kill agent #${selectedId.toString()} (${agent.name})?\n\n` +
         `This is permanent. Full balance (${balLabel} RIT) is refunded to your wallet.\n` +
-        `No more ticks or activation.`
+        `No more ticks or activation.\n\n` +
+        `Note: gas is paid from your wallet balance (not the agent).`
     );
     if (!ok) return;
     try {
       setErr("");
       await ensureWallet();
-      setMsg(`Confirm killAgent #${selectedId} (refund ${balLabel} RIT)…`);
-      const hash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      if (!address) throw new Error("Wallet not ready");
+
+      const live = await readAgentOnChain(selectedId);
+      if (!live) {
+        throw new Error(
+          "Could not read agent on-chain. Check Ritual RPC and try Refresh."
+        );
+      }
+      if (live.owner.toLowerCase() !== address.toLowerCase()) {
+        throw new Error(
+          "Connected wallet is not the owner of this agent. Switch account in MetaMask."
+        );
+      }
+      if (live.status === 4) {
+        throw new Error("Agent is already dead on-chain.");
+      }
+
+      const refundLabel = formatEther(live.balance);
+      setMsg(
+        `Confirm killAgent #${selectedId} (refund ${refundLabel} RIT)…`
+      );
+      const hash = await radarWrite({
         functionName: "killAgent",
         args: [selectedId],
-        chainId: ritualChain.id,
+        gasFloor: BigInt(150_000),
       });
-      await waitTx(hash);
+      const receipt = await waitTx(hash);
+      if (receipt.status !== "success") {
+        throw new Error("Kill transaction reverted on-chain");
+      }
       setMsg(
-        `Agent #${selectedId} killed · ${balLabel} RIT refunded to your wallet`
+        `Agent #${selectedId} killed · ${refundLabel} RIT refunded to your wallet`
       );
       await refresh();
     } catch (e: unknown) {
@@ -634,12 +717,9 @@ export function AgentTab() {
       await ensureWallet();
       if (agent?.status === 4) throw new Error("Agent is dead");
       setMsg(active ? "Activating…" : "Pausing…");
-      const hash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      const hash = await radarWrite({
         functionName: active ? "setActive" : "setPaused",
         args: [selectedId],
-        chainId: ritualChain.id,
       });
       await waitTx(hash);
       setMsg(active ? "Agent LIVE" : "Agent Paused");
@@ -702,12 +782,10 @@ export function AgentTab() {
       setMsg(
         "Confirm runTick in wallet to charge fee and unlock data. Rejecting cancels this wake — no data shown."
       );
-      const hash = await writeContractAsync({
-        address: RADAR_CONTRACT,
-        abi: radarAgentAbi,
+      const hash = await radarWrite({
         functionName: "runTick",
         args: [selectedId, digest],
-        chainId: ritualChain.id,
+        gasFloor: BigInt(200_000),
       });
       const receipt = await waitTx(hash);
       if (receipt.status !== "success") {

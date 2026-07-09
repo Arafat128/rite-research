@@ -566,9 +566,13 @@ export const radarAgentAbi = [
   },
   { type: "error", name: "UnknownAgent", inputs: [] },
   { type: "error", name: "NotOwner", inputs: [] },
+  { type: "error", name: "BadName", inputs: [] },
   { type: "error", name: "BadStatus", inputs: [] },
+  { type: "error", name: "BadKind", inputs: [] },
   { type: "error", name: "AgentIsDead", inputs: [] },
   { type: "error", name: "InsufficientPayment", inputs: [] },
   { type: "error", name: "InsufficientBalance", inputs: [] },
   { type: "error", name: "EmptyWatchlist", inputs: [] },
+  { type: "error", name: "TransferFailed", inputs: [] },
+  { type: "error", name: "ZeroAmount", inputs: [] },
 ] as const;
