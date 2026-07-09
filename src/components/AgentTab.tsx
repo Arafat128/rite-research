@@ -38,7 +38,10 @@ import {
   DATA_KINDS,
   decodeAgentTrack,
   encodeAgentTrack,
+  snapshotCellHref,
+  snapshotCellText,
   type DataKindId,
+  type SnapshotCell,
   type SurfDataSnapshot,
 } from "@/lib/surfData";
 import {
@@ -1078,6 +1081,57 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+function SnapshotCellView({ cell, col }: { cell: SnapshotCell; col: string }) {
+  const text = snapshotCellText(cell);
+  const href = snapshotCellHref(cell);
+  const isHeadline = col === "Headline" || col === "Link" || col === "Title";
+
+  if (href) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex max-w-[min(420px,70vw)] items-start gap-1 font-medium text-[#b8f53a] underline decoration-[#b8f53a]/40 underline-offset-2 hover:text-[#d4ff6a]"
+        title={text}
+      >
+        <span className="whitespace-normal break-words">{text}</span>
+        <span className="shrink-0 text-[10px] opacity-70" aria-hidden>
+          ↗
+        </span>
+      </a>
+    );
+  }
+
+  // Autolink bare https URLs in plain cells
+  if (/^https?:\/\//i.test(text)) {
+    return (
+      <a
+        href={text}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="break-all font-medium text-[#b8f53a] underline decoration-[#b8f53a]/40 hover:text-[#d4ff6a]"
+      >
+        {text}
+        <span className="ml-0.5 text-[10px] opacity-70">↗</span>
+      </a>
+    );
+  }
+
+  return (
+    <span
+      className={
+        isHeadline
+          ? "whitespace-normal break-words text-[#d8e8d2]"
+          : "text-[#d8e8d2]"
+      }
+      title={text}
+    >
+      {text || "—"}
+    </span>
+  );
+}
+
 function DataSnapshotCard({
   snapshot,
   title,
@@ -1085,6 +1139,11 @@ function DataSnapshotCard({
   snapshot: SurfDataSnapshot;
   title: string;
 }) {
+  const cols = snapshot.rows.length ? Object.keys(snapshot.rows[0]) : [];
+  const linkedCount = snapshot.rows.filter((r) =>
+    cols.some((c) => snapshotCellHref(r[c]))
+  ).length;
+
   return (
     <div className="glass rounded-2xl p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -1098,6 +1157,11 @@ function DataSnapshotCard({
         </span>
       </div>
       <p className="mb-3 text-sm text-white/80">{snapshot.summary}</p>
+      {linkedCount > 0 && (
+        <p className="mb-2 text-[11px] text-[#c8ff4a]/70">
+          Click a headline to open the full article ↗
+        </p>
+      )}
       {snapshot.highlights.length > 0 && (
         <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {snapshot.highlights.map((h) => (
@@ -1107,10 +1171,10 @@ function DataSnapshotCard({
       )}
       {snapshot.rows.length > 0 && (
         <div className="overflow-x-auto rounded-xl border border-[#c8ff4a]/20 bg-black/30">
-          <table className="w-full min-w-[420px] border-collapse text-left text-[12px]">
+          <table className="w-full min-w-[520px] border-collapse text-left text-[12px]">
             <thead className="bg-[#0d2818] text-[#c8ff4a]">
               <tr>
-                {Object.keys(snapshot.rows[0]).map((col) => (
+                {cols.map((col) => (
                   <th
                     key={col}
                     className="whitespace-nowrap px-3 py-2 text-[10px] font-semibold uppercase tracking-wide"
@@ -1122,14 +1186,17 @@ function DataSnapshotCard({
             </thead>
             <tbody className="divide-y divide-white/10">
               {snapshot.rows.map((row, i) => (
-                <tr key={i} className="even:bg-white/[0.02]">
-                  {Object.values(row).map((cell, j) => (
+                <tr key={i} className="even:bg-white/[0.02] hover:bg-[#c8ff4a]/[0.04]">
+                  {cols.map((col) => (
                     <td
-                      key={j}
-                      className="max-w-[220px] truncate px-3 py-2 text-[#d8e8d2]"
-                      title={String(cell)}
+                      key={col}
+                      className={`align-top px-3 py-2.5 ${
+                        col === "Headline" || col === "Title"
+                          ? "min-w-[220px] max-w-[420px]"
+                          : "max-w-[160px]"
+                      }`}
                     >
-                      {String(cell)}
+                      <SnapshotCellView cell={row[col]} col={col} />
                     </td>
                   ))}
                 </tr>

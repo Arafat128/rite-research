@@ -101,6 +101,13 @@ function apiKey() {
   return k;
 }
 
+/** Table cell — plain value or clickable link */
+export type SnapshotCell =
+  | string
+  | number
+  | null
+  | { text: string; href?: string };
+
 export type SurfDataSnapshot = {
   kind: DataKindId;
   kindLabel: string;
@@ -108,10 +115,23 @@ export type SurfDataSnapshot = {
   fetchedAt: string;
   endpoint: string;
   summary: string;
-  rows: Array<Record<string, string | number | null>>;
+  rows: Array<Record<string, SnapshotCell>>;
   highlights: Array<{ label: string; value: string }>;
   raw: unknown;
 };
+
+export function snapshotCellText(cell: SnapshotCell): string {
+  if (cell == null) return "";
+  if (typeof cell === "object" && "text" in cell) return cell.text;
+  return String(cell);
+}
+
+export function snapshotCellHref(cell: SnapshotCell): string | undefined {
+  if (cell && typeof cell === "object" && "href" in cell && cell.href) {
+    return cell.href;
+  }
+  return undefined;
+}
 
 function asNum(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -234,11 +254,12 @@ function summarizeNews(json: Record<string, unknown>): Omit<SurfDataSnapshot, "k
   const data = Array.isArray(json.data) ? json.data : [];
   const items = data.map((row) => {
     const r = row as Record<string, unknown>;
+    const url = String(r.url ?? r.link ?? r.article_url ?? "").trim();
     return {
       title: String(r.title ?? "—"),
       source: String(r.source ?? "—"),
       project: String(r.project_name ?? r.project ?? "—"),
-      url: String(r.url ?? ""),
+      url: url && /^https?:\/\//i.test(url) ? url : "",
       published: r.published_at ?? r.timestamp,
       summary: String(r.summary ?? "").slice(0, 160),
     };
@@ -248,7 +269,10 @@ function summarizeNews(json: Record<string, unknown>): Omit<SurfDataSnapshot, "k
     Time: fmtTs(n.published),
     Source: n.source,
     Project: n.project,
-    Headline: n.title.slice(0, 80),
+    // Full title as clickable link (open article)
+    Headline: n.url
+      ? { text: n.title, href: n.url }
+      : n.title,
   }));
 
   return {

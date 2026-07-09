@@ -159,6 +159,25 @@ export function normalizeReportMarkdown(raw: string): string {
   }
 
   s = withSep.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+
+  // Autolink bare URLs in list items / lines (Sources often come unlinked)
+  s = s
+    .split("\n")
+    .map((line) => {
+      // Already markdown link → leave
+      if (/\[[^\]]+\]\([^)]+\)/.test(line)) return line;
+      // Convert "Title - https://..." or trailing bare URL
+      return line.replace(
+        /(^|[\s(])(https?:\/\/[^\s)<>"]+)/g,
+        (_m, pre: string, url: string) => {
+          const clean = url.replace(/[.,;:!?)]+$/, "");
+          const trail = url.slice(clean.length);
+          return `${pre}[${clean}](${clean})${trail}`;
+        }
+      );
+    })
+    .join("\n");
+
   return s;
 }
 
@@ -230,9 +249,13 @@ const markdownComponents: Components = {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="break-words font-medium text-[#b8f53a] underline decoration-[#b8f53a]/40 underline-offset-[3px] hover:text-[#d4ff6a]"
+      className="inline break-words font-medium text-[#b8f53a] underline decoration-[#b8f53a]/45 underline-offset-[3px] hover:text-[#d4ff6a]"
+      title={href}
     >
       {children}
+      <span className="ml-0.5 text-[10px] opacity-60" aria-hidden>
+        ↗
+      </span>
     </a>
   ),
   ul: ({ children }) => (
