@@ -62,6 +62,7 @@ import {
   type AppAgentRecord,
   type TickRecord,
 } from "@/lib/agentStore";
+import { mergeTickRecords, tickFromAgentState } from "@/lib/agentTicks";
 import {
   pingRadar,
   readAgent as readAgentOnChain,
@@ -72,6 +73,39 @@ import {
   readNextAgentId,
   type AgentView,
 } from "@/lib/radarRead";
+
+/** Load chain/keeper ticks and merge with this browser's localStorage history. */
+async function loadMergedTicks(
+  agentId: string,
+  agent?: AgentView | null
+): Promise<TickRecord[]> {
+  const local = listTicks(agentId);
+  let remote: TickRecord[] = [];
+  try {
+    const res = await fetch(
+      `/api/agent/ticks?agentId=${encodeURIComponent(agentId)}`,
+      { cache: "no-store" }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as { ticks?: TickRecord[] };
+      remote = Array.isArray(data.ticks) ? data.ticks : [];
+    }
+  } catch {
+    /* RPC / API flaky — keep local */
+  }
+  let merged = mergeTickRecords(local, remote);
+  if (merged.length === 0 && agent && agent.runCount > BigInt(0)) {
+    const fromState = tickFromAgentState({
+      agentId,
+      runCount: agent.runCount,
+      lastRunAt: agent.lastRunAt,
+      lastTopic: agent.lastTopic,
+      lastDigest: agent.lastDigest,
+    });
+    if (fromState) merged = [fromState];
+  }
+  return merged;
+}
 
 const FLOW = [
   { n: 1, t: "Class", d: "Persistent or Sovereign" },
@@ -152,6 +186,7 @@ export function AgentTab() {
   const [lastSnapshot, setLastSnapshot] = useState<SurfDataSnapshot | null>(
     null
   );
+  const [autoWakeReady, setAutoWakeReady] = useState<boolean | null>(null);
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
   const dataDef = DATA_KINDS.find((k) => k.id === dataKind)!;
@@ -285,7 +320,7 @@ export function AgentTab() {
           setAgent(a);
           setWatchlist(await readWatchlist(pick));
           setTicksLeft(await readTicksRemaining(pick));
-          setTicks(listTicks(pick.toString()));
+          setTicks(await loadMergedTicks(pick.toString(), a));
         }
       } else {
         setAgent(null);
@@ -296,6 +331,19 @@ export function AgentTab() {
 
       setAppAgents(listAppAgents(address));
       await refreshNetwork();
+
+      // Detect whether server keeper is configured (does not prove cron is unblocked)
+      try {
+        const h = await fetch("/api/agent/cron?health=1", { cache: "no-store" });
+        if (h.ok) {
+          const j = (await h.json()) as { autoWakeReady?: boolean };
+          setAutoWakeReady(Boolean(j.autoWakeReady));
+        } else {
+          setAutoWakeReady(false);
+        }
+      } catch {
+        setAutoWakeReady(null);
+      }
     } catch (e: unknown) {
       // Soft mode: never overwrite a success message with RPC noise
       if (!opts?.soft) setErr(errMsg(e));
@@ -313,7 +361,9 @@ export function AgentTab() {
     if (!isConnected) return;
     const t = setInterval(() => {
       void refreshNetwork();
-      if (selectedId != null) setTicks(listTicks(selectedId.toString()));
+      if (selectedId != null) {
+        void loadMergedTicks(selectedId.toString()).then(setTicks);
+      }
     }, 30_000);
     return () => clearInterval(t);
   }, [isConnected, selectedId, refreshNetwork]);
@@ -675,7 +725,13 @@ export function AgentTab() {
         snapshot,
       };
       saveTick(rec);
-      setTicks(listTicks(selectedId.toString()));
+      setTicks(await loadMergedTicks(selectedId.toString(), {
+        ...agent,
+        runCount: newCount,
+        lastRunAt: BigInt(Math.floor(Date.now() / 1000)),
+        lastDigest: digest,
+        lastTopic: `${snapshot.kind}|${snapshot.target}`,
+      }));
       setLastSnapshot(snapshot);
 
       const died =
@@ -1130,6 +1186,29 @@ export function AgentTab() {
                       every 5 min). Agent pays tick fee from balance; keeper
                       only pays gas. Manual Wake still works anytime.
                     </p>
+                    {autoWakeReady === false && (
+                      <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
+                        Auto-wake is <b>not configured</b> on this deployment
+                        (missing <code className="text-[#c8ff4a]">KEEPER_PRIVATE_KEY</code>{" "}
+                        and/or Surf key on Vercel Production). Use{" "}
+                        <b>Wake · pull Data API</b> until env is set. Also disable
+                        Vercel Deployment Protection or cron hits a login page.
+                      </p>
+                    )}
+                    {autoWakeReady === true &&
+                      dueInfo?.due &&
+                      agent.runCount === BigInt(0) && (
+                        <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
+                          Agent is due but has <b>never</b> sealed a tick. If this
+                          stays for 10+ min, Vercel Cron is blocked (Deployment
+                          Protection) or the keeper wallet has no gas. Use{" "}
+                          <b>Wake</b> now, or open{" "}
+                          <code className="text-[#c8ff4a]">
+                            /api/agent/cron?secret=YOUR_CRON_SECRET
+                          </code>
+                          .
+                        </p>
+                    )}
                     <div className="flex flex-wrap gap-2">
                       <input
                         value={editSchedValue}
@@ -1323,11 +1402,35 @@ export function AgentTab() {
             </div>
           )}
 
-          {!ticking && (lastSnapshot || ticks[0]?.snapshot) && (
+          {!ticking &&
+            (lastSnapshot ||
+              (ticks[0]?.snapshot &&
+                (ticks[0].snapshot.rows?.length > 0 ||
+                  ticks[0].source === "local" ||
+                  ticks[0].source === "keeper"))) && (
             <DataSnapshotCard
               snapshot={lastSnapshot || ticks[0].snapshot}
               title="Latest tick data"
             />
+          )}
+
+          {!ticking && ticks.length === 0 && agent && agent.status === 1 && (
+            <div className="glass rounded-2xl p-5 text-sm text-white/55">
+              <h3 className="mb-2 text-sm font-semibold text-[#c8ff4a]">
+                No ticks yet
+              </h3>
+              <p className="text-[12px] leading-relaxed">
+                On-chain run count is <b className="text-white/80">{agent.runCount.toString()}</b>
+                {agent.lastRunAt === BigInt(0) ? " · last wake: never" : ""}.
+                Tick results appear here after a successful{" "}
+                <code className="text-[#c8ff4a]">runTick</code> (manual Wake or
+                server keeper). Auto-wake needs{" "}
+                <code className="text-[#c8ff4a]">KEEPER_PRIVATE_KEY</code> +{" "}
+                <code className="text-[#c8ff4a]">CRON_SECRET</code> on Vercel
+                Production and no Deployment Protection blocking{" "}
+                <code className="text-[#c8ff4a]">/api/agent/cron</code>.
+              </p>
+            </div>
           )}
 
           {ticks.length > 0 && (
@@ -1338,7 +1441,7 @@ export function AgentTab() {
               <div className="space-y-3">
                 {ticks.slice(0, 8).map((t) => (
                   <div
-                    key={`${t.at}-${t.runCount}`}
+                    key={`${t.at}-${t.runCount}-${t.txHash || ""}`}
                     className="rounded-xl border border-white/10 bg-black/25 p-3"
                   >
                     <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
@@ -1347,6 +1450,11 @@ export function AgentTab() {
                         {t.snapshot.target && t.snapshot.target !== "_"
                           ? ` · ${t.snapshot.target}`
                           : ""}
+                        {t.source === "chain" || t.source === "keeper" ? (
+                          <span className="ml-1 text-[10px] font-normal text-white/40">
+                            ({t.source === "keeper" ? "auto-wake" : "on-chain"})
+                          </span>
+                        ) : null}
                       </span>
                       <span className="text-[10px] text-white/40">
                         {new Date(t.at).toLocaleString()}
@@ -1355,7 +1463,9 @@ export function AgentTab() {
                     <p className="text-[12px] text-white/65">
                       {t.snapshot.summary}
                     </p>
-                    {t.txHash && (
+                    {t.txHash &&
+                      t.txHash !==
+                        "0x0000000000000000000000000000000000000000000000000000000000000000" && (
                       <a
                         href={txUrl(t.txHash)}
                         target="_blank"

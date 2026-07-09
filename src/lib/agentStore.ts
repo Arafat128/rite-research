@@ -28,6 +28,8 @@ export type TickRecord = {
   at: number;
   txHash?: string;
   digest?: string;
+  /** local = this browser woke; chain = from AgentTick / agent state; keeper = server */
+  source?: "local" | "chain" | "keeper";
   snapshot: SurfDataSnapshot;
 };
 

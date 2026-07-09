@@ -22,6 +22,7 @@ import {
 import { decodeAgentTrack, fetchSurfData } from "@/lib/surfData";
 import { computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
+import { cacheKeeperTick } from "@/lib/keeperCache";
 
 export type KeeperTickResult = {
   agentId: string;
@@ -172,10 +173,28 @@ export async function runDueAgentTicks(opts?: {
         account,
       });
 
-      await client.waitForTransactionReceipt({
+      const receipt = await client.waitForTransactionReceipt({
         hash,
         timeout: 60_000,
         confirmations: 1,
+      });
+      if (receipt.status !== "success") {
+        results.push({
+          agentId: String(i),
+          ok: false,
+          error: "runTick receipt not successful",
+        });
+        continue;
+      }
+
+      const newCount = agent.runCount + BigInt(1);
+      cacheKeeperTick({
+        agentId: String(i),
+        runCount: newCount.toString(),
+        at: Date.now(),
+        txHash: hash,
+        digest,
+        snapshot,
       });
 
       ticked += 1;
