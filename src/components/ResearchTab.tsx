@@ -36,8 +36,8 @@ type PaidCredit = {
 const STEPS = [
   { id: 1, label: "Connect" },
   { id: 2, label: "Prompt" },
-  { id: 3, label: "Pay / Claim" },
-  { id: 4, label: "Report" },
+  { id: 3, label: "Pay fee" },
+  { id: 4, label: "Seal · unlock" },
 ] as const;
 
 const LS_KEY = "rite_paid_credits_v1";
@@ -299,43 +299,45 @@ export function ResearchTab() {
     return data;
   }
 
-  async function settleIfPossible(
+  /**
+   * REQUIRED seal step — report is only unlocked after this succeeds.
+   * Throws if user rejects / tx fails so the caller never shows the report.
+   */
+  async function settleRequired(
     researchId: string,
     resultHash: Hex,
     paidPrompt: string,
     paymentTx?: string
-  ) {
-    if (!address || !publicClient || !RESEARCH_CONTRACT) return;
-    setPhase("settling");
-    setStatus("Sealing result hash on-chain (optional — confirm or reject)…");
-    try {
-      const settleHash = await writeContractAsync({
-        address: RESEARCH_CONTRACT,
-        abi: researchDeskAbi,
-        functionName: "settleResearch",
-        args: [BigInt(researchId), resultHash],
-        chainId: ritualChain.id,
-      });
-      await publicClient.waitForTransactionReceipt({ hash: settleHash });
-      setMeta((m) => ({ ...m, settleTx: settleHash }));
-      setStatus("Complete: report ready · result sealed on-chain.");
-      saveLocalCredit(address, {
-        researchId,
-        prompt: paidPrompt,
-        promptHash: keccak256(stringToBytes(paidPrompt)),
-        paymentTx,
-        settled: true,
-      });
-    } catch (settleErr: unknown) {
-      setStatus(`Report ready. On-chain settle skipped: ${errText(settleErr)}`);
-      saveLocalCredit(address, {
-        researchId,
-        prompt: paidPrompt,
-        promptHash: keccak256(stringToBytes(paidPrompt)),
-        paymentTx,
-        settled: false,
-      });
+  ): Promise<Hex> {
+    if (!address || !publicClient || !RESEARCH_CONTRACT) {
+      throw new Error("Wallet not ready to seal research");
     }
+    setPhase("settling");
+    setStatus(
+      "Confirm in wallet to unlock your report (seal result on-chain). Rejecting cancels the report."
+    );
+
+    const settleHash = await writeContractAsync({
+      address: RESEARCH_CONTRACT,
+      abi: researchDeskAbi,
+      functionName: "settleResearch",
+      args: [BigInt(researchId), resultHash],
+      chainId: ritualChain.id,
+    });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: settleHash });
+    if (receipt.status !== "success") {
+      throw new Error("Seal transaction reverted");
+    }
+
+    setMeta((m) => ({ ...m, settleTx: settleHash, resultHash }));
+    saveLocalCredit(address, {
+      researchId,
+      prompt: paidPrompt,
+      promptHash: keccak256(stringToBytes(paidPrompt)),
+      paymentTx,
+      settled: true,
+    });
+    return settleHash;
   }
 
   /** Claim already-paid research without new payment */
@@ -388,40 +390,45 @@ export function ResearchTab() {
         researchId: credit.researchId,
       });
 
-      setReport(data.report || "");
+      if (!data.researchId || !data.resultHash || !data.report) {
+        throw new Error("Research incomplete — no report or seal hash from server");
+      }
+
+      // Hold report until settle succeeds — never show early
       setMeta({
-        researchId: data.researchId || credit.researchId,
+        researchId: data.researchId,
         paymentTx: data.paymentTx || credit.paymentTx,
         model: data.model,
         resultHash: data.resultHash,
         claimed: true,
       });
-
       saveLocalCredit(address, {
-        researchId: data.researchId || credit.researchId,
+        researchId: data.researchId,
         prompt: clean,
         promptHash: h,
         paymentTx: data.paymentTx || credit.paymentTx,
         settled: false,
       });
 
-      if (data.researchId && data.resultHash) {
-        await settleIfPossible(
-          data.researchId,
-          data.resultHash as Hex,
-          clean,
-          data.paymentTx || credit.paymentTx
-        );
-      } else {
-        setStatus("Report ready.");
-      }
+      await settleRequired(
+        data.researchId,
+        data.resultHash as Hex,
+        clean,
+        data.paymentTx || credit.paymentTx
+      );
 
+      setReport(data.report);
+      setStatus("Complete: report unlocked · sealed on-chain.");
       setPhase("done");
       await refreshCredits();
     } catch (e: unknown) {
       console.error("claimPaid", e);
       setPhase("error");
-      setStatus(errText(e));
+      setReport("");
+      setStatus(
+        errText(e) +
+          " — Report is locked until you confirm the seal transaction. You already paid; try Claim again and approve seal."
+      );
     } finally {
       setClaimingId(null);
     }
@@ -475,39 +482,46 @@ export function ResearchTab() {
         txHash: hash,
       });
 
-      if (data.researchId) {
-        saveLocalCredit(address, {
-          researchId: data.researchId,
-          prompt: clean,
-          promptHash,
-          paymentTx: hash,
-          settled: false,
-        });
+      if (!data.researchId || !data.resultHash || !data.report) {
+        throw new Error(
+          "Research incomplete — payment recorded but no report. Use Claim free report with the same prompt."
+        );
       }
 
-      setReport(data.report || "");
+      // Do NOT show report yet — user must seal on-chain first
       setMeta({
         researchId: data.researchId,
         paymentTx: data.paymentTx || hash,
         model: data.model,
         resultHash: data.resultHash,
       });
+      saveLocalCredit(address, {
+        researchId: data.researchId,
+        prompt: clean,
+        promptHash,
+        paymentTx: hash,
+        settled: false,
+      });
 
-      if (data.researchId && data.resultHash) {
-        await settleIfPossible(data.researchId, data.resultHash as Hex, clean, hash);
-      } else {
-        setStatus("Report ready.");
-      }
+      await settleRequired(
+        data.researchId,
+        data.resultHash as Hex,
+        clean,
+        hash
+      );
 
+      setReport(data.report);
+      setStatus("Complete: report unlocked · sealed on-chain.");
       setPhase("done");
       await refreshCredits();
     } catch (e: unknown) {
       console.error(e);
       setPhase("error");
+      setReport("");
       const msg = errText(e);
       setStatus(
         msg +
-          " — If you already paid, open Paid credits below and Claim (no second fee)."
+          " — If fee was paid but seal was rejected, use Claim free report and confirm the seal tx to unlock the report."
       );
       await refreshCredits();
     }
@@ -654,10 +668,10 @@ export function ResearchTab() {
                       className="shrink-0 rounded-lg bg-amber-300 px-3 py-2 font-semibold text-black disabled:opacity-50"
                     >
                       {claimingId === c.researchId
-                        ? "Claiming…"
+                        ? "Unlocking…"
                         : c.prompt
-                          ? "Claim free report"
-                          : "Claim (enter prompt first)"}
+                          ? "Unlock report (seal tx)"
+                          : "Unlock (enter prompt first)"}
                     </button>
                   </div>
                 );

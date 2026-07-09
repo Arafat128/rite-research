@@ -128,6 +128,16 @@ export async function POST(req: NextRequest) {
       if (record.feePaid === BigInt(0)) {
         return NextResponse.json({ error: "No fee recorded for this id" }, { status: 402 });
       }
+      // One report cycle per payment — no free re-fetch after seal
+      if (record.settled) {
+        return NextResponse.json(
+          {
+            error:
+              "This research was already completed and sealed on-chain. Pay a new fee for a new report.",
+          },
+          { status: 409 }
+        );
+      }
 
       researchId = id.toString();
     }
