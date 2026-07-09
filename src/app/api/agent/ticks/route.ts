@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
       readAgent(agentId),
     ]);
 
-    let ticks = onChainToTickRecords(chain);
+    const ticks = onChainToTickRecords(chain);
 
     // Warm keeper cache (full Surf snapshots when same instance ran cron)
     const cached = listCachedKeeperTicks(idRaw);

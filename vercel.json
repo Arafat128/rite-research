@@ -9,13 +9,13 @@
       "maxDuration": 60
     },
     "src/app/api/agent/cron/route.ts": {
-      "maxDuration": 300
+      "maxDuration": 60
     }
   },
   "crons": [
     {
       "path": "/api/agent/cron",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }

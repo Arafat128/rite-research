@@ -1182,9 +1182,12 @@ export function AgentTab() {
                       Auto-wake schedule
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      Server keeper wakes Active agents when due (Vercel cron
-                      every 5 min). Agent pays tick fee from balance; keeper
-                      only pays gas. Manual Wake still works anytime.
+                      Server keeper wakes Active agents when due (call{" "}
+                      <code className="text-white/55">/api/agent/cron</code> on
+                      a timer — Hobby Vercel only allows daily native cron; use
+                      Pro or an external cron every few minutes). Agent pays
+                      tick fee from balance; keeper only pays gas. Manual Wake
+                      still works anytime.
                     </p>
                     {autoWakeReady === false && (
                       <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
