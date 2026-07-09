@@ -3,25 +3,127 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg0: #04140c;
+  --bg1: #0a2a18;
+  --lime: #b8f53a;
+  --lime2: #d4ff6a;
+  --mint: #5eead4;
+  --card: rgba(8, 40, 24, 0.55);
+  --stroke: rgba(184, 245, 58, 0.28);
+  --text: #e8f5e0;
+  --muted: #8fa88a;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  min-height: 100%;
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(ellipse 90% 70% at 50% 0%, #c8f84a 0%, #6fbf2a 18%, #0d3d1c 42%, #04140c 72%),
+    #04140c;
+  background-attachment: fixed;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
+.glass {
+  background: var(--card);
+  border: 1px solid var(--stroke);
+  backdrop-filter: blur(18px) saturate(1.2);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.hero-title {
+  font-family: var(--font-display), Georgia, serif;
+  letter-spacing: -0.04em;
+  background: linear-gradient(180deg, rgba(10, 30, 12, 0.92) 0%, rgba(10, 30, 12, 0.35) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+  filter: drop-shadow(0 2px 0 rgba(255, 255, 255, 0.08));
+}
+
+.prompt-box {
+  background: linear-gradient(180deg, rgba(12, 48, 28, 0.85), rgba(6, 28, 16, 0.9));
+  border: 1.5px solid rgba(184, 245, 58, 0.45);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.25) inset,
+    0 12px 40px rgba(0, 0, 0, 0.35),
+    0 0 40px rgba(184, 245, 58, 0.08);
+}
+
+.pill-nav {
+  background: rgba(245, 255, 235, 0.92);
+  color: #123018;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.pill-nav button.active {
+  background: #0f2416;
+  color: #e8f5e0;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #c8ff4a, #8fd914);
+  color: #0a1a08;
+  font-weight: 600;
+}
+
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Report typography — clean, aligned, no raw-markdown look */
+.report-body {
+  overflow-wrap: break-word;
+  word-break: normal;
+  color: #d8e8d2;
+}
+
+.report-body > :first-child {
+  margin-top: 0;
+}
+
+.report-table-wrap {
+  -webkit-overflow-scrolling: touch;
+}
+
+.report-table {
+  table-layout: auto;
+  width: 100%;
+}
+
+.report-table th,
+.report-table td {
+  vertical-align: top;
+}
+
+/* Prefer readable column widths for risk-style tables */
+.report-table th:nth-child(1),
+.report-table td:nth-child(1) {
+  min-width: 8.5rem;
+  max-width: 14rem;
+  font-weight: 500;
+  color: #eef8e6;
+}
+
+.report-table th:nth-child(2),
+.report-table td:nth-child(2) {
+  min-width: 6.5rem;
+  width: 7.5rem;
+  white-space: nowrap;
+}
+
+.report-table th:nth-child(3),
+.report-table td:nth-child(3) {
+  min-width: 16rem;
+}
+
+.report-body a {
+  word-break: break-word;
 }

@@ -1,5 +1,3 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
 # dependencies
 /node_modules
 /.pnp
@@ -18,19 +16,36 @@
 
 # misc
 .DS_Store
+Thumbs.db
 *.pem
+*.log
 
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
+# env files — NEVER commit secrets (.env.local has SURF_API_KEY)
+.env
 .env*.local
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # vercel
 .vercel
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+
+# foundry build artifacts (source stays)
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/lib/
+
+# editor / OS
+.idea/
+.vscode/
+*.swp
