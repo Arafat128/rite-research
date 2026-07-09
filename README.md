@@ -18,7 +18,7 @@ Made with ♥ by [mehidy](https://x.com/its_perseus_1) · [@its_perseus_1](https
 | Contract | Address |
 |----------|---------|
 | ResearchDesk | `0xd3469a23b2a08b237bc6c0522845eb1b508e5352` |
-| RadarAgent | `0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30` |
+| RadarAgent | `0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f` |
 | BountyPool | `0xbc4bc83298950cbda52837cd806d41ad7c3c36bf` |
 | Fee treasury (50%) | `0xd3309Bf2E2D1F451132dbC34Dc5908C442903458` |
 

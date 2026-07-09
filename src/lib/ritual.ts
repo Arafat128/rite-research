@@ -405,6 +405,13 @@ export const radarAgentAbi = [
   },
   {
     type: "function",
+    name: "killAgent",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "agentId", type: "uint256" }],
+    outputs: [],
+  },
+  {
+    type: "function",
     name: "setActive",
     stateMutability: "nonpayable",
     inputs: [{ name: "agentId", type: "uint256" }],
@@ -546,6 +553,15 @@ export const radarAgentAbi = [
     inputs: [
       { name: "agentId", type: "uint256", indexed: true },
       { name: "status", type: "uint8", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "AgentKilled",
+    inputs: [
+      { name: "agentId", type: "uint256", indexed: true },
+      { name: "owner", type: "address", indexed: true },
+      { name: "refunded", type: "uint256", indexed: false },
     ],
   },
   { type: "error", name: "UnknownAgent", inputs: [] },

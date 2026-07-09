@@ -85,6 +85,7 @@ contract RadarAgent {
         uint256 runCount
     );
     event AgentDied(uint256 indexed agentId, AgentKind kind, uint256 runCount);
+    event AgentKilled(uint256 indexed agentId, address indexed owner, uint256 refunded);
     event RunFeeUpdated(uint256 fee);
 
     // -------------------------------------------------------------------------
@@ -211,18 +212,39 @@ contract RadarAgent {
         emit AgentFunded(agentId, msg.sender, msg.value, a.balance);
     }
 
+    /// @notice Withdraw unused RITUAL from agent balance back to owner.
+    /// @dev Allowed even after kill so any residual can be recovered.
     function withdraw(uint256 agentId, uint256 amount) external {
         Agent storage a = _requireOwner(agentId);
-        if (a.status == Status.Dead) revert AgentIsDead();
         if (amount == 0 || amount > a.balance) revert InsufficientBalance();
         a.balance -= amount;
         (bool ok,) = msg.sender.call{value: amount}("");
         if (!ok) revert TransferFailed();
         emit AgentWithdrawn(agentId, msg.sender, amount);
-        if (a.balance < runFee && a.status == Status.Active) {
+        if (a.status != Status.Dead && a.balance < runFee && a.status == Status.Active) {
             a.status = Status.OutOfFunds;
             emit StatusChanged(agentId, Status.OutOfFunds);
         }
+    }
+
+    /// @notice Permanently kill agent (Persistent or Sovereign). Refunds full balance to owner.
+    function killAgent(uint256 agentId) external {
+        Agent storage a = _requireOwner(agentId);
+        if (a.status == Status.Dead) revert AgentIsDead();
+
+        uint256 refund = a.balance;
+        a.balance = 0;
+        a.status = Status.Dead;
+
+        if (refund > 0) {
+            (bool ok,) = msg.sender.call{value: refund}("");
+            if (!ok) revert TransferFailed();
+            emit AgentWithdrawn(agentId, msg.sender, refund);
+        }
+
+        emit StatusChanged(agentId, Status.Dead);
+        emit AgentKilled(agentId, msg.sender, refund);
+        emit AgentDied(agentId, a.kind, a.runCount);
     }
 
     function setActive(uint256 agentId) external {

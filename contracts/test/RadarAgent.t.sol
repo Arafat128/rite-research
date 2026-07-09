@@ -95,4 +95,28 @@ contract RadarAgentTest is Test {
         assertEq(radar.SOVEREIGN_DEPLOY_FEE(), 0.01 ether);
         assertEq(radar.SOVEREIGN_MAX_RUNS(), 3);
     }
+
+    function test_WithdrawAndKillRefund() public {
+        vm.startPrank(user);
+        uint256 id = radar.createAgent{value: 0.15 ether}(
+            "KillMe", 100, RadarAgent.AgentKind.Persistent
+        );
+        // 0.05 left in agent after 0.1 deploy fee
+        assertEq(radar.getAgent(id).balance, 0.05 ether);
+
+        uint256 before = user.balance;
+        radar.withdraw(id, 0.02 ether);
+        assertEq(radar.getAgent(id).balance, 0.03 ether);
+        assertEq(user.balance, before + 0.02 ether);
+
+        before = user.balance;
+        radar.killAgent(id);
+        assertEq(uint256(radar.getAgent(id).status), uint256(RadarAgent.Status.Dead));
+        assertEq(radar.getAgent(id).balance, 0);
+        assertEq(user.balance, before + 0.03 ether);
+
+        vm.expectRevert(RadarAgent.AgentIsDead.selector);
+        radar.killAgent(id);
+        vm.stopPrank();
+    }
 }

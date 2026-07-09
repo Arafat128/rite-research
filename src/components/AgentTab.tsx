@@ -142,6 +142,7 @@ export function AgentTab() {
   const [editSchedValue, setEditSchedValue] = useState("15");
   const [editSchedUnit, setEditSchedUnit] = useState<ScheduleUnit>("minutes");
   const [fundAmt, setFundAmt] = useState("0.01");
+  const [withdrawAmt, setWithdrawAmt] = useState("");
   const [nowTick, setNowTick] = useState(() => Math.floor(Date.now() / 1000));
 
   const [networkLive, setNetworkLive] = useState(0);
@@ -496,6 +497,79 @@ export function AgentTab() {
       });
       await waitTx(hash);
       setMsg(`Funded +${fundAmt} RITUAL`);
+      await refresh();
+    } catch (e: unknown) {
+      setErr(errMsg(e));
+      setMsg("");
+    }
+  }
+
+  async function withdrawSelected(amountWei?: bigint) {
+    if (selectedId == null || !agent) return;
+    try {
+      setErr("");
+      await ensureWallet();
+      const bal = agent.balance;
+      if (bal <= BigInt(0)) throw new Error("Agent has no balance to withdraw");
+      let amount = amountWei;
+      if (amount == null) {
+        const raw = withdrawAmt.trim();
+        if (!raw || raw.toLowerCase() === "max" || raw === "all") {
+          amount = bal;
+        } else {
+          amount = parseEther(raw);
+        }
+      }
+      if (amount <= BigInt(0)) throw new Error("Enter withdraw amount > 0");
+      if (amount > bal) throw new Error("Amount exceeds agent balance");
+      setMsg(
+        `Confirm withdraw ${formatEther(amount)} RIT from agent #${selectedId}…`
+      );
+      const hash = await writeContractAsync({
+        address: RADAR_CONTRACT,
+        abi: radarAgentAbi,
+        functionName: "withdraw",
+        args: [selectedId, amount],
+        chainId: ritualChain.id,
+      });
+      await waitTx(hash);
+      setMsg(`Withdrew ${formatEther(amount)} RIT to your wallet`);
+      setWithdrawAmt("");
+      await refresh();
+    } catch (e: unknown) {
+      setErr(errMsg(e));
+      setMsg("");
+    }
+  }
+
+  async function killSelected() {
+    if (selectedId == null || !agent) return;
+    if (agent.status === 4) {
+      setErr("Agent is already dead");
+      return;
+    }
+    const balLabel = formatEther(agent.balance);
+    const ok = window.confirm(
+      `Kill agent #${selectedId.toString()} (${agent.name})?\n\n` +
+        `This is permanent. Full balance (${balLabel} RIT) is refunded to your wallet.\n` +
+        `No more ticks or activation.`
+    );
+    if (!ok) return;
+    try {
+      setErr("");
+      await ensureWallet();
+      setMsg(`Confirm killAgent #${selectedId} (refund ${balLabel} RIT)…`);
+      const hash = await writeContractAsync({
+        address: RADAR_CONTRACT,
+        abi: radarAgentAbi,
+        functionName: "killAgent",
+        args: [selectedId],
+        chainId: ritualChain.id,
+      });
+      await waitTx(hash);
+      setMsg(
+        `Agent #${selectedId} killed · ${balLabel} RIT refunded to your wallet`
+      );
       await refresh();
     } catch (e: unknown) {
       setErr(errMsg(e));
@@ -1111,11 +1185,52 @@ export function AgentTab() {
                       />
                       <button
                         type="button"
-                        disabled={writing}
-                        onClick={fundSelected}
+                        disabled={writing || ticking}
+                        onClick={() => void fundSelected()}
                         className="btn-primary rounded-lg px-4 text-sm"
                       >
                         Deposit
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mb-4 rounded-xl border border-white/10 bg-black/25 p-3">
+                    <div className="mb-2 text-xs font-semibold text-[#c8ff4a]">
+                      Withdraw unused RITUAL
+                    </div>
+                    <p className="mb-2 text-[11px] text-white/40">
+                      Pull extra balance to your wallet (does not kill the
+                      agent). Available:{" "}
+                      <b className="text-white/70">
+                        {formatEther(agent.balance)} RIT
+                      </b>
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        value={withdrawAmt}
+                        onChange={(e) => setWithdrawAmt(e.target.value)}
+                        className="min-w-[8rem] flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                        placeholder="Amount or max"
+                      />
+                      <button
+                        type="button"
+                        disabled={
+                          writing || ticking || agent.balance <= BigInt(0)
+                        }
+                        onClick={() => void withdrawSelected()}
+                        className="rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm text-white"
+                      >
+                        Withdraw
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          writing || ticking || agent.balance <= BigInt(0)
+                        }
+                        onClick={() => void withdrawSelected(agent.balance)}
+                        className="rounded-lg border border-[#c8ff4a]/30 bg-[#c8ff4a]/10 px-3 py-2 text-sm text-[#c8ff4a]"
+                      >
+                        Withdraw all
                       </button>
                     </div>
                   </div>
@@ -1155,7 +1270,42 @@ export function AgentTab() {
                       your wallet. Reject = no new data, no fee.
                     </p>
                   )}
+
+                  <div className="mt-4 rounded-xl border border-red-400/30 bg-red-950/30 p-3">
+                    <div className="mb-1 text-xs font-semibold text-red-300">
+                      Kill agent
+                    </div>
+                    <p className="mb-2 text-[11px] text-white/45">
+                      Permanent stop (Persistent or Sovereign). Remaining
+                      balance is refunded to your wallet.
+                    </p>
+                    <button
+                      type="button"
+                      disabled={writing || ticking}
+                      onClick={() => void killSelected()}
+                      className="w-full rounded-xl border border-red-400/50 bg-red-500/20 py-2.5 text-sm font-semibold text-red-200 hover:bg-red-500/30"
+                    >
+                      Kill agent · refund balance
+                    </button>
+                  </div>
                 </>
+              )}
+
+              {agent.status === 4 && agent.balance > BigInt(0) && (
+                <div className="mt-4 rounded-xl border border-amber-400/30 bg-black/25 p-3">
+                  <p className="mb-2 text-[11px] text-amber-100/80">
+                    Dead agent still holds {formatEther(agent.balance)} RIT —
+                    withdraw it.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={writing}
+                    onClick={() => void withdrawSelected(agent.balance)}
+                    className="btn-primary w-full rounded-lg py-2 text-sm"
+                  >
+                    Withdraw remaining balance
+                  </button>
+                </div>
               )}
             </div>
           )}

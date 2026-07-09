@@ -8,17 +8,18 @@ contract DeployRadar is Script {
     function run() external {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address treasury = vm.envAddress("FEE_RECIPIENT_ADDRESS");
+        address bounty = vm.envAddress("BOUNTY_POOL_ADDRESS");
         uint256 fee = vm.envOr("RESEARCH_FEE_WEI", uint256(0.005 ether));
 
         vm.startBroadcast(pk);
-        RadarAgent radar = new RadarAgent(treasury, fee);
+        RadarAgent radar = new RadarAgent(treasury, bounty, fee);
         vm.stopBroadcast();
 
         console2.log("RadarAgent", address(radar));
         console2.log("treasury", treasury);
+        console2.log("bounty", bounty);
         console2.log("runFee", fee);
         console2.log("persistentDeployFee", radar.PERSISTENT_DEPLOY_FEE());
         console2.log("sovereignDeployFee", radar.SOVEREIGN_DEPLOY_FEE());
-        console2.log("sovereignMaxRuns", radar.SOVEREIGN_MAX_RUNS());
     }
 }
