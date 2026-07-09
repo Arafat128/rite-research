@@ -46,6 +46,14 @@ import {
 } from "@/lib/surfData";
 import { sanitizeHttpUrl } from "@/lib/safeUrl";
 import {
+  BLOCK_TIME_SEC,
+  computeDue,
+  formatCountdown,
+  formatInterval,
+  scheduleToBlocks,
+  type ScheduleUnit,
+} from "@/lib/agentSchedule";
+import {
   getAppAgent,
   listAppAgents,
   listTicks,
@@ -129,8 +137,12 @@ export function AgentTab() {
   const [dataKind, setDataKind] = useState<DataKindId>("market_price");
   const [target, setTarget] = useState("BTC");
   const [extraFund, setExtraFund] = useState("0.02");
-  const [wakeBlocks, setWakeBlocks] = useState("1000");
+  const [schedValue, setSchedValue] = useState("15");
+  const [schedUnit, setSchedUnit] = useState<ScheduleUnit>("minutes");
+  const [editSchedValue, setEditSchedValue] = useState("15");
+  const [editSchedUnit, setEditSchedUnit] = useState<ScheduleUnit>("minutes");
   const [fundAmt, setFundAmt] = useState("0.01");
+  const [nowTick, setNowTick] = useState(() => Math.floor(Date.now() / 1000));
 
   const [networkLive, setNetworkLive] = useState(0);
   const [networkTotal, setNetworkTotal] = useState(0);
@@ -152,6 +164,46 @@ export function AgentTab() {
     }
   }, [extraFund]);
   const totalDeployValue = deployFee + extraFundWei;
+
+  const wakeBlocksForCreate = useMemo(
+    () =>
+      scheduleToBlocks({
+        value: Number(schedValue) || 1,
+        unit: schedUnit,
+      }),
+    [schedValue, schedUnit]
+  );
+
+  const dueInfo = useMemo(() => {
+    if (!agent) return null;
+    return computeDue(agent.lastRunAt, agent.wakeIntervalBlocks, nowTick);
+  }, [agent, nowTick]);
+
+  // Live countdown for schedule
+  useEffect(() => {
+    const t = setInterval(
+      () => setNowTick(Math.floor(Date.now() / 1000)),
+      1000
+    );
+    return () => clearInterval(t);
+  }, []);
+
+  // Sync edit schedule fields when agent loads
+  useEffect(() => {
+    if (!agent) return;
+    const blocks = Number(agent.wakeIntervalBlocks);
+    const sec = blocks * BLOCK_TIME_SEC;
+    if (sec >= 3600 && sec % 3600 < BLOCK_TIME_SEC * 2) {
+      setEditSchedUnit("hours");
+      setEditSchedValue(String(Math.max(1, Math.round(sec / 3600))));
+    } else if (sec >= 60) {
+      setEditSchedUnit("minutes");
+      setEditSchedValue(String(Math.max(1, Math.round(sec / 60))));
+    } else {
+      setEditSchedUnit("blocks");
+      setEditSchedValue(String(Math.max(1, blocks)));
+    }
+  }, [agent?.wakeIntervalBlocks, selectedId]);
 
   const { data: runFee } = useReadContract({
     address: RADAR_CONTRACT || undefined,
@@ -319,7 +371,7 @@ export function AgentTab() {
 
       const trackCells = encodeAgentTrack(dataKind, tgt);
       const lockedTarget = trackCells[0].split("|")[1] || tgt;
-      const wake = BigInt(Math.max(1, Number(wakeBlocks) || 1000));
+      const wake = wakeBlocksForCreate;
       const value = totalDeployValue;
 
       if (walletBal && walletBal.value < value) {
@@ -383,7 +435,7 @@ export function AgentTab() {
 
       setSelectedId(newId);
       setMsg(
-        `${AGENT_KIND_LABELS[agentKind]} agent #${newId} deployed · fee ${formatEther(deployFee)} RIT → treasury · stream ${def.label}${
+        `${AGENT_KIND_LABELS[agentKind]} agent #${newId} deployed · schedule ${formatInterval(wake)} · stream ${def.label}${
           def.targetLabel ? ` (${lockedTarget})` : ""
         }${
           agentKind === AGENT_KIND.Sovereign
@@ -391,6 +443,33 @@ export function AgentTab() {
             : " · never dies"
         }`
       );
+      await refresh();
+    } catch (e: unknown) {
+      setErr(errMsg(e));
+      setMsg("");
+    }
+  }
+
+  async function saveSchedule() {
+    if (selectedId == null) return;
+    try {
+      setErr("");
+      await ensureWallet();
+      if (agent?.status === 4) throw new Error("Agent is dead");
+      const blocks = scheduleToBlocks({
+        value: Number(editSchedValue) || 1,
+        unit: editSchedUnit,
+      });
+      setMsg(`Saving wake schedule ${formatInterval(blocks)}…`);
+      const hash = await writeContractAsync({
+        address: RADAR_CONTRACT,
+        abi: radarAgentAbi,
+        functionName: "setWakeInterval",
+        args: [selectedId, blocks],
+        chainId: ritualChain.id,
+      });
+      await waitTx(hash);
+      setMsg(`Schedule saved · ${formatInterval(blocks)}`);
       await refresh();
     } catch (e: unknown) {
       setErr(errMsg(e));
@@ -773,15 +852,33 @@ export function AgentTab() {
                   className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
                 />
               </div>
-              <div>
+              <div className="sm:col-span-2">
                 <label className="text-[11px] text-white/40">
-                  Wake interval (blocks)
+                  Auto-wake schedule (blocks or time)
                 </label>
-                <input
-                  value={wakeBlocks}
-                  onChange={(e) => setWakeBlocks(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-                />
+                <div className="mt-1 flex gap-2">
+                  <input
+                    value={schedValue}
+                    onChange={(e) => setSchedValue(e.target.value)}
+                    className="w-28 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                    inputMode="numeric"
+                  />
+                  <select
+                    value={schedUnit}
+                    onChange={(e) =>
+                      setSchedUnit(e.target.value as ScheduleUnit)
+                    }
+                    className="flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                  >
+                    <option value="minutes">Minutes</option>
+                    <option value="hours">Hours</option>
+                    <option value="blocks">Blocks</option>
+                  </select>
+                </div>
+                <p className="mt-1 text-[10px] text-white/35">
+                  Stores as {wakeBlocksForCreate.toString()} blocks (~
+                  {BLOCK_TIME_SEC}s/block) · {formatInterval(wakeBlocksForCreate)}
+                </p>
               </div>
             </div>
 
@@ -889,7 +986,7 @@ export function AgentTab() {
                 </span>
               </div>
 
-              <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                 <Stat
                   label="Balance"
                   value={`${Number(formatEther(agent.balance)).toFixed(4)} RIT`}
@@ -909,6 +1006,22 @@ export function AgentTab() {
                       ? fmtMaxUint(ticksLeft)
                       : agent.maxRuns === BigInt(0)
                         ? "∞"
+                        : "—"
+                  }
+                />
+                <Stat
+                  label="Schedule"
+                  value={formatInterval(agent.wakeIntervalBlocks)}
+                />
+                <Stat
+                  label="Next auto-wake"
+                  value={
+                    agent.status !== 1
+                      ? "activate first"
+                      : dueInfo
+                        ? dueInfo.due
+                          ? "DUE NOW"
+                          : formatCountdown(dueInfo.secondsUntilDue)
                         : "—"
                   }
                 />
@@ -934,6 +1047,57 @@ export function AgentTab() {
 
               {agent.status !== 4 && (
                 <>
+                  <div className="mb-4 rounded-xl border border-[#c8ff4a]/20 bg-black/25 p-3">
+                    <div className="mb-2 text-xs font-semibold text-[#c8ff4a]">
+                      Auto-wake schedule
+                    </div>
+                    <p className="mb-2 text-[11px] text-white/40">
+                      Server keeper wakes Active agents when due (Vercel cron
+                      every 5 min). Agent pays tick fee from balance; keeper
+                      only pays gas. Manual Wake still works anytime.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        value={editSchedValue}
+                        onChange={(e) => setEditSchedValue(e.target.value)}
+                        className="w-24 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                        inputMode="numeric"
+                      />
+                      <select
+                        value={editSchedUnit}
+                        onChange={(e) =>
+                          setEditSchedUnit(e.target.value as ScheduleUnit)
+                        }
+                        className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                      >
+                        <option value="minutes">Minutes</option>
+                        <option value="hours">Hours</option>
+                        <option value="blocks">Blocks</option>
+                      </select>
+                      <button
+                        type="button"
+                        disabled={writing || ticking}
+                        onClick={() => void saveSchedule()}
+                        className="btn-primary rounded-lg px-4 text-sm"
+                      >
+                        Save schedule
+                      </button>
+                    </div>
+                    {dueInfo && agent.status === 1 && (
+                      <p
+                        className={`mt-2 text-[11px] ${
+                          dueInfo.due
+                            ? "font-semibold text-amber-200"
+                            : "text-white/40"
+                        }`}
+                      >
+                        {dueInfo.due
+                          ? "Schedule due — keeper will run on next cron (or Wake now)."
+                          : `Next automatic wake in ${formatCountdown(dueInfo.secondsUntilDue)} · ${new Date(dueInfo.nextRunAt * 1000).toLocaleString()}`}
+                      </p>
+                    )}
+                  </div>
+
                   <div className="mb-4 rounded-xl border border-white/10 bg-black/25 p-3">
                     <div className="mb-2 text-xs font-semibold text-[#c8ff4a]">
                       Fund run balance

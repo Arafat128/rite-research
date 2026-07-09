@@ -7,6 +7,15 @@
     },
     "src/app/api/agent/data/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/agent/cron/route.ts": {
+      "maxDuration": 300
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/agent/cron",
+      "schedule": "*/5 * * * *"
+    }
+  ]
 }

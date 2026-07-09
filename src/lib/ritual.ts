@@ -429,6 +429,16 @@ export const radarAgentAbi = [
   },
   {
     type: "function",
+    name: "setWakeInterval",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "agentId", type: "uint256" },
+      { name: "blocks_", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
     name: "runTick",
     stateMutability: "nonpayable",
     inputs: [
