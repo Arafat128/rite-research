@@ -42,6 +42,17 @@ CRON_SECRET=long-random-string
 
 Redeploy after saving env.
 
+### Local vs Vercel (common confusion)
+
+| Issue | Why | Fix |
+|--------|-----|-----|
+| Different agents on local vs Vercel | Different `NEXT_PUBLIC_RADAR_CONTRACT` (e.g. legacy `0x5ed8…` vs kill-capable `0x50a3…`) | Set **both** to `0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f` and redeploy |
+| Telegram linked on localhost, not on Vercel | Link is stored on **that server + browser origin**; localhost storage ≠ vercel.app | Open **production** → Connect Telegram once (or `/link 0x…`) |
+| Linked but no `@username` | Server had chat id only after cold start | Fixed in app (browser cache + silent rehydrate). Click **Refresh status** |
+| Bot silent on production | Webhook still points at a local tunnel | `setWebhook` to `https://YOUR_APP.vercel.app/api/notify/telegram/webhook` |
+
+**One bot = one webhook URL.** Production DMs need the Vercel webhook; local testing needs a tunnel webhook. Switch deliberately.
+
 ---
 
 ## 3. Point Telegram at your app (webhook)

@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import type { Address } from "viem";
 import { useToast } from "@/components/ToastProvider";
 
-const LS_KEY = "rite_telegram_chat_v1";
+const LS_KEY = "rite_telegram_link_v2";
+const LS_KEY_LEGACY = "rite_telegram_chat_v1";
 
 type Status = {
   configured: boolean;
@@ -15,17 +16,46 @@ type Status = {
   agentIds: string[];
 };
 
-function lsGet(owner: string): string | null {
+/** Full link snapshot kept in this browser (survives server cold starts). */
+type LocalLink = {
+  chatId: string;
+  username?: string;
+  enabled?: boolean;
+};
+
+function lsGet(owner: string): LocalLink | null {
   try {
-    return localStorage.getItem(`${LS_KEY}:${owner.toLowerCase()}`);
+    const raw = localStorage.getItem(`${LS_KEY}:${owner.toLowerCase()}`);
+    if (raw) {
+      const p = JSON.parse(raw) as LocalLink;
+      if (p?.chatId && /^\d+$/.test(p.chatId)) return p;
+    }
+    // migrate chat-id-only v1
+    const legacy = localStorage.getItem(
+      `${LS_KEY_LEGACY}:${owner.toLowerCase()}`
+    );
+    if (legacy && /^\d+$/.test(legacy)) {
+      const migrated: LocalLink = { chatId: legacy, enabled: true };
+      lsSet(owner, migrated);
+      return migrated;
+    }
   } catch {
-    return null;
+    /* ignore */
   }
+  return null;
 }
 
-function lsSet(owner: string, chatId: string) {
+function lsSet(owner: string, link: LocalLink) {
   try {
-    localStorage.setItem(`${LS_KEY}:${owner.toLowerCase()}`, chatId);
+    localStorage.setItem(
+      `${LS_KEY}:${owner.toLowerCase()}`,
+      JSON.stringify(link)
+    );
+    // keep legacy key so older code paths still rehydrate
+    localStorage.setItem(
+      `${LS_KEY_LEGACY}:${owner.toLowerCase()}`,
+      link.chatId
+    );
   } catch {
     /* ignore */
   }
@@ -34,6 +64,7 @@ function lsSet(owner: string, chatId: string) {
 function lsClear(owner: string) {
   try {
     localStorage.removeItem(`${LS_KEY}:${owner.toLowerCase()}`);
+    localStorage.removeItem(`${LS_KEY_LEGACY}:${owner.toLowerCase()}`);
   } catch {
     /* ignore */
   }
@@ -45,7 +76,7 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [manualChat, setManualChat] = useState("");
-  const [localChat, setLocalChat] = useState<string | null>(null);
+  const [localLink, setLocalLink] = useState<LocalLink | null>(null);
   const [deepLink, setDeepLink] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -56,27 +87,60 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
       );
       const data = (await res.json()) as Status & { error?: string };
       if (!res.ok) throw new Error(data.error || "status failed");
-      setSt(data);
       setErr("");
       const ls = lsGet(owner);
-      setLocalChat(ls);
-      // If server forgot (cold start) but we have local chat id, re-register
-      if (!data.linked && ls) {
-        await fetch("/api/notify/telegram", {
+      setLocalLink(ls);
+
+      // Re-hydrate server after cold start (silent — no spam DM)
+      if (ls?.chatId && (!data.linked || !data.username)) {
+        const reg = await fetch("/api/notify/telegram", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: "register_chat",
             owner,
-            chatId: ls,
+            chatId: ls.chatId,
+            username: ls.username,
+            enabled: ls.enabled ?? true,
+            silent: true,
           }),
-        }).catch(() => undefined);
-        const res2 = await fetch(
-          `/api/notify/telegram?owner=${encodeURIComponent(owner)}`,
-          { cache: "no-store" }
-        );
-        if (res2.ok) setSt(await res2.json());
+        }).catch(() => null);
+        if (reg?.ok) {
+          const res2 = await fetch(
+            `/api/notify/telegram?owner=${encodeURIComponent(owner)}`,
+            { cache: "no-store" }
+          );
+          if (res2.ok) {
+            const data2 = (await res2.json()) as Status;
+            setSt(data2);
+            if (data2.linked) {
+              lsSet(owner, {
+                chatId: ls.chatId,
+                username: data2.username || ls.username,
+                enabled: data2.enabled,
+              });
+              setLocalLink(lsGet(owner));
+            }
+            return;
+          }
+        }
       }
+
+      // Server is source of truth when linked — sync into localStorage
+      if (data.linked) {
+        // Prefer existing local chat id if GET doesn't return it (API never returns chatId)
+        const chatId = ls?.chatId;
+        if (chatId) {
+          lsSet(owner, {
+            chatId,
+            username: data.username || ls?.username,
+            enabled: data.enabled,
+          });
+          setLocalLink(lsGet(owner));
+        }
+      }
+
+      setSt(data);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not load Telegram status");
     }
@@ -104,11 +168,21 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
             code: tgCode,
           }),
         });
-        const data = (await res.json()) as { error?: string; chatId?: string };
+        const data = (await res.json()) as {
+          error?: string;
+          chatId?: string;
+          username?: string;
+        };
         if (!res.ok) throw new Error(data.error || "confirm failed");
-        if (data.chatId) lsSet(owner, data.chatId);
+        if (data.chatId) {
+          lsSet(owner, {
+            chatId: data.chatId,
+            username: data.username,
+            enabled: true,
+          });
+          setLocalLink(lsGet(owner));
+        }
         toast.success("Telegram linked", "Alerts are on");
-        // clean URL
         const url = new URL(window.location.href);
         url.searchParams.delete("tg_owner");
         url.searchParams.delete("tg_chat");
@@ -143,13 +217,17 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         enabled?: boolean;
         sent?: boolean;
         chatId?: string;
+        username?: string | null;
       };
       if (!res.ok) throw new Error(data.error || "Request failed");
 
       if (action === "link" && data.deepLink) {
         setDeepLink(data.deepLink);
-        // Popup blockers often kill window.open — link is shown below too
-        const opened = window.open(data.deepLink, "_blank", "noopener,noreferrer");
+        const opened = window.open(
+          data.deepLink,
+          "_blank",
+          "noopener,noreferrer"
+        );
         if (!opened) {
           toast.info(
             "Open the Telegram link below",
@@ -165,17 +243,34 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         toast.success("Test sent", "Check your Telegram DMs");
       } else if (action === "unlink") {
         lsClear(owner);
-        setLocalChat(null);
+        setLocalLink(null);
+        setDeepLink(null);
         toast.info("Telegram unlinked");
       } else if (action === "toggle") {
+        const ls = lsGet(owner);
+        if (ls) {
+          lsSet(owner, { ...ls, enabled: data.enabled ?? !ls.enabled });
+          setLocalLink(lsGet(owner));
+        }
         toast.success(
           data.enabled ? "Alerts on" : "Alerts paused",
           data.enabled ? "Tick DMs enabled" : "No more DMs until re-enabled"
         );
       } else if (action === "register_chat" && data.chatId) {
-        lsSet(owner, data.chatId);
-        setLocalChat(data.chatId);
+        lsSet(owner, {
+          chatId: data.chatId,
+          username: data.username || undefined,
+          enabled: true,
+        });
+        setLocalLink(lsGet(owner));
         toast.success("Telegram registered", `Chat ${data.chatId}`);
+      } else if (action === "confirm" && data.chatId) {
+        lsSet(owner, {
+          chatId: data.chatId,
+          username: data.username || undefined,
+          enabled: true,
+        });
+        setLocalLink(lsGet(owner));
       }
       await load();
     } catch (e) {
@@ -195,7 +290,12 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
     );
   }
 
-  const showLinked = st.linked || Boolean(localChat);
+  const showLinked = st.linked || Boolean(localLink?.chatId);
+  const displayUser =
+    st.username || localLink?.username || null;
+  const displayEnabled = st.linked
+    ? st.enabled
+    : (localLink?.enabled ?? Boolean(localLink?.chatId));
 
   return (
     <div className="glass rounded-2xl border border-[#c8ff4a]/20 p-4">
@@ -204,12 +304,12 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         {showLinked ? (
           <span
             className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-              st.enabled || localChat
+              displayEnabled
                 ? "bg-emerald-400/20 text-emerald-200"
                 : "bg-zinc-500/30 text-zinc-300"
             }`}
           >
-            {st.enabled || localChat ? "ON" : "PAUSED"}
+            {displayEnabled ? "ON" : "PAUSED"}
           </span>
         ) : (
           <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] text-white/50">
@@ -220,6 +320,7 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
       <p className="mb-3 text-[11px] leading-relaxed text-white/45">
         DMs after a sealed tick. Use <b className="text-white/70">Connect Telegram</b>{" "}
         from this app (not a bare <code className="text-white/50">/start</code>).
+        Link is per environment — re-connect once on Vercel if you linked only on localhost.
       </p>
 
       {!st.configured && (
@@ -234,28 +335,49 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
           <p className="font-semibold text-amber-100">If the bot stays silent:</p>
           <ol className="list-decimal space-y-1 pl-4 text-white/70">
             <li>
-              Re-run <code className="text-[#c8ff4a]">setWebhook</code> with{" "}
+              Production webhook must point at this site (not a local tunnel)
+            </li>
+            <li>
               <code className="text-[#c8ff4a]">secret_token</code> ={" "}
-              <b>exactly</b> the same as Vercel{" "}
               <code className="text-[#c8ff4a]">TELEGRAM_WEBHOOK_SECRET</code>
             </li>
             <li>
-              Turn off Vercel <b>Deployment Protection</b> on Production (or use
-              bypass query on webhook URL)
-            </li>
-            <li>
-              Or type in Telegram:{" "}
-              <code className="text-[#c8ff4a]">/link {owner}</code> then paste
+              Or: <code className="text-[#c8ff4a]">/link {owner}</code> then paste
               chat id below
             </li>
           </ol>
         </div>
       )}
 
-      {st.linked && st.username && (
-        <p className="mb-2 text-[11px] text-white/50">
-          Linked as @{st.username}
-        </p>
+      {showLinked && (
+        <div className="mb-2 space-y-0.5 text-[11px] text-white/55">
+          <p>
+            {displayUser ? (
+              <>
+                Linked as <span className="text-white/80">@{displayUser}</span>
+              </>
+            ) : (
+              <>Linked to Telegram</>
+            )}
+            {localLink?.chatId && (
+              <span className="text-white/35">
+                {" "}
+                · chat <code className="text-white/50">{localLink.chatId}</code>
+              </span>
+            )}
+          </p>
+          {st.linked && !st.username && localLink?.username && (
+            <p className="text-[10px] text-white/35">
+              Showing username from this browser (server had chat id only).
+            </p>
+          )}
+          {!st.linked && localLink?.chatId && (
+            <p className="text-[10px] text-amber-200/80">
+              Browser has chat id — rehydrating server… click Refresh if status
+              stays incomplete.
+            </p>
+          )}
+        </div>
       )}
 
       {deepLink && !showLinked && (
@@ -288,10 +410,6 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
               Copy link
             </button>
           </div>
-          <p className="text-[10px] text-white/40">
-            Must open this link (or press Start from it) — bare{" "}
-            <code className="text-white/50">/start</code> has no wallet token.
-          </p>
         </div>
       )}
 
@@ -309,16 +427,23 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
           <>
             <button
               type="button"
-              disabled={busy}
-              onClick={() => void post("toggle", { enabled: !st.enabled })}
+              disabled={busy || !st.configured}
+              onClick={() =>
+                void post("toggle", { enabled: !displayEnabled })
+              }
               className="rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm text-white"
             >
-              {st.enabled ? "Pause alerts" : "Enable alerts"}
+              {displayEnabled ? "Pause alerts" : "Enable alerts"}
             </button>
             <button
               type="button"
-              disabled={busy || !st.enabled}
-              onClick={() => void post("test")}
+              disabled={busy || !displayEnabled || !st.configured}
+              onClick={() =>
+                void post("test", {
+                  chatId: localLink?.chatId,
+                  username: localLink?.username || displayUser,
+                })
+              }
               className="rounded-lg border border-[#c8ff4a]/30 bg-[#c8ff4a]/10 px-3 py-2 text-sm text-[#c8ff4a]"
             >
               Send test
@@ -343,7 +468,6 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         </button>
       </div>
 
-      {/* Backup: manual chat id */}
       {!showLinked && st.configured && (
         <div className="mt-3 border-t border-white/10 pt-3">
           <p className="mb-1 text-[10px] uppercase tracking-wide text-white/35">
@@ -368,8 +492,7 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
             </button>
           </div>
           <p className="mt-1 text-[10px] text-white/35">
-            In the bot send <code className="text-white/50">/link {owner}</code>{" "}
-            — it will show your chat id if webhook works.
+            In the bot send <code className="text-white/50">/link {owner}</code>
           </p>
         </div>
       )}

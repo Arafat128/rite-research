@@ -2,10 +2,13 @@
  * Telegram notification prefs (owner wallet → chat id).
  *
  * Link tokens are **HMAC-signed and stateless** (safe across Vercel instances).
- * Prefs stay in-memory (reconnect after cold start unless Redis is added later).
+ * Prefs: in-memory + durable JSON file when possible (local / writable FS).
+ * On multi-instance serverless, clients re-hydrate via register_chat + localStorage.
  */
 
 import { createHmac, timingSafeEqual } from "crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import path from "path";
 
 export type TelegramPref = {
   owner: string;
@@ -19,6 +22,7 @@ export type TelegramPref = {
 
 const g = globalThis as typeof globalThis & {
   __riteTgPrefs?: Map<string, TelegramPref>;
+  __riteTgPrefsLoaded?: boolean;
 };
 
 function prefs(): Map<string, TelegramPref> {
@@ -35,19 +39,78 @@ function linkSecret(): string {
   );
 }
 
+/** Writable path for durable prefs (works locally; may work on some serverless). */
+function durablePath(): string | null {
+  try {
+    const base =
+      process.env.TELEGRAM_PREFS_PATH ||
+      process.env.RITE_DATA_DIR ||
+      (process.env.VERCEL
+        ? path.join("/tmp", "rite-telegram-prefs.json")
+        : path.join(process.cwd(), ".data", "telegram-prefs.json"));
+    return base;
+  } catch {
+    return null;
+  }
+}
+
+function loadDurable(): void {
+  if (g.__riteTgPrefsLoaded) return;
+  g.__riteTgPrefsLoaded = true;
+  const file = durablePath();
+  if (!file || !existsSync(file)) return;
+  try {
+    const raw = readFileSync(file, "utf8");
+    const data = JSON.parse(raw) as Record<string, TelegramPref>;
+    const m = prefs();
+    for (const [k, v] of Object.entries(data)) {
+      if (v?.chatId && v?.owner) {
+        m.set(k.toLowerCase(), {
+          ...v,
+          owner: v.owner.toLowerCase(),
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("[telegramPrefs] durable load failed", e);
+  }
+}
+
+function saveDurable(): void {
+  const file = durablePath();
+  if (!file) return;
+  try {
+    const dir = path.dirname(file);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const obj: Record<string, TelegramPref> = {};
+    for (const [k, v] of prefs().entries()) {
+      obj[k] = v;
+    }
+    writeFileSync(file, JSON.stringify(obj), "utf8");
+  } catch (e) {
+    // /tmp works on Vercel but is per-instance ephemeral — still better than pure RAM for warm instances
+    console.warn("[telegramPrefs] durable save failed", e);
+  }
+}
+
 export function getTelegramPref(owner: string): TelegramPref | null {
+  loadDurable();
   return prefs().get(owner.toLowerCase()) || null;
 }
 
 export function setTelegramPref(pref: TelegramPref) {
+  loadDurable();
   prefs().set(pref.owner.toLowerCase(), {
     ...pref,
     owner: pref.owner.toLowerCase(),
   });
+  saveDurable();
 }
 
 export function unlinkTelegram(owner: string) {
+  loadDurable();
   prefs().delete(owner.toLowerCase());
+  saveDurable();
 }
 
 /**
@@ -138,6 +201,7 @@ export function consumeLinkToken(
 }
 
 export function findPrefByChatId(chatId: string): TelegramPref | null {
+  loadDurable();
   const list = Array.from(prefs().values());
   for (let i = 0; i < list.length; i++) {
     if (list[i].chatId === chatId) return list[i];

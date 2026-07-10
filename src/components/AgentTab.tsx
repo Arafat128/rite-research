@@ -1228,6 +1228,30 @@ export function AgentTab({
         <Stat label="Your dead" value={String(deadAgentIds.length)} />
       </div>
 
+      {/* Make Radar env mismatch obvious (localhost vs Vercel often differ) */}
+      {RADAR_CONTRACT && (
+        <p className="mb-4 text-[11px] text-white/40">
+          On-chain registry:{" "}
+          <code className="text-white/60">
+            {RADAR_CONTRACT.slice(0, 10)}…{RADAR_CONTRACT.slice(-6)}
+          </code>
+          {RADAR_CONTRACT.toLowerCase() ===
+          "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30" ? (
+            <span className="text-amber-200/90">
+              {" "}
+              — LEGACY Radar. Agents here are NOT the same as kill-capable{" "}
+              <code className="text-white/50">0x50a3…</code>. Set Vercel{" "}
+              <code className="text-[#c8ff4a]/80">NEXT_PUBLIC_RADAR_CONTRACT</code>{" "}
+              to <code className="text-white/50">0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f</code>{" "}
+              and redeploy to match local.
+            </span>
+          ) : RADAR_CONTRACT.toLowerCase() ===
+            "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f" ? (
+            <span className="text-white/35"> — kill-capable Radar</span>
+          ) : null}
+        </p>
+      )}
+
       <div className="mb-6 flex flex-wrap gap-2">
         {flowSteps.map((f) => (
           <div
@@ -1925,7 +1949,15 @@ export function AgentTab({
           )}
 
           <p className="text-center text-[10px] text-white/30">
-            Radar {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
+            Radar{" "}
+            {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
+            {RADAR_CONTRACT?.toLowerCase() ===
+            "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f"
+              ? " · kill-capable"
+              : RADAR_CONTRACT?.toLowerCase() ===
+                  "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30"
+                ? " · LEGACY (no kill)"
+                : ""}
             {canKillOnChain === true
               ? " · killAgent available"
               : canKillOnChain === false

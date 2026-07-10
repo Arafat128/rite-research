@@ -68,6 +68,8 @@ export async function POST(req: NextRequest) {
       chatId?: string;
       code?: string;
       username?: string;
+      /** skip DM when re-hydrating from localStorage after cold start */
+      silent?: boolean;
     };
     const owner = (body.owner || "").toLowerCase();
     if (!owner || !isAddress(owner)) {
@@ -134,7 +136,20 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "test") {
-      const pref = getTelegramPref(owner);
+      let pref = getTelegramPref(owner);
+      // Allow client to rehydrate chat id when serverless instance has empty memory
+      const clientChat = String(body.chatId || "").trim();
+      if (!pref?.chatId && clientChat && /^\d+$/.test(clientChat)) {
+        setTelegramPref({
+          owner,
+          chatId: clientChat,
+          agentIds: [],
+          enabled: true,
+          linkedAt: Date.now(),
+          username: body.username?.replace(/^@/, "") || undefined,
+        });
+        pref = getTelegramPref(owner);
+      }
       if (!pref?.chatId) {
         return NextResponse.json({ error: "Link Telegram first" }, { status: 400 });
       }
@@ -173,18 +188,26 @@ export async function POST(req: NextRequest) {
         );
       }
       const existing = getTelegramPref(owner);
+      const username =
+        (body.username || existing?.username || "").replace(/^@/, "") ||
+        undefined;
       setTelegramPref({
         owner,
         chatId,
         agentIds: existing?.agentIds || [],
         enabled: true,
         linkedAt: Date.now(),
-        username: body.username || existing?.username,
+        username,
       });
-      return NextResponse.json({ ok: true, linked: true, chatId });
+      return NextResponse.json({
+        ok: true,
+        linked: true,
+        chatId,
+        username: username || null,
+      });
     }
 
-    // Manual chat id paste (backup)
+    // Manual chat id paste (backup) OR silent re-hydrate from browser localStorage
     if (action === "register_chat") {
       const chatId = String(body.chatId || "").trim();
       if (!/^\d+$/.test(chatId)) {
@@ -193,22 +216,39 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
+      const existing = getTelegramPref(owner);
+      const username =
+        (body.username || existing?.username || "").replace(/^@/, "") ||
+        undefined;
+      const enabled =
+        typeof body.enabled === "boolean"
+          ? body.enabled
+          : (existing?.enabled ?? true);
       setTelegramPref({
         owner,
         chatId,
-        agentIds: [],
-        enabled: true,
-        linkedAt: Date.now(),
+        agentIds: existing?.agentIds || [],
+        enabled,
+        linkedAt: existing?.linkedAt || Date.now(),
+        username,
       });
-      try {
-        await sendTelegramMessage(
-          chatId,
-          `<b>Rite</b>: chat id registered for <code>${owner.slice(0, 6)}…${owner.slice(-4)}</code>. Alerts ON.`
-        );
-      } catch {
-        /* still save */
+      if (!body.silent) {
+        try {
+          await sendTelegramMessage(
+            chatId,
+            `<b>Rite</b>: chat id registered for <code>${owner.slice(0, 6)}…${owner.slice(-4)}</code>. Alerts ON.`
+          );
+        } catch {
+          /* still save */
+        }
       }
-      return NextResponse.json({ ok: true, linked: true, chatId });
+      return NextResponse.json({
+        ok: true,
+        linked: true,
+        chatId,
+        username: username || null,
+        enabled,
+      });
     }
 
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
