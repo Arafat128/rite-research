@@ -61,6 +61,9 @@ const ERROR_HINTS: Record<string, string> = {
     "Connected wallet is not the agent owner. Switch to the wallet that created this agent.",
   AgentIsDead:
     "Agent is already dead on-chain. Kill only works once — any balance was refunded in the kill transaction. Deploy a new agent if you need another.",
+  /** Legacy Radar (0x5ed8…) reverts withdraw when status=Dead — residual can be stuck */
+  AgentIsDeadWithdraw:
+    "This Radar contract blocks withdraw after an agent dies, so residual RIT cannot be recovered. Use a kill-capable Radar for new agents, or withdraw balance before the last sovereign tick.",
   InsufficientBalance:
     "Nothing left to withdraw: agent on-chain balance is zero (already withdrawn or refunded on kill). Click Refresh.",
   UnknownAgent: "Agent not found on this Radar contract.",
@@ -131,8 +134,14 @@ function extractRevertData(e: unknown): Hex | undefined {
   return undefined;
 }
 
-function hintForErrorName(name: string | undefined): string | null {
+function hintForErrorName(
+  name: string | undefined,
+  context?: string
+): string | null {
   if (!name) return null;
+  if (name === "AgentIsDead" && context === "withdraw") {
+    return ERROR_HINTS.AgentIsDeadWithdraw;
+  }
   if (ERROR_HINTS[name]) return ERROR_HINTS[name];
   // viem sometimes puts "execution reverted" as the reason with no name
   if (/execution reverted/i.test(name)) return null;
@@ -149,11 +158,11 @@ export function decodeRadarRevert(
       const rev = node.walk((x) => x instanceof ContractFunctionRevertedError);
       if (rev instanceof ContractFunctionRevertedError) {
         const name = rev.data?.errorName;
-        const hinted = hintForErrorName(name);
+        const hinted = hintForErrorName(name, context);
         if (hinted) return hinted;
         // reason is often the useless string "execution reverted"
         if (rev.reason && !/execution reverted/i.test(rev.reason)) {
-          const h2 = hintForErrorName(rev.reason);
+          const h2 = hintForErrorName(rev.reason, context);
           if (h2) return h2;
         }
       }
@@ -164,10 +173,13 @@ export function decodeRadarRevert(
   if (data) {
     const sel = data.slice(0, 10).toLowerCase();
     const bySel = ERROR_SELECTORS[sel];
-    if (bySel && ERROR_HINTS[bySel]) return ERROR_HINTS[bySel];
+    if (bySel) {
+      const hinted = hintForErrorName(bySel, context);
+      if (hinted) return hinted;
+    }
     try {
       const decoded = decodeErrorResult({ abi: radarAgentAbi, data });
-      const hinted = hintForErrorName(decoded.errorName);
+      const hinted = hintForErrorName(decoded.errorName, context);
       if (hinted) return hinted;
     } catch {
       /* not a custom error */
@@ -196,7 +208,7 @@ export function decodeRadarRevert(
         return ERROR_HINTS.AgentIsDead;
       }
       if (context === "withdraw") {
-        return ERROR_HINTS.InsufficientBalance;
+        return ERROR_HINTS.AgentIsDeadWithdraw;
       }
       return "Transaction would revert on-chain. Click Refresh — the agent may already be dead or have zero balance.";
     }
@@ -211,7 +223,7 @@ export function decodeRadarRevert(
     return e.message.slice(0, 220);
   }
   if (context === "killAgent") return ERROR_HINTS.AgentIsDead;
-  if (context === "withdraw") return ERROR_HINTS.InsufficientBalance;
+  if (context === "withdraw") return ERROR_HINTS.AgentIsDeadWithdraw;
   return "Transaction would revert. Click Refresh and check agent status/balance.";
 }
 

@@ -209,7 +209,6 @@ export function AgentTab({
   const [lastSnapshot, setLastSnapshot] = useState<SurfDataSnapshot | null>(
     null
   );
-  const [autoWakeReady, setAutoWakeReady] = useState<boolean | null>(null);
   /** Lightweight status map for agent chips (avoid full panel for dead) */
   const [agentMeta, setAgentMeta] = useState<
     Record<
@@ -406,8 +405,6 @@ export function AgentTab({
 
       await refreshNetwork();
 
-      // Public health no longer exposes config; infer readiness only if needed later
-      setAutoWakeReady(null);
     } catch (e: unknown) {
       // Soft mode: never overwrite a success message with RPC noise
       if (!opts?.soft) setErr(errMsg(e));
@@ -470,91 +467,118 @@ export function AgentTab({
     [agentIds, agentMeta]
   );
 
-  // Auto-withdraw residual RIT from dead/closed agents (one MetaMask confirm each)
+  // One-shot residual withdraw for dead agents (never loop / beep).
+  // Legacy Radar reverts withdraw when Dead — detect once and stop.
+  const autoWithdrawRunning = useRef(false);
+  const residualDeadKey = useMemo(
+    () =>
+      deadAgentIds
+        .filter((id) => {
+          const m = agentMeta[id.toString()];
+          try {
+            return m && BigInt(m.balance) > BigInt(0);
+          } catch {
+            return false;
+          }
+        })
+        .map((id) => id.toString())
+        .join(","),
+    [deadAgentIds, agentMeta]
+  );
+
   useEffect(() => {
     if (mode !== "manage") return;
-    if (!isConnected || !address || wrongChain || writing) return;
-    if (!RADAR_CONTRACT) return;
+    if (!isConnected || !address || wrongChain) return;
+    if (!RADAR_CONTRACT || writing || autoWithdrawRunning.current) return;
+    if (!residualDeadKey) return;
 
-    const pending = deadAgentIds.filter((id) => {
-      const key = id.toString();
-      if (autoWithdrawTried.current.has(key)) return false;
-      const m = agentMeta[key];
-      if (!m) return false;
-      try {
-        return BigInt(m.balance) > BigInt(0);
-      } catch {
-        return false;
-      }
-    });
-    if (!pending.length) return;
+    const firstId = residualDeadKey.split(",")[0];
+    if (!firstId || autoWithdrawTried.current.has(firstId)) return;
+
+    const id = BigInt(firstId);
+    const key = firstId;
+    autoWithdrawTried.current.add(key);
+    autoWithdrawRunning.current = true;
 
     let cancelled = false;
     (async () => {
-      for (const id of pending) {
-        if (cancelled) break;
-        const key = id.toString();
-        autoWithdrawTried.current.add(key);
-        const m = agentMeta[key];
-        if (!m) continue;
-        let bal: bigint;
-        try {
-          bal = BigInt(m.balance);
-        } catch {
-          continue;
+      const m = agentMeta[key];
+      let bal = BigInt(0);
+      try {
+        bal = BigInt(m?.balance || "0");
+      } catch {
+        bal = BigInt(0);
+      }
+      if (bal <= BigInt(0) || cancelled || !address) {
+        autoWithdrawRunning.current = false;
+        return;
+      }
+
+      try {
+        await prepareRadarWrite({
+          account: address,
+          functionName: "withdraw",
+          args: [id, bal],
+          gasFloor: BigInt(120_000),
+        });
+      } catch {
+        if (!cancelled) {
+          setMsg("");
+          setErr(
+            `#${key}: residual ${formatEther(bal)} RIT is locked — this Radar blocks withdraw after death. Deploy on a kill-capable Radar and withdraw before the last sovereign tick next time.`
+          );
         }
-        if (bal <= BigInt(0)) continue;
-        try {
+        autoWithdrawRunning.current = false;
+        return;
+      }
+
+      if (cancelled) {
+        autoWithdrawRunning.current = false;
+        return;
+      }
+
+      try {
+        setMsg(
+          `Confirm withdraw ${formatEther(bal)} RIT residual from dead #${key}…`
+        );
+        setErr("");
+        const hash = await radarWrite({
+          functionName: "withdraw",
+          args: [id, bal],
+          gasFloor: BigInt(120_000),
+        });
+        const receipt = await waitTx(hash);
+        if (receipt.status === "success") {
           setMsg(
-            `Dead agent #${key} still holds ${formatEther(bal)} RIT — confirm auto-withdraw…`
+            `#${key}: ${formatEther(bal)} RIT residual sent to your wallet`
+          );
+          setAgentMeta((prev) => ({
+            ...prev,
+            [key]: { ...prev[key], balance: "0", status: 4 },
+          }));
+          void refresh({ soft: true });
+        }
+      } catch (e: unknown) {
+        const reason = errMsg(e, "withdraw");
+        if (/reject|denied/i.test(reason)) {
+          setMsg(
+            `Withdraw cancelled for #${key}. Residual remains on the agent.`
           );
           setErr("");
-          const fees = await prepareRadarWrite({
-            account: address,
-            functionName: "withdraw",
-            args: [id, bal],
-            gasFloor: BigInt(120_000),
-          });
-          assertWalletCanPayGas(walletBal?.value, fees);
-          const hash = await writeContractAsync({
-            address: RADAR_CONTRACT,
-            abi: radarAgentAbi,
-            functionName: "withdraw",
-            args: [id, bal],
-            chainId: ritualChain.id,
-            gas: fees.gas,
-            gasPrice: fees.gasPrice,
-          } as never);
-          const client = publicClient ?? getRitualReadClient(true);
-          const receipt = await client.waitForTransactionReceipt({
-            hash,
-            confirmations: 1,
-          });
-          if (receipt.status === "success") {
-            setMsg(
-              `Residual ${formatEther(bal)} RIT from dead #${key} sent to your wallet`
-            );
-            setAgentMeta((prev) => ({
-              ...prev,
-              [key]: { ...prev[key], balance: "0", status: 4 },
-            }));
-          }
-        } catch (e: unknown) {
-          autoWithdrawTried.current.delete(key);
-          setErr(
-            `Could not auto-withdraw #${key}: ${errMsg(e, "withdraw")}`
-          );
-          break;
+        } else {
+          setErr(`#${key}: ${reason}`);
+          setMsg("");
         }
+      } finally {
+        autoWithdrawRunning.current = false;
       }
-      if (!cancelled) void refresh({ soft: true });
     })();
 
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per residual dead agent
-  }, [mode, deadAgentIds, agentMeta, isConnected, address, wrongChain]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isConnected, address, wrongChain, residualDeadKey]);
 
   async function ensureWallet() {
     if (!isConnected) {
@@ -716,18 +740,31 @@ export function AgentTab({
       setErr("");
       await ensureWallet();
       if (agent?.status === 4) throw new Error("Agent is dead");
+      const n = Number(editSchedValue);
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new Error("Enter a positive schedule value (e.g. 3 minutes)");
+      }
       const blocks = scheduleToBlocks({
-        value: Number(editSchedValue) || 1,
+        value: n,
         unit: editSchedUnit,
       });
-      setMsg(`Saving wake schedule ${formatInterval(blocks)}…`);
+      setMsg(`Confirm setWakeInterval · ${formatInterval(blocks)}…`);
       const hash = await radarWrite({
         functionName: "setWakeInterval",
         args: [selectedId, blocks],
       });
       await waitTx(hash);
-      setMsg(`Schedule saved · ${formatInterval(blocks)}`);
-      await refresh();
+      // Optimistic UI so dashboard updates immediately
+      if (agent) {
+        setAgent({ ...agent, wakeIntervalBlocks: blocks });
+      }
+      setMsg(
+        `Schedule saved on-chain: ${formatInterval(blocks)}. ` +
+          (agent?.status === 1
+            ? "Use Wake when due — auto-wake only if keeper cron is configured."
+            : "Activate → LIVE, fund if needed, then Wake.")
+      );
+      await refresh({ soft: true });
     } catch (e: unknown) {
       setErr(errMsg(e));
       setMsg("");
@@ -1200,9 +1237,9 @@ export function AgentTab({
         ) : (
           <>
             Control <b className="text-white/80">live</b> agents only — activate,
-            fund, schedule, wake. Dead agents stay out of the way; any residual
-            RIT is <b className="text-white/80">auto-withdrawn</b> to your wallet
-            (confirm in MetaMask).
+            fund, schedule, and wake. Dead agents are listed once at the bottom.
+            Residual withdraw only works if this Radar allows it after death
+            (legacy contracts often lock residual).
           </>
         )}
       </p>
@@ -1528,13 +1565,13 @@ export function AgentTab({
             </div>
           )}
 
-          {/* Dead — minimal one-liner (no big cards) */}
+          {/* Dead — minimal one-liner (no big cards, no spam) */}
           {deadAgentIds.length > 0 && (
             <p className="text-[11px] text-white/30">
               Dead / closed:{" "}
               {deadAgentIds.map((id) => `#${id.toString()}`).join(", ")}
               {" · "}
-              residual RIT auto-withdraws to your wallet when present
+              finished agents are not managed here
             </p>
           )}
 
@@ -1616,41 +1653,32 @@ export function AgentTab({
                 />
               </div>
 
+                  {agent.status === 3 && (
+                    <div className="mb-4 rounded-xl border border-amber-400/40 bg-amber-950/40 p-3 text-[12px] text-amber-100">
+                      Agent is <b>Out of funds</b> — ticks and auto-wake cannot
+                      run. Deposit RIT below, then Activate → LIVE, then Wake.
+                    </div>
+                  )}
+
                   <div className="mb-4 rounded-xl border border-[#c8ff4a]/20 bg-black/25 p-3">
                     <div className="mb-2 text-xs font-semibold text-[#c8ff4a]">
-                      Auto-wake schedule
+                      Wake schedule
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      Server keeper wakes Active agents when due (call{" "}
-                      <code className="text-white/55">/api/agent/cron</code> on
-                      a timer — Hobby Vercel only allows daily native cron; use
-                      Pro or an external cron every few minutes). Agent pays
-                      tick fee from balance; keeper only pays gas. Manual Wake
-                      still works anytime.
+                      Saved on-chain as block interval. Example: 3 minutes ≈{" "}
+                      {scheduleToBlocks({ value: 3, unit: "minutes" }).toString()}{" "}
+                      blocks (~{BLOCK_TIME_SEC}s/block).{" "}
+                      <b className="text-white/55">Manual Wake</b> always works
+                      when LIVE + funded. Automatic wakes need a server keeper
+                      (CRON_SECRET + KEEPER_PRIVATE_KEY) — not just saving a
+                      schedule.
                     </p>
-                    {autoWakeReady === false && (
-                      <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
-                        Auto-wake is <b>not configured</b> on this deployment
-                        (missing <code className="text-[#c8ff4a]">KEEPER_PRIVATE_KEY</code>{" "}
-                        and/or Surf key on Vercel Production). Use{" "}
-                        <b>Wake · pull Data API</b> until env is set. Also disable
-                        Vercel Deployment Protection or cron hits a login page.
-                      </p>
-                    )}
-                    {autoWakeReady === true &&
-                      dueInfo?.due &&
-                      agent.runCount === BigInt(0) && (
-                        <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
-                          Agent is due but has <b>never</b> sealed a tick. If this
-                          stays for 10+ min, Vercel Cron is blocked (Deployment
-                          Protection) or the keeper wallet has no gas. Use{" "}
-                          <b>Wake</b> now, or open{" "}
-                          <code className="text-[#c8ff4a]">
-                            /api/agent/cron?secret=YOUR_CRON_SECRET
-                          </code>
-                          .
-                        </p>
-                    )}
+                    <p className="mb-2 text-[11px] text-white/50">
+                      On-chain interval now:{" "}
+                      <b className="text-[#c8ff4a]">
+                        {formatInterval(agent.wakeIntervalBlocks)}
+                      </b>
+                    </p>
                     <div className="flex flex-wrap gap-2">
                       <input
                         value={editSchedValue}
@@ -1687,8 +1715,14 @@ export function AgentTab({
                         }`}
                       >
                         {dueInfo.due
-                          ? "Schedule due — keeper will run on next cron (or Wake now)."
-                          : `Next automatic wake in ${formatCountdown(dueInfo.secondsUntilDue)} · ${new Date(dueInfo.nextRunAt * 1000).toLocaleString()}`}
+                          ? "Interval elapsed — click Wake now (or wait for keeper if configured)."
+                          : `Next interval in ${formatCountdown(dueInfo.secondsUntilDue)} · ${new Date(dueInfo.nextRunAt * 1000).toLocaleString()}`}
+                      </p>
+                    )}
+                    {agent.status !== 1 && (
+                      <p className="mt-2 text-[11px] text-white/40">
+                        Activate → LIVE (and fund if needed) before schedule /
+                        wake matter.
                       </p>
                     )}
                   </div>
