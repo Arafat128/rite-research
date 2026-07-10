@@ -15,12 +15,8 @@ type Status = {
   username: string | null;
   agentIds: string[];
   chatId?: string | null;
-  hasEnvLinks?: boolean;
-  unattendedHint?: {
-    envName: string;
-    envValue: string;
-    altEnv: string;
-  } | null;
+  storeBackend?: "upstash" | "memory";
+  multiUserReady?: boolean;
 };
 
 /** Full link snapshot kept in this browser (survives server cold starts). */
@@ -387,63 +383,42 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
               stays incomplete.
             </p>
           )}
-          {/* Unattended DMs need env on Vercel — serverless memory is empty for cron */}
-          {(st.chatId || localLink?.chatId) && (
-            <div className="mt-2 rounded-lg border border-amber-400/25 bg-amber-950/30 px-2 py-2 text-[10px] leading-relaxed text-amber-50/90">
-              <p className="font-semibold text-amber-100">
-                Unattended Telegram (site closed)
-              </p>
+          <div
+            className={`mt-2 rounded-lg border px-2 py-2 text-[10px] leading-relaxed ${
+              st.multiUserReady
+                ? "border-emerald-400/25 bg-emerald-950/30 text-emerald-50/90"
+                : "border-amber-400/25 bg-amber-950/30 text-amber-50/90"
+            }`}
+          >
+            <p className="font-semibold">
+              {st.multiUserReady
+                ? "Multi-user unattended DMs: ON"
+                : "Multi-user unattended DMs: needs Redis (once)"}
+            </p>
+            {st.multiUserReady ? (
               <p className="mt-1 text-white/60">
-                GitHub/cron ticks only DM you if Vercel has your chat id. Add
-                one env on Production and redeploy:
+                Each user only clicks <b>Connect Telegram</b> — no per-user env.
+                Keeper can DM them with the site closed.
               </p>
-              <p className="mt-1 break-all font-mono text-[9px] text-[#c8ff4a]/90">
-                {st.unattendedHint?.envName || "TELEGRAM_LINKS_JSON"}=
-                {st.unattendedHint?.envValue ||
-                  (localLink?.chatId
-                    ? JSON.stringify({
-                        [owner.toLowerCase()]: localLink.chatId,
-                      })
-                    : "…")}
+            ) : (
+              <p className="mt-1 text-white/60">
+                Without shared storage, Vercel forgets links between instances.
+                Admin (once): free{" "}
+                <a
+                  className="text-[#c8ff4a] underline"
+                  href="https://console.upstash.com"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Upstash Redis
+                </a>{" "}
+                → add{" "}
+                <code className="text-white/70">UPSTASH_REDIS_REST_URL</code> +{" "}
+                <code className="text-white/70">UPSTASH_REDIS_REST_TOKEN</code>{" "}
+                on Vercel → redeploy. Then every new user just links in the app.
               </p>
-              <p className="mt-1 break-all font-mono text-[9px] text-white/45">
-                or{" "}
-                {st.unattendedHint?.altEnv ||
-                  `TELEGRAM_DEFAULT_CHAT_ID=${localLink?.chatId || "YOUR_CHAT_ID"}`}
-              </p>
-              {st.hasEnvLinks ? (
-                <p className="mt-1 text-emerald-200/90">
-                  Env link detected on server — unattended DMs should work.
-                </p>
-              ) : (
-                <p className="mt-1 text-amber-200/80">
-                  Env not set yet — DMs only when this browser pushes after a
-                  tick.
-                </p>
-              )}
-              <button
-                type="button"
-                className="mt-1.5 rounded border border-white/15 px-2 py-0.5 text-[10px] text-white/80"
-                onClick={async () => {
-                  const v =
-                    st.unattendedHint?.envValue ||
-                    (localLink?.chatId
-                      ? JSON.stringify({
-                          [owner.toLowerCase()]: localLink.chatId,
-                        })
-                      : "");
-                  try {
-                    await navigator.clipboard.writeText(v);
-                    toast.success("Copied", "Paste into Vercel env value");
-                  } catch {
-                    toast.info("Copy manually", v.slice(0, 40));
-                  }
-                }}
-              >
-                Copy TELEGRAM_LINKS_JSON value
-              </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
 

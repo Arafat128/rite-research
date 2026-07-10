@@ -6,7 +6,7 @@ import {
   formatTickTelegramMessage,
   type TickNotifyPayload,
 } from "@/lib/telegram";
-import { getTelegramPref, setTelegramPref } from "@/lib/telegramPrefs";
+import { setTelegramPrefAsync } from "@/lib/telegramPrefs";
 import { clientIp, publicErrorMessage, rateLimit } from "@/lib/security";
 import type { SnapshotCell } from "@/lib/surfData";
 
@@ -84,18 +84,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Re-hydrate server map from client chat id if needed
+    // Re-hydrate durable store from client chat id (multi-user + cold start)
     if (body.chatId && /^\d+$/.test(body.chatId)) {
-      const pref = getTelegramPref(body.owner);
-      if (!pref?.chatId) {
-        setTelegramPref({
-          owner: body.owner.toLowerCase(),
-          chatId: body.chatId,
-          agentIds: [],
-          enabled: true,
-          linkedAt: Date.now(),
-        });
-      }
+      await setTelegramPrefAsync({
+        owner: body.owner.toLowerCase(),
+        chatId: body.chatId,
+        agentIds: [],
+        enabled: true,
+        linkedAt: Date.now(),
+      });
     }
 
     const rows = slimRows(body.rows);

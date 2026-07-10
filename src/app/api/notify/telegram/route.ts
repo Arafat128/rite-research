@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { isAddress } from "viem";
 import {
   createLinkToken,
-  formatLinksJsonSnippet,
   getTelegramPref,
+  resolveTelegramPref,
   setTelegramPref,
+  setTelegramPrefAsync,
+  telegramPrefsBackend,
   unlinkTelegram,
   verifyConfirmCode,
 } from "@/lib/telegramPrefs";
@@ -33,9 +35,10 @@ export async function GET(req: NextRequest) {
     if (!owner || !isAddress(owner)) {
       return NextResponse.json({ error: "owner address required" }, { status: 400 });
     }
-    const pref = getTelegramPref(owner);
+    const pref = await resolveTelegramPref(owner);
     const bot = telegramBotUsername();
     const linked = Boolean(pref?.chatId);
+    const backend = telegramPrefsBackend();
     return NextResponse.json({
       ok: true,
       configured: telegramConfigured(),
@@ -46,22 +49,9 @@ export async function GET(req: NextRequest) {
       agentIds: pref?.agentIds || [],
       linkedAt: pref?.linkedAt || null,
       chatId: pref?.chatId || null,
-      // For unattended keeper DMs on Vercel (multi-instance memory is empty)
-      unattendedHint: pref?.chatId
-        ? {
-            envName: "TELEGRAM_LINKS_JSON",
-            envValue: formatLinksJsonSnippet(
-              owner,
-              pref.chatId,
-              pref.username
-            ),
-            altEnv: `TELEGRAM_DEFAULT_CHAT_ID=${pref.chatId}`,
-          }
-        : null,
-      hasEnvLinks: Boolean(
-        process.env.TELEGRAM_LINKS_JSON?.trim() ||
-          process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim()
-      ),
+      // multi-user: Upstash once for the app — not per end-user env
+      storeBackend: backend,
+      multiUserReady: backend === "upstash",
     });
   } catch (e: unknown) {
     return NextResponse.json(
@@ -155,11 +145,11 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "test") {
-      let pref = getTelegramPref(owner);
+      let pref = await resolveTelegramPref(owner);
       // Allow client to rehydrate chat id when serverless instance has empty memory
       const clientChat = String(body.chatId || "").trim();
       if (!pref?.chatId && clientChat && /^\d+$/.test(clientChat)) {
-        setTelegramPref({
+        await setTelegramPrefAsync({
           owner,
           chatId: clientChat,
           agentIds: [],
@@ -167,7 +157,7 @@ export async function POST(req: NextRequest) {
           linkedAt: Date.now(),
           username: body.username?.replace(/^@/, "") || undefined,
         });
-        pref = getTelegramPref(owner);
+        pref = await resolveTelegramPref(owner);
       }
       if (!pref?.chatId) {
         return NextResponse.json({ error: "Link Telegram first" }, { status: 400 });
@@ -206,11 +196,11 @@ export async function POST(req: NextRequest) {
           { status: 403 }
         );
       }
-      const existing = getTelegramPref(owner);
+      const existing = await resolveTelegramPref(owner);
       const username =
         (body.username || existing?.username || "").replace(/^@/, "") ||
         undefined;
-      setTelegramPref({
+      await setTelegramPrefAsync({
         owner,
         chatId,
         agentIds: existing?.agentIds || [],
@@ -235,7 +225,7 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      const existing = getTelegramPref(owner);
+      const existing = await resolveTelegramPref(owner);
       const username =
         (body.username || existing?.username || "").replace(/^@/, "") ||
         undefined;
@@ -243,7 +233,7 @@ export async function POST(req: NextRequest) {
         typeof body.enabled === "boolean"
           ? body.enabled
           : (existing?.enabled ?? true);
-      setTelegramPref({
+      await setTelegramPrefAsync({
         owner,
         chatId,
         agentIds: existing?.agentIds || [],

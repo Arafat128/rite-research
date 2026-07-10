@@ -83,23 +83,28 @@ cast send 0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f \
 
 Keeper address = public address of `KEEPER_PRIVATE_KEY`.
 
-### 7. Telegram unattended DMs (required for closed-tab alerts)
+### 7. Telegram multi-user DMs (correct product flow)
 
-Serverless instances **forget** in-memory links. For DMs when the site is closed:
+**End users never set env vars.** They only:
 
-1. Webhook → production URL  
-2. Open production → **Connect Telegram** once  
-3. Copy the shown **`TELEGRAM_LINKS_JSON`** value (or chat id)  
-4. Vercel → Environment Variables → Production:
+1. Connect wallet  
+2. My Agents → **Connect Telegram** → Start bot  
+
+**Admin once** (shared store for all users):
+
+1. Free [Upstash Redis](https://console.upstash.com) → REST API  
+2. Vercel env (Production):
 
 | Name | Value |
 |------|--------|
-| `TELEGRAM_LINKS_JSON` | `{"0xyourwallet…":"YOUR_CHAT_ID"}` |
-| **or** `TELEGRAM_DEFAULT_CHAT_ID` | `YOUR_CHAT_ID` only |
+| `UPSTASH_REDIS_REST_URL` | from Upstash |
+| `UPSTASH_REDIS_REST_TOKEN` | from Upstash |
 
-5. **Redeploy**
+3. Redeploy  
 
-Without this, ticks still seal unattended, but Telegram only fires when a browser pushes after open.
+Then every user’s link is stored in Redis and keeper DMs work with the site closed.
+
+`TELEGRAM_DEFAULT_CHAT_ID` is **optional single-operator fallback only** — not the multi-user path.
 
 ---
 

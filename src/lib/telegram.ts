@@ -5,7 +5,7 @@
 
 import { EXPLORER_URL as EXPLORER } from "@/lib/ritual";
 import {
-  getTelegramPref,
+  resolveTelegramPref,
   shouldNotifyAgent,
   type TelegramPref,
 } from "@/lib/telegramPrefs";
@@ -246,7 +246,8 @@ export async function notifyAgentTick(
   if (!telegramConfigured()) {
     return { sent: false, reason: "telegram_not_configured" };
   }
-  const pref = getTelegramPref(p.owner);
+  // Resolve across instances (Upstash) — do not rely on in-memory only
+  const pref = await resolveTelegramPref(p.owner);
   if (!pref) return { sent: false, reason: "not_linked" };
   if (!shouldNotifyAgent(pref, p.agentId)) {
     return { sent: false, reason: "filtered" };

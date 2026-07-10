@@ -1,14 +1,24 @@
 /**
  * Telegram notification prefs (owner wallet → chat id).
  *
- * Link tokens are **HMAC-signed and stateless** (safe across Vercel instances).
- * Prefs: in-memory + durable JSON file when possible (local / writable FS).
- * On multi-instance serverless, clients re-hydrate via register_chat + localStorage.
+ * Product flow (multi-user, no per-user env):
+ *   User clicks Connect Telegram → bot /start → webhook setTelegramPref
+ *   → Upstash Redis (shared across all Vercel instances) when configured
+ *   Keeper cron → resolveTelegramPref(owner) → DM
+ *
+ * One-time app setup (admin, not per user): UPSTASH_REDIS_REST_URL + TOKEN
+ * Optional single-dev fallbacks: TELEGRAM_DEFAULT_CHAT_ID / TELEGRAM_LINKS_JSON
  */
 
 import { createHmac, timingSafeEqual } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
+import {
+  remoteDeletePref,
+  remoteGetPref,
+  remoteSetPref,
+  telegramStoreBackend,
+} from "@/lib/telegramStore";
 
 export type TelegramPref = {
   owner: string;
@@ -154,6 +164,7 @@ function envLinks(): Map<string, TelegramPref> {
   return out;
 }
 
+/** Sync read: memory, local file, env fallbacks (no network). */
 export function getTelegramPref(owner: string): TelegramPref | null {
   loadDurable();
   const o = owner.toLowerCase();
@@ -177,19 +188,59 @@ export function getTelegramPref(owner: string): TelegramPref | null {
   return null;
 }
 
+/**
+ * Full resolve for keeper / API: memory → file → env → Upstash (multi-user).
+ * Call this from async routes so cold cron instances still find linked users.
+ */
+export async function resolveTelegramPref(
+  owner: string
+): Promise<TelegramPref | null> {
+  const local = getTelegramPref(owner);
+  if (local?.chatId) return local;
+
+  const remote = await remoteGetPref(owner);
+  if (remote?.chatId) {
+    loadDurable();
+    prefs().set(remote.owner.toLowerCase(), remote);
+    saveDurable();
+    return remote;
+  }
+  return null;
+}
+
 export function setTelegramPref(pref: TelegramPref) {
   loadDurable();
-  prefs().set(pref.owner.toLowerCase(), {
+  const next = {
     ...pref,
     owner: pref.owner.toLowerCase(),
-  });
+  };
+  prefs().set(next.owner, next);
   saveDurable();
+  // Multi-user durable (fire-and-forget safe; callers that need certainty await flushTelegramPref)
+  void remoteSetPref(next);
+}
+
+/** Awaitable write for webhook/API so link is on Redis before response. */
+export async function setTelegramPrefAsync(pref: TelegramPref): Promise<void> {
+  loadDurable();
+  const next = {
+    ...pref,
+    owner: pref.owner.toLowerCase(),
+  };
+  prefs().set(next.owner, next);
+  saveDurable();
+  await remoteSetPref(next);
 }
 
 export function unlinkTelegram(owner: string) {
   loadDurable();
   prefs().delete(owner.toLowerCase());
   saveDurable();
+  void remoteDeletePref(owner);
+}
+
+export function telegramPrefsBackend(): "upstash" | "memory" {
+  return telegramStoreBackend();
 }
 
 /** Value to paste into Vercel TELEGRAM_LINKS_JSON for unattended DMs */

@@ -3,7 +3,9 @@ import {
   createConfirmCode,
   findPrefByChatId,
   getTelegramPref,
+  resolveTelegramPref,
   setTelegramPref,
+  setTelegramPrefAsync,
   verifyLinkToken,
 } from "@/lib/telegramPrefs";
 import { sendTelegramMessage, telegramConfigured } from "@/lib/telegram";
@@ -126,8 +128,11 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
-      const existing = getTelegramPref(verified.owner);
-      setTelegramPref({
+      const existing =
+        (await resolveTelegramPref(verified.owner)) ||
+        getTelegramPref(verified.owner);
+      // Await Redis write so unattended keeper can find this user immediately
+      await setTelegramPrefAsync({
         owner: verified.owner,
         chatId: chat,
         agentIds: existing?.agentIds || [],
@@ -200,7 +205,7 @@ export async function POST(req: NextRequest) {
         );
         return NextResponse.json({ ok: true });
       }
-      setTelegramPref({
+      await setTelegramPrefAsync({
         owner,
         chatId: chat,
         agentIds: [],
