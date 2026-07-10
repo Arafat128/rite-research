@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   useAccount,
   useConnect,
@@ -176,8 +176,6 @@ export function AgentTab({
     chainId: ritualChain.id,
   });
   const { writeContractAsync, isPending: writing } = useWriteContract();
-  /** Residual withdraws already prompted this session (dead agents) */
-  const autoWithdrawTried = useRef(new Set<string>());
 
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -467,118 +465,16 @@ export function AgentTab({
     [agentIds, agentMeta]
   );
 
-  // One-shot residual withdraw for dead agents (never loop / beep).
-  // Legacy Radar reverts withdraw when Dead — detect once and stop.
-  const autoWithdrawRunning = useRef(false);
-  const residualDeadKey = useMemo(
-    () =>
-      deadAgentIds
-        .filter((id) => {
-          const m = agentMeta[id.toString()];
-          try {
-            return m && BigInt(m.balance) > BigInt(0);
-          } catch {
-            return false;
-          }
-        })
-        .map((id) => id.toString())
-        .join(","),
-    [deadAgentIds, agentMeta]
-  );
-
+  // Clear sticky residual/locked-dead errors when viewing My Agents
   useEffect(() => {
     if (mode !== "manage") return;
-    if (!isConnected || !address || wrongChain) return;
-    if (!RADAR_CONTRACT || writing || autoWithdrawRunning.current) return;
-    if (!residualDeadKey) return;
-
-    const firstId = residualDeadKey.split(",")[0];
-    if (!firstId || autoWithdrawTried.current.has(firstId)) return;
-
-    const id = BigInt(firstId);
-    const key = firstId;
-    autoWithdrawTried.current.add(key);
-    autoWithdrawRunning.current = true;
-
-    let cancelled = false;
-    (async () => {
-      const m = agentMeta[key];
-      let bal = BigInt(0);
-      try {
-        bal = BigInt(m?.balance || "0");
-      } catch {
-        bal = BigInt(0);
-      }
-      if (bal <= BigInt(0) || cancelled || !address) {
-        autoWithdrawRunning.current = false;
-        return;
-      }
-
-      try {
-        await prepareRadarWrite({
-          account: address,
-          functionName: "withdraw",
-          args: [id, bal],
-          gasFloor: BigInt(120_000),
-        });
-      } catch {
-        if (!cancelled) {
-          setMsg("");
-          setErr(
-            `#${key}: residual ${formatEther(bal)} RIT is locked — this Radar blocks withdraw after death. Deploy on a kill-capable Radar and withdraw before the last sovereign tick next time.`
-          );
-        }
-        autoWithdrawRunning.current = false;
-        return;
-      }
-
-      if (cancelled) {
-        autoWithdrawRunning.current = false;
-        return;
-      }
-
-      try {
-        setMsg(
-          `Confirm withdraw ${formatEther(bal)} RIT residual from dead #${key}…`
-        );
-        setErr("");
-        const hash = await radarWrite({
-          functionName: "withdraw",
-          args: [id, bal],
-          gasFloor: BigInt(120_000),
-        });
-        const receipt = await waitTx(hash);
-        if (receipt.status === "success") {
-          setMsg(
-            `#${key}: ${formatEther(bal)} RIT residual sent to your wallet`
-          );
-          setAgentMeta((prev) => ({
-            ...prev,
-            [key]: { ...prev[key], balance: "0", status: 4 },
-          }));
-          void refresh({ soft: true });
-        }
-      } catch (e: unknown) {
-        const reason = errMsg(e, "withdraw");
-        if (/reject|denied/i.test(reason)) {
-          setMsg(
-            `Withdraw cancelled for #${key}. Residual remains on the agent.`
-          );
-          setErr("");
-        } else {
-          setErr(`#${key}: ${reason}`);
-          setMsg("");
-        }
-      } finally {
-        autoWithdrawRunning.current = false;
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
+    if (err && /residual|locked|blocks withdraw after death/i.test(err)) {
+      setErr("");
+      setMsg("");
+    }
+    // only on entering manage / err change for that pattern
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, isConnected, address, wrongChain, residualDeadKey]);
+  }, [mode]);
 
   async function ensureWallet() {
     if (!isConnected) {
@@ -1174,14 +1070,9 @@ export function AgentTab({
       setErr("");
       setMsg(
         died
-          ? `Tick #${newCount}/3 sealed · sovereign agent DIED — residual RIT will auto-withdraw`
+          ? `Tick #${newCount}/3 sealed · sovereign agent DIED (life complete)`
           : `Tick #${newCount} sealed · ${snapshot.summary.slice(0, 72)} · fee ${feeLabel} RIT`
       );
-
-      // Residual on death: clear session flag so auto-withdraw effect can run
-      if (died && selectedId != null) {
-        autoWithdrawTried.current.delete(selectedId.toString());
-      }
 
       void refresh({ soft: true });
     } catch (e: unknown) {
@@ -1237,9 +1128,8 @@ export function AgentTab({
         ) : (
           <>
             Control <b className="text-white/80">live</b> agents only — activate,
-            fund, schedule, and wake. Dead agents are listed once at the bottom.
-            Residual withdraw only works if this Radar allows it after death
-            (legacy contracts often lock residual).
+            fund, schedule, and wake. Dead agents are listed once at the bottom
+            (no actions).
           </>
         )}
       </p>
@@ -1568,10 +1458,7 @@ export function AgentTab({
           {/* Dead — minimal one-liner (no big cards, no spam) */}
           {deadAgentIds.length > 0 && (
             <p className="text-[11px] text-white/30">
-              Dead / closed:{" "}
-              {deadAgentIds.map((id) => `#${id.toString()}`).join(", ")}
-              {" · "}
-              finished agents are not managed here
+              Dead: {deadAgentIds.map((id) => `#${id.toString()}`).join(", ")}
             </p>
           )}
 
