@@ -83,9 +83,9 @@ function saveDurable(): void {
     const dir = path.dirname(file);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     const obj: Record<string, TelegramPref> = {};
-    for (const [k, v] of prefs().entries()) {
+    prefs().forEach((v, k) => {
       obj[k] = v;
-    }
+    });
     writeFileSync(file, JSON.stringify(obj), "utf8");
   } catch (e) {
     // /tmp works on Vercel but is per-instance ephemeral — still better than pure RAM for warm instances

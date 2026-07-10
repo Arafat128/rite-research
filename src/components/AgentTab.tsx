@@ -1125,13 +1125,20 @@ export function AgentTab({
       }
 
       // Telegram DM after successful seal (no flow change if unlinked)
+      // Include full rows so DM shows all headlines with clickable source links
       if (address) {
         let chatId: string | undefined;
         try {
-          chatId =
-            localStorage.getItem(
-              `rite_telegram_chat_v1:${address.toLowerCase()}`
-            ) || undefined;
+          const o = address.toLowerCase();
+          const v2 = localStorage.getItem(`rite_telegram_link_v2:${o}`);
+          if (v2) {
+            const p = JSON.parse(v2) as { chatId?: string };
+            if (p?.chatId && /^\d+$/.test(p.chatId)) chatId = p.chatId;
+          }
+          if (!chatId) {
+            chatId =
+              localStorage.getItem(`rite_telegram_chat_v1:${o}`) || undefined;
+          }
         } catch {
           /* ignore */
         }
@@ -1149,6 +1156,9 @@ export function AgentTab({
             txHash: hash,
             died,
             chatId,
+            // Same table data as the site card (max 8 on server)
+            rows: snapshot.rows,
+            highlights: snapshot.highlights,
           }),
         }).catch(() => undefined);
       }

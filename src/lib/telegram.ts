@@ -9,8 +9,16 @@ import {
   shouldNotifyAgent,
   type TelegramPref,
 } from "@/lib/telegramPrefs";
+import {
+  snapshotCellHref,
+  snapshotCellText,
+  type SnapshotCell,
+} from "@/lib/surfData";
+import { sanitizeHttpUrl } from "@/lib/safeUrl";
 
 const API = "https://api.telegram.org";
+/** Telegram message hard limit */
+const TG_MAX = 4096;
 
 export function telegramConfigured(): boolean {
   return Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
@@ -52,8 +60,9 @@ export async function sendTelegramMessage(
 ): Promise<void> {
   await botApi("sendMessage", {
     chat_id: chatId,
-    text: text.slice(0, 4000),
+    text: text.slice(0, TG_MAX),
     parse_mode: "HTML",
+    // Many article links — previews would spam; keep text clean
     disable_web_page_preview: opts?.disablePreview ?? true,
   });
 }
@@ -68,37 +77,163 @@ export type TickNotifyPayload = {
   target?: string;
   txHash?: string;
   died?: boolean;
+  /** Same row shape as site DataSnapshotCard (headlines with href, prices, etc.) */
+  rows?: Array<Record<string, SnapshotCell>>;
+  highlights?: Array<{ label: string; value: string }>;
 };
-
-export function formatTickTelegramMessage(p: TickNotifyPayload): string {
-  const stream = [p.kindLabel, p.target && p.target !== "_" ? p.target : ""]
-    .filter(Boolean)
-    .join(" · ");
-  const lines = [
-    `<b>Rite agent tick</b>`,
-    ``,
-    `Agent <b>#${p.agentId}</b>${p.agentName ? ` · ${escapeHtml(p.agentName)}` : ""}`,
-    stream ? `Stream: ${escapeHtml(stream)}` : null,
-    `Tick <b>#${p.runCount}</b>${p.died ? " · <b>DIED</b> (sovereign complete)" : ""}`,
-    ``,
-    escapeHtml(p.summary.slice(0, 500)),
-  ].filter((x) => x != null) as string[];
-
-  if (p.txHash) {
-    const base = (EXPLORER || "https://explorer.ritualfoundation.org").replace(
-      /\/$/,
-      ""
-    );
-    lines.push(``, `<a href="${base}/tx/${p.txHash}">Seal tx ↗</a>`);
-  }
-  return lines.join("\n");
-}
 
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+/** Escape for use inside double-quoted HTML attribute (href) */
+function escapeAttr(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
+function tgLink(href: string, label: string): string {
+  const safe = sanitizeHttpUrl(href);
+  if (!safe) return escapeHtml(label);
+  // Telegram HTML: <a href="...">text</a>
+  return `<a href="${escapeAttr(safe)}">${escapeHtml(label)}</a>`;
+}
+
+/**
+ * Prefer Headline / Title / Name columns; else first cell that has an href.
+ */
+function pickPrimaryCell(
+  row: Record<string, SnapshotCell>
+): { key: string; cell: SnapshotCell } | null {
+  const keys = Object.keys(row);
+  const prefer = ["Headline", "Title", "Name", "Article", "Link"];
+  for (const p of prefer) {
+    if (p in row) return { key: p, cell: row[p] };
+  }
+  for (const k of keys) {
+    if (snapshotCellHref(row[k])) return { key: k, cell: row[k] };
+  }
+  if (keys[0]) return { key: keys[0], cell: row[keys[0]] };
+  return null;
+}
+
+function formatRowLine(
+  row: Record<string, SnapshotCell>,
+  index: number
+): string {
+  const primary = pickPrimaryCell(row);
+  if (!primary) return `${index}. —`;
+
+  const text = snapshotCellText(primary.cell).trim() || "—";
+  const href = snapshotCellHref(primary.cell);
+  const titlePart = href
+    ? tgLink(href, text.slice(0, 220))
+    : escapeHtml(text.slice(0, 220));
+
+  // Secondary meta: Source, Project, Time, etc. (not the primary col)
+  const metaKeys = Object.keys(row).filter(
+    (k) =>
+      k !== primary.key &&
+      !/^raw$/i.test(k) &&
+      snapshotCellText(row[k]).trim()
+  );
+  const meta = metaKeys
+    .slice(0, 4)
+    .map((k) => {
+      const t = snapshotCellText(row[k]).trim();
+      const h = snapshotCellHref(row[k]);
+      if (h) return tgLink(h, t.slice(0, 80));
+      return escapeHtml(t.slice(0, 80));
+    })
+    .filter(Boolean)
+    .join(" · ");
+
+  if (meta) {
+    return `<b>${index}.</b> ${titlePart}\n   <i>${meta}</i>`;
+  }
+  return `<b>${index}.</b> ${titlePart}`;
+}
+
+/**
+ * Build a readable Telegram HTML message that mirrors the site tick card:
+ * header + highlights + up to 8 row lines with clickable article links.
+ */
+export function formatTickTelegramMessage(p: TickNotifyPayload): string {
+  const stream = [p.kindLabel, p.target && p.target !== "_" ? p.target : ""]
+    .filter(Boolean)
+    .join(" · ");
+
+  const lines: string[] = [
+    `<b>Rite agent tick</b>`,
+    ``,
+    `Agent <b>#${escapeHtml(String(p.agentId))}</b>${
+      p.agentName ? ` · ${escapeHtml(p.agentName)}` : ""
+    }`,
+  ];
+  if (stream) lines.push(`Stream: ${escapeHtml(stream)}`);
+  lines.push(
+    `Tick <b>#${escapeHtml(String(p.runCount))}</b>${
+      p.died ? " · <b>DIED</b> (sovereign complete)" : ""
+    }`
+  );
+  lines.push(``);
+
+  if (p.summary) {
+    lines.push(escapeHtml(p.summary.slice(0, 280)));
+  }
+
+  if (p.highlights && p.highlights.length > 0) {
+    lines.push(``);
+    lines.push(
+      p.highlights
+        .slice(0, 6)
+        .map(
+          (h) =>
+            `<b>${escapeHtml(h.label)}</b>: ${escapeHtml(String(h.value).slice(0, 64))}`
+        )
+        .join(" · ")
+    );
+  }
+
+  const rows = Array.isArray(p.rows) ? p.rows.slice(0, 8) : [];
+  if (rows.length > 0) {
+    lines.push(``);
+    // News-style: numbered clickable headlines
+    const hasHeadline = rows.some(
+      (r) =>
+        "Headline" in r ||
+        "Title" in r ||
+        Object.values(r).some((c) => snapshotCellHref(c))
+    );
+    if (hasHeadline) {
+      lines.push(`<b>Headlines</b> (${rows.length}) — tap to open source:`);
+    } else {
+      lines.push(`<b>Data</b> (${rows.length} rows):`);
+    }
+    lines.push(``);
+    rows.forEach((row, i) => {
+      lines.push(formatRowLine(row, i + 1));
+      if (i < rows.length - 1) lines.push(``);
+    });
+  }
+
+  if (p.txHash) {
+    const base = (EXPLORER || "https://explorer.ritualfoundation.org").replace(
+      /\/$/,
+      ""
+    );
+    const txUrl = `${base}/tx/${p.txHash}`;
+    lines.push(``, tgLink(txUrl, "Seal tx ↗"));
+  }
+
+  // Fit under Telegram limit (leave headroom for parse tags)
+  let out = lines.join("\n");
+  if (out.length > TG_MAX - 20) {
+    out = out.slice(0, TG_MAX - 40) + "\n…";
+  }
+  return out;
 }
 
 /**

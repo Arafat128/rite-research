@@ -198,7 +198,7 @@ export async function runDueAgentTicks(opts?: {
         snapshot,
       });
 
-      // Off-chain DM (does not affect tick flow)
+      // Off-chain DM (does not affect tick flow) — full rows for clickable headlines
       void notifyAgentTick({
         owner: agent.owner,
         agentId: String(i),
@@ -210,6 +210,8 @@ export async function runDueAgentTicks(opts?: {
         txHash: hash,
         died:
           agent.maxRuns > BigInt(0) && newCount >= agent.maxRuns,
+        rows: snapshot.rows,
+        highlights: snapshot.highlights,
       });
 
       ticked += 1;
