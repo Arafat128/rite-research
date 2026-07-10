@@ -23,6 +23,7 @@ import {
   RPC_URL,
 } from "@/lib/ritual";
 import { decodeAgentTrack, fetchSurfData } from "@/lib/surfData";
+import { computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
 import { cacheKeeperTick } from "@/lib/keeperCache";
 import { notifyAgentTick } from "@/lib/telegram";
@@ -84,42 +85,61 @@ export async function isKeeperOnChain(addr?: Address | null): Promise<
 }
 
 /**
- * On-chain due: lastTickBlock==0 OR block.number >= lastTickBlock + interval.
- * Matches RadarAgent.runTick TooEarly check exactly.
+ * Prefer on-chain lastTickBlock + interval (matches runTick TooEarly).
+ * Some Radar deploys revert on lastTickBlock() — fall back to time-based
+ * lastRunAt + approx block time (same as UI countdown).
  */
-export async function isAgentDueOnChain(
+export async function isAgentDue(
   agentId: bigint,
-  wakeIntervalBlocks: bigint
+  wakeIntervalBlocks: bigint,
+  lastRunAt: bigint
 ): Promise<{
   due: boolean;
-  lastTickBlock: bigint;
-  blockNumber: bigint;
-  nextDueBlock: bigint;
-  blocksUntilDue: bigint;
+  mode: "blocks" | "time";
+  secondsUntilDue: number;
+  detail: string;
 }> {
   const client = publicClient();
-  const [lastB, blockNumber] = await Promise.all([
-    client.readContract({
-      address: RADAR_CONTRACT as Address,
-      abi: radarAgentAbi,
-      functionName: "lastTickBlock",
-      args: [agentId],
-    }) as Promise<bigint>,
-    client.getBlockNumber(),
-  ]);
-  const interval =
-    wakeIntervalBlocks === BigInt(0) ? BigInt(1) : wakeIntervalBlocks;
-  const nextDue = lastB === BigInt(0) ? blockNumber : lastB + interval;
-  const due = lastB === BigInt(0) || blockNumber >= nextDue;
-  const blocksUntilDue =
-    due || nextDue <= blockNumber ? BigInt(0) : nextDue - blockNumber;
-  return {
-    due,
-    lastTickBlock: lastB,
-    blockNumber,
-    nextDueBlock: nextDue,
-    blocksUntilDue,
-  };
+  try {
+    const [lastB, blockNumber] = await Promise.all([
+      client.readContract({
+        address: RADAR_CONTRACT as Address,
+        abi: radarAgentAbi,
+        functionName: "lastTickBlock",
+        args: [agentId],
+      }) as Promise<bigint>,
+      client.getBlockNumber(),
+    ]);
+    const interval =
+      wakeIntervalBlocks === BigInt(0) ? BigInt(1) : wakeIntervalBlocks;
+    const nextDue = lastB === BigInt(0) ? blockNumber : lastB + interval;
+    const due = lastB === BigInt(0) || blockNumber >= nextDue;
+    const blocksUntilDue =
+      due || nextDue <= blockNumber ? BigInt(0) : nextDue - blockNumber;
+    const blockSec = Math.max(
+      1,
+      Number(process.env.NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC || "2") || 2
+    );
+    const secondsUntilDue = Number(blocksUntilDue) * blockSec;
+    return {
+      due,
+      mode: "blocks",
+      secondsUntilDue,
+      detail: due
+        ? "due"
+        : `${blocksUntilDue}blocks_~${secondsUntilDue}s`,
+    };
+  } catch {
+    // Deploy without public lastTickBlock — use lastRunAt time math
+    const nowSec = Math.floor(Date.now() / 1000);
+    const t = computeDue(lastRunAt, wakeIntervalBlocks, nowSec);
+    return {
+      due: t.due,
+      mode: "time",
+      secondsUntilDue: t.secondsUntilDue,
+      detail: t.due ? "due" : `${t.secondsUntilDue}s`,
+    };
+  }
 }
 
 export async function runDueAgentTicks(opts?: {
@@ -222,20 +242,16 @@ export async function runDueAgentTicks(opts?: {
         continue;
       }
 
-      // Primary: on-chain block schedule (what runTick enforces)
-      const chainDue = await isAgentDueOnChain(id, agent.wakeIntervalBlocks);
-      if (!chainDue.due) {
-        // Estimate seconds for UX using ~block time
-        const approxSec =
-          Number(chainDue.blocksUntilDue) *
-          Math.max(
-            1,
-            Number(process.env.NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC || "2") || 2
-          );
+      const dueInfo = await isAgentDue(
+        id,
+        agent.wakeIntervalBlocks,
+        agent.lastRunAt
+      );
+      if (!dueInfo.due) {
         results.push({
           agentId: String(i),
           ok: false,
-          skipped: `not_due_${chainDue.blocksUntilDue}blocks_~${approxSec}s`,
+          skipped: `not_due_${dueInfo.detail}`,
         });
         continue;
       }
