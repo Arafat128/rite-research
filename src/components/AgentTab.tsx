@@ -83,6 +83,7 @@ import {
   supportsKillAgent,
 } from "@/lib/radarWrite";
 import { useToast } from "@/components/ToastProvider";
+import { TelegramNotifyCard } from "@/components/TelegramNotifyCard";
 
 /** Load chain/keeper ticks and merge with this browser's localStorage history. */
 async function loadMergedTicks(
@@ -1123,6 +1124,25 @@ export function AgentTab({
         );
       }
 
+      // Telegram DM after successful seal (no flow change if unlinked)
+      if (address) {
+        void fetch("/api/notify/telegram/push", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            owner: address,
+            agentId: selectedId.toString(),
+            agentName: agent.name,
+            runCount: newCount.toString(),
+            summary: snapshot.summary,
+            kindLabel: snapshot.kindLabel,
+            target: snapshot.target,
+            txHash: hash,
+            died,
+          }),
+        }).catch(() => undefined);
+      }
+
       void refresh({ soft: true });
     } catch (e: unknown) {
       // Drop any pending data — user cancelled or tx failed
@@ -1448,6 +1468,8 @@ export function AgentTab({
 
           {mode === "manage" && (
           <>
+          {address && <TelegramNotifyCard owner={address} />}
+
           {/* Live agents only */}
           {liveAgentIds.length > 0 ? (
             <div className="flex flex-wrap items-center gap-2">

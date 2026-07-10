@@ -23,6 +23,7 @@ import { decodeAgentTrack, fetchSurfData } from "@/lib/surfData";
 import { computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
 import { cacheKeeperTick } from "@/lib/keeperCache";
+import { notifyAgentTick } from "@/lib/telegram";
 
 export type KeeperTickResult = {
   agentId: string;
@@ -195,6 +196,20 @@ export async function runDueAgentTicks(opts?: {
         txHash: hash,
         digest,
         snapshot,
+      });
+
+      // Off-chain DM (does not affect tick flow)
+      void notifyAgentTick({
+        owner: agent.owner,
+        agentId: String(i),
+        agentName: agent.name,
+        runCount: newCount.toString(),
+        summary: snapshot.summary,
+        kindLabel: snapshot.kindLabel,
+        target: snapshot.target,
+        txHash: hash,
+        died:
+          agent.maxRuns > BigInt(0) && newCount >= agent.maxRuns,
       });
 
       ticked += 1;
