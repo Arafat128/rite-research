@@ -1733,28 +1733,7 @@ export function AgentTab({
                   className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
                 />
               </div>
-              {dataKind === "custom_ritual_llm" ? (
-                <div className="sm:col-span-2">
-                  <label className="text-[11px] text-white/40">
-                    {dataDef.targetLabel || "Custom prompt"}
-                  </label>
-                  <textarea
-                    value={target === "_" ? "" : target}
-                    onChange={(e) => setTarget(e.target.value.slice(0, 100))}
-                    placeholder={dataDef.targetPlaceholder}
-                    rows={3}
-                    maxLength={100}
-                    className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-                  />
-                  <p className="mt-1 text-[10px] text-white/35">
-                    Locked on-chain (max 100 chars). Each wake runs Ritual LLM
-                    (GLM-4.7 TEE) → short table. Needs{" "}
-                    <code className="text-white/50">KEEPER_PRIVATE_KEY</code> +
-                    RitualWallet deposit on the keeper for LLM fees. Prefer
-                    schedule ≥ 5–15 min for cost/latency.
-                  </p>
-                </div>
-              ) : dataDef.targetLabel ? (
+              {dataDef.targetLabel ? (
                 <div>
                   <label className="text-[11px] text-white/40">
                     {dataDef.targetLabel}
