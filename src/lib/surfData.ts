@@ -226,11 +226,6 @@ function fmtPct(n: number | null): string {
   return `${(n * 100).toFixed(4)}%`;
 }
 
-function fmtBps(n: number | null): string {
-  if (n == null) return "—";
-  return `${(n * 10_000).toFixed(1)} bps`;
-}
-
 function fmtTs(ts: unknown): string {
   const n = asNum(ts);
   if (n == null) return "—";
