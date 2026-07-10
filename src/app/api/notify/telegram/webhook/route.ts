@@ -9,7 +9,10 @@ import {
   verifyLinkToken,
 } from "@/lib/telegramPrefs";
 import { sendTelegramMessage, telegramConfigured } from "@/lib/telegram";
-import { publicErrorMessage } from "@/lib/security";
+import {
+  publicErrorMessage,
+  requireWebhookSecretInProd,
+} from "@/lib/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,12 +27,14 @@ export const dynamic = "force-dynamic";
  * If Vercel Deployment Protection is on, use bypass query on the webhook URL.
  */
 function webhookAuthorized(req: NextRequest): boolean {
+  // On Vercel, refuse a secret — open webhook would allow spoofed /start
+  if (requireWebhookSecretInProd()) return false;
   const secret = (
     process.env.TELEGRAM_WEBHOOK_SECRET ||
     process.env.CRON_SECRET ||
     ""
   ).trim();
-  // No secret configured → accept (dev). Production should always set one.
+  // Local dev without secret → accept
   if (!secret) return true;
   const header = (
     req.headers.get("x-telegram-bot-api-secret-token") || ""

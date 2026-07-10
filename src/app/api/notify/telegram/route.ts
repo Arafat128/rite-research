@@ -39,6 +39,7 @@ export async function GET(req: NextRequest) {
     const bot = telegramBotUsername();
     const linked = Boolean(pref?.chatId);
     const backend = telegramPrefsBackend();
+    // Never expose raw chatId on unauthenticated GET (hijack / spam target)
     return NextResponse.json({
       ok: true,
       configured: telegramConfigured(),
@@ -48,8 +49,7 @@ export async function GET(req: NextRequest) {
       username: pref?.username || null,
       agentIds: pref?.agentIds || [],
       linkedAt: pref?.linkedAt || null,
-      chatId: pref?.chatId || null,
-      // multi-user: Upstash once for the app — not per end-user env
+      hasChatId: Boolean(pref?.chatId),
       storeBackend: backend,
       multiUserReady: backend === "upstash",
     });
@@ -216,7 +216,9 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Manual chat id paste (backup) OR silent re-hydrate from browser localStorage
+    // Manual chat id paste (backup) OR silent re-hydrate from browser localStorage.
+    // Security: never allow overwriting an existing link with a *different* chatId
+    // without confirm code (prevents wallet→chat hijack).
     if (action === "register_chat") {
       const chatId = String(body.chatId || "").trim();
       if (!/^\d+$/.test(chatId)) {
@@ -226,6 +228,15 @@ export async function POST(req: NextRequest) {
         );
       }
       const existing = await resolveTelegramPref(owner);
+      if (existing?.chatId && existing.chatId !== chatId) {
+        return NextResponse.json(
+          {
+            error:
+              "Owner already linked to a different chat. Unlink first or use Connect Telegram / confirm link.",
+          },
+          { status: 403 }
+        );
+      }
       const username =
         (body.username || existing?.username || "").replace(/^@/, "") ||
         undefined;

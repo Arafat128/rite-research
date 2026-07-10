@@ -87,10 +87,25 @@ export function clientIp(req: NextRequest): string {
 export function publicErrorMessage(e: unknown, fallback = "Request failed"): string {
   if (!(e instanceof Error)) return fallback;
   const m = e.message || fallback;
-  // Strip accidental secrets
-  if (/sk-surf|api[_-]?key|bearer\s+\S+/i.test(m)) {
+  // Strip accidental secrets / keys
+  if (
+    /sk-surf|api[_-]?key|bearer\s+\S+|private[_\s-]?key|0x[a-f0-9]{64}|upstash|telegram[_\s-]?bot[_\s-]?token/i.test(
+      m
+    )
+  ) {
     return fallback;
   }
   // Cap length
-  return m.slice(0, 400);
+  return m.slice(0, 280);
+}
+
+/** Require production secrets for Telegram webhook (dev may omit). */
+export function requireWebhookSecretInProd(): boolean {
+  if (!process.env.VERCEL) return false;
+  const s = (
+    process.env.TELEGRAM_WEBHOOK_SECRET ||
+    process.env.CRON_SECRET ||
+    ""
+  ).trim();
+  return !s;
 }

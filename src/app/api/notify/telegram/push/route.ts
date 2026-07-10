@@ -6,7 +6,7 @@ import {
   formatTickTelegramMessage,
   type TickNotifyPayload,
 } from "@/lib/telegram";
-import { setTelegramPrefAsync } from "@/lib/telegramPrefs";
+import { resolveTelegramPref, setTelegramPrefAsync } from "@/lib/telegramPrefs";
 import { clientIp, publicErrorMessage, rateLimit } from "@/lib/security";
 import type { SnapshotCell } from "@/lib/surfData";
 
@@ -54,7 +54,7 @@ function slimRows(
 export async function POST(req: NextRequest) {
   try {
     const ip = clientIp(req);
-    const rl = rateLimit(`tg-push:${ip}`, 40, 60_000);
+    const rl = rateLimit(`tg-push:${ip}`, 20, 60_000);
     if (!rl.ok) {
       return NextResponse.json({ error: "rate limited" }, { status: 429 });
     }
@@ -84,15 +84,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Re-hydrate durable store from client chat id (multi-user + cold start)
+    // Re-hydrate only: never hijack an existing owner→chat mapping
     if (body.chatId && /^\d+$/.test(body.chatId)) {
-      await setTelegramPrefAsync({
-        owner: body.owner.toLowerCase(),
-        chatId: body.chatId,
-        agentIds: [],
-        enabled: true,
-        linkedAt: Date.now(),
-      });
+      const existing = await resolveTelegramPref(body.owner);
+      if (!existing?.chatId || existing.chatId === body.chatId) {
+        await setTelegramPrefAsync({
+          owner: body.owner.toLowerCase(),
+          chatId: body.chatId,
+          agentIds: existing?.agentIds || [],
+          enabled: existing?.enabled ?? true,
+          linkedAt: existing?.linkedAt || Date.now(),
+          username: existing?.username,
+        });
+      }
     }
 
     const rows = slimRows(body.rows);

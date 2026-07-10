@@ -14,7 +14,8 @@ type Status = {
   enabled: boolean;
   username: string | null;
   agentIds: string[];
-  chatId?: string | null;
+  /** Server no longer returns raw chatId — browser localStorage only */
+  hasChatId?: boolean;
   storeBackend?: "upstash" | "memory";
   multiUserReady?: boolean;
 };
@@ -362,13 +363,11 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
             ) : (
               <>Linked to Telegram</>
             )}
-            {(st.chatId || localLink?.chatId) && (
+            {localLink?.chatId && (
               <span className="text-white/35">
                 {" "}
                 · chat{" "}
-                <code className="text-white/50">
-                  {st.chatId || localLink?.chatId}
-                </code>
+                <code className="text-white/50">{localLink.chatId}</code>
               </span>
             )}
           </p>
