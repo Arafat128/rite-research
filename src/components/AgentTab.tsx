@@ -55,12 +55,14 @@ import {
   type ScheduleUnit,
 } from "@/lib/agentSchedule";
 import {
+  clearLegacyGlobalClosedAgents,
   getAppAgent,
   isAgentClosed,
   listTicks,
   markAgentClosed,
   registerAppAgent,
   saveTick,
+  unmarkAgentClosed,
   type TickRecord,
 } from "@/lib/agentStore";
 import { mergeTickRecords, tickFromAgentState } from "@/lib/agentTicks";
@@ -222,11 +224,17 @@ export function AgentTab({
   /** False on older Radar deploys without killAgent in bytecode */
   const [canKillOnChain, setCanKillOnChain] = useState<boolean | null>(null);
 
-  /** On-chain Dead OR soft-closed (withdraw+pause on contracts without killAgent) */
+  /**
+   * On-chain Dead, or soft-closed on THIS Radar only.
+   * Soft-close must never hide Active/OutOfFunds (stale id pollution from other Radars).
+   */
   const agentFinished =
     agent != null &&
     selectedId != null &&
-    (agent.status === 4 || isAgentClosed(selectedId.toString()));
+    (agent.status === 4 ||
+      (isAgentClosed(selectedId.toString(), RADAR_CONTRACT) &&
+        agent.status !== 1 &&
+        agent.status !== 3));
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
   const dataDef = DATA_KINDS.find((k) => k.id === dataKind)!;
@@ -345,9 +353,21 @@ export function AgentTab({
       for (const id of ids) {
         const row = await readAgentOnChain(id);
         if (row) {
-          const finished =
-            row.status === 4 || isAgentClosed(id.toString());
-          meta[id.toString()] = {
+          const idStr = id.toString();
+          // Active / OutOfFunds are always manageable — clear stale soft-close
+          // (common after switching Radar contracts; same numeric id is a different agent)
+          if (
+            (row.status === 1 || row.status === 3) &&
+            isAgentClosed(idStr, RADAR_CONTRACT)
+          ) {
+            unmarkAgentClosed(idStr, RADAR_CONTRACT);
+          }
+          const softClosed =
+            isAgentClosed(idStr, RADAR_CONTRACT) &&
+            row.status !== 1 &&
+            row.status !== 3;
+          const finished = row.status === 4 || softClosed;
+          meta[idStr] = {
             status: finished ? 4 : row.status,
             kind: row.kind,
             name: row.name,
@@ -357,7 +377,11 @@ export function AgentTab({
       }
       setAgentMeta(meta);
 
-      const liveIds = ids.filter((id) => meta[id.toString()]?.status !== 4);
+      // Missing meta ≠ dead (RPC flake); only status 4 is finished
+      const liveIds = ids.filter((id) => {
+        const m = meta[id.toString()];
+        return !m || m.status !== 4;
+      });
       const selectedStillLive =
         selectedId != null &&
         liveIds.some((id) => id === selectedId);
@@ -420,6 +444,11 @@ export function AgentTab({
   }, [address, selectedId, refreshNetwork]);
 
   useEffect(() => {
+    // One-time: remove global closed-id list that polluted new Radar deploys
+    clearLegacyGlobalClosedAgents();
+  }, []);
+
+  useEffect(() => {
     if (isConnected && address) void refresh();
   }, [isConnected, address, refresh]);
 
@@ -458,7 +487,9 @@ export function AgentTab({
     () =>
       agentIds.filter((id) => {
         const m = agentMeta[id.toString()];
-        return m && m.status !== 4 && !isAgentClosed(id.toString());
+        // No meta yet → still show as live (avoid false "Dead" flash)
+        if (!m) return true;
+        return m.status !== 4;
       }),
     [agentIds, agentMeta]
   );
@@ -467,7 +498,8 @@ export function AgentTab({
     () =>
       agentIds.filter((id) => {
         const m = agentMeta[id.toString()];
-        return !m || m.status === 4 || isAgentClosed(id.toString());
+        // Only list as dead when we know on-chain/soft-close finished
+        return Boolean(m && m.status === 4);
       }),
     [agentIds, agentMeta]
   );
@@ -619,6 +651,8 @@ export function AgentTab({
         createdAt: Date.now(),
         createTx: hash,
       });
+      // New deploy must never inherit soft-close for a recycled numeric id
+      unmarkAgentClosed(newId.toString(), RADAR_CONTRACT);
 
       setSelectedId(newId);
       setMsg(
@@ -817,7 +851,12 @@ export function AgentTab({
           "Connected wallet is not the owner of this agent. Switch account in MetaMask."
         );
       }
-      if (live.status === 4 || isAgentClosed(selectedId.toString())) {
+      if (
+        live.status === 4 ||
+        (isAgentClosed(selectedId.toString(), RADAR_CONTRACT) &&
+          live.status !== 1 &&
+          live.status !== 3)
+      ) {
         throw new Error(
           live.balance > BigInt(0)
             ? `Agent is already closed. Use “Withdraw remaining” to pull ${formatEther(live.balance)} RIT.`
@@ -857,7 +896,7 @@ export function AgentTab({
           if (receipt.status !== "success") {
             throw new Error("Kill transaction reverted on-chain");
           }
-          markAgentClosed(selectedId.toString());
+          markAgentClosed(selectedId.toString(), RADAR_CONTRACT);
           setAgent({ ...live, status: 4, balance: BigInt(0) });
           setAgentMeta((prev) => ({
             ...prev,
@@ -928,7 +967,7 @@ export function AgentTab({
         }
       }
 
-      markAgentClosed(selectedId.toString());
+      markAgentClosed(selectedId.toString(), RADAR_CONTRACT);
       setAgent({
         ...(after || live),
         status: 4,
@@ -970,7 +1009,10 @@ export function AgentTab({
             ...prev,
             [selectedId.toString()]: {
               status:
-                a.status === 4 || isAgentClosed(selectedId.toString())
+                a.status === 4 ||
+                (isAgentClosed(selectedId.toString(), RADAR_CONTRACT) &&
+                  a.status !== 1 &&
+                  a.status !== 3)
                   ? 4
                   : a.status,
               kind: a.kind,

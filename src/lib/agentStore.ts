@@ -110,23 +110,75 @@ export function saveTick(rec: TickRecord) {
   writeJson(TICK_KEY, all.slice(0, 40));
 }
 
-/** Soft-closed agents on Radar deployments that lack killAgent */
-const CLOSED_KEY = "rite_closed_agents_v1";
+/**
+ * Soft-closed agents (legacy Radar without killAgent).
+ * MUST be scoped by Radar address — agent id "2" on 0x5ed8… is NOT agent "2" on 0x50a3….
+ * Old global key `rite_closed_agents_v1` caused new deploys to appear instantly DEAD.
+ */
+const CLOSED_KEY_LEGACY = "rite_closed_agents_v1";
+const CLOSED_KEY_PREFIX = "rite_closed_agents_v2:";
 
-export function isAgentClosed(agentId: string): boolean {
-  const all = readJson<string[]>(CLOSED_KEY, []);
-  return all.includes(agentId);
+function closedStorageKey(radar?: string | null): string {
+  const r = (radar || "").toLowerCase().trim();
+  if (r && /^0x[a-f0-9]{40}$/.test(r)) {
+    return `${CLOSED_KEY_PREFIX}${r}`;
+  }
+  // Fallback only when radar unknown — prefer empty over cross-contract pollution
+  return `${CLOSED_KEY_PREFIX}unknown`;
 }
 
-export function markAgentClosed(agentId: string) {
-  const all = readJson<string[]>(CLOSED_KEY, []);
+export function isAgentClosed(
+  agentId: string,
+  radar?: string | null
+): boolean {
+  const scoped = readJson<string[]>(closedStorageKey(radar), []);
+  if (scoped.includes(agentId)) return true;
+  // Do NOT fall back to legacy global list when radar is known — that was the bug
+  if (!radar) {
+    const legacy = readJson<string[]>(CLOSED_KEY_LEGACY, []);
+    return legacy.includes(agentId);
+  }
+  return false;
+}
+
+export function markAgentClosed(
+  agentId: string,
+  radar?: string | null
+) {
+  const key = closedStorageKey(radar);
+  const all = readJson<string[]>(key, []);
   if (!all.includes(agentId)) {
     all.push(agentId);
-    writeJson(CLOSED_KEY, all);
+    writeJson(key, all);
   }
 }
 
-export function unmarkAgentClosed(agentId: string) {
-  const all = readJson<string[]>(CLOSED_KEY, []).filter((id) => id !== agentId);
-  writeJson(CLOSED_KEY, all);
+export function unmarkAgentClosed(
+  agentId: string,
+  radar?: string | null
+) {
+  const key = closedStorageKey(radar);
+  writeJson(
+    key,
+    readJson<string[]>(key, []).filter((id) => id !== agentId)
+  );
+  // Also scrub legacy global key so old pollution cannot return
+  const legacy = readJson<string[]>(CLOSED_KEY_LEGACY, []);
+  if (legacy.includes(agentId)) {
+    writeJson(
+      CLOSED_KEY_LEGACY,
+      legacy.filter((id) => id !== agentId)
+    );
+  }
+}
+
+/** Clear one-shot migration: drop global closed list (unsafe across Radars). */
+export function clearLegacyGlobalClosedAgents() {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(CLOSED_KEY_LEGACY);
+    }
+  } catch {
+    /* ignore */
+  }
 }
