@@ -27,33 +27,93 @@ import {
   ritualChain,
 } from "@/lib/ritual";
 
-/** killAgent(uint256) selector */
+/** killAgent(uint256) selector (no 0x) */
 const KILL_AGENT_SELECTOR = "4b9f3075";
+
+/** Known Ritual testnet deploys — avoid flaky bytecode fetches in the browser */
+const KNOWN_KILL_SUPPORT: Record<string, boolean> = {
+  // Preferred deploy with killAgent + withdraw-after-dead
+  "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f": true,
+  // Legacy — no killAgent; soft-close only
+  "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30": false,
+  "0xa84fbdef457c08de31fba4c2ba9d004056f1384b": false,
+};
 
 let _killSupportCache: { address: string; ok: boolean } | null = null;
 
 /**
- * True if the configured Radar bytecode includes killAgent(uint256).
- * Older mainnet/testnet deploys only had withdraw — kill always reverts there.
+ * True if the configured Radar includes killAgent(uint256).
+ * Order: known map → bytecode scan → optimistic true (try kill; soft-close only if missing).
  */
 export async function supportsKillAgent(): Promise<boolean> {
   if (!RADAR_CONTRACT) return false;
-  const addr = RADAR_CONTRACT.toLowerCase();
+  const addr = RADAR_CONTRACT.toLowerCase() as Address;
+  if (addr in KNOWN_KILL_SUPPORT) {
+    return KNOWN_KILL_SUPPORT[addr];
+  }
   if (_killSupportCache?.address === addr) return _killSupportCache.ok;
+
   try {
     const client = getRitualReadClient(true);
     const code = await client.getBytecode({
       address: RADAR_CONTRACT as Address,
     });
-    const ok = Boolean(
-      code && code.toLowerCase().includes(KILL_AGENT_SELECTOR)
-    );
-    _killSupportCache = { address: addr, ok };
-    return ok;
+    if (code && code !== "0x") {
+      const ok = code.toLowerCase().includes(KILL_AGENT_SELECTOR);
+      _killSupportCache = { address: addr, ok };
+      return ok;
+    }
   } catch {
-    _killSupportCache = { address: addr, ok: false };
-    return false;
+    /* RPC flaky — fall through */
   }
+
+  // Unknown deploy + bytecode unread: assume kill exists and let simulate decide
+  _killSupportCache = { address: addr, ok: true };
+  return true;
+}
+
+/** True when a killAgent simulate failed because the method is missing (legacy Radar). */
+export function isMissingKillFunctionError(e: unknown): boolean {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let i = 0; i < 6; i++) {
+    if (!cur) break;
+    if (cur instanceof Error) parts.push(cur.message);
+    if (cur && typeof cur === "object") {
+      const o = cur as { shortMessage?: string; details?: string; message?: string };
+      if (o.shortMessage) parts.push(o.shortMessage);
+      if (o.details) parts.push(String(o.details));
+      if (o.message) parts.push(o.message);
+      if ("cause" in o) cur = (o as { cause?: unknown }).cause;
+      else break;
+    } else break;
+  }
+  const blob = parts.join(" ").toLowerCase();
+  // Missing selector / empty revert — not NotOwner / AgentIsDead custom errors
+  if (/function selector|does not exist|not a function|returned no data|0x$/.test(blob)) {
+    return true;
+  }
+  // Pure "execution reverted" without a decoded custom error often = missing method on legacy
+  if (
+    /execution reverted/i.test(blob) &&
+    !/notowner|agentisdead|not authorized|zerodigest|toearly|insufficient/i.test(
+      blob
+    )
+  ) {
+    // Only treat as missing method if we *know* this address has no kill
+    const addr = (RADAR_CONTRACT || "").toLowerCase();
+    if (addr in KNOWN_KILL_SUPPORT && KNOWN_KILL_SUPPORT[addr] === false) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function radarHasKnownKill(): boolean | null {
+  if (!RADAR_CONTRACT) return null;
+  const addr = RADAR_CONTRACT.toLowerCase();
+  if (addr in KNOWN_KILL_SUPPORT) return KNOWN_KILL_SUPPORT[addr];
+  return null;
 }
 
 const ERROR_HINTS: Record<string, string> = {

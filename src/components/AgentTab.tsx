@@ -77,7 +77,9 @@ import {
 import {
   assertWalletCanPayGas,
   decodeRadarRevert,
+  isMissingKillFunctionError,
   prepareRadarWrite,
+  radarHasKnownKill,
   supportsKillAgent,
 } from "@/lib/radarWrite";
 import { useToast } from "@/components/ToastProvider";
@@ -325,11 +327,13 @@ export function AgentTab({
       }
       setAgentIds(ids);
 
-      // Does this Radar bytecode include killAgent? (older deploys do not)
+      // Kill support: known map first, then bytecode (never false on 0x50a3)
       try {
-        setCanKillOnChain(await supportsKillAgent());
+        const known = radarHasKnownKill();
+        if (known != null) setCanKillOnChain(known);
+        else setCanKillOnChain(await supportsKillAgent());
       } catch {
-        setCanKillOnChain(false);
+        setCanKillOnChain(radarHasKnownKill() ?? true);
       }
 
       // Load meta for chips + prefer LIVE agents for default selection
@@ -821,59 +825,75 @@ export function AgentTab({
       }
 
       const refundLabel = formatEther(live.balance);
-      const hasKill = await supportsKillAgent();
+      // Prefer known map / bytecode; never soft-close on kill-capable Radar
+      const known = radarHasKnownKill();
+      let hasKill =
+        known === true
+          ? true
+          : known === false
+            ? false
+            : await supportsKillAgent();
       setCanKillOnChain(hasKill);
 
+      // --- Prefer real on-chain kill whenever possible ---
       if (hasKill) {
         const ok = window.confirm(
           `Kill agent #${selectedId.toString()} (${live.name})?\n\n` +
             `Permanent on-chain DEAD. Full balance (${refundLabel} RIT) is refunded to your wallet.\n` +
+            `Radar: ${RADAR_CONTRACT?.slice(0, 10)}…\n` +
             `Gas is paid from your wallet (not the agent).`
         );
         if (!ok) return;
 
-        setMsg(`Confirm killAgent #${selectedId} (refund ${refundLabel} RIT)…`);
-        const hash = await radarWrite({
-          functionName: "killAgent",
-          args: [selectedId],
-          gasFloor: BigInt(150_000),
-        });
-        const receipt = await waitTx(hash);
-        if (receipt.status !== "success") {
-          throw new Error("Kill transaction reverted on-chain");
+        try {
+          setMsg(`Confirm killAgent #${selectedId} (refund ${refundLabel} RIT)…`);
+          const hash = await radarWrite({
+            functionName: "killAgent",
+            args: [selectedId],
+            gasFloor: BigInt(150_000),
+          });
+          const receipt = await waitTx(hash);
+          if (receipt.status !== "success") {
+            throw new Error("Kill transaction reverted on-chain");
+          }
+          markAgentClosed(selectedId.toString());
+          setAgent({ ...live, status: 4, balance: BigInt(0) });
+          setAgentMeta((prev) => ({
+            ...prev,
+            [selectedId.toString()]: {
+              status: 4,
+              kind: live.kind,
+              name: live.name,
+              balance: "0",
+            },
+          }));
+          setMsg(
+            `Agent #${selectedId} killed on-chain · ${refundLabel} RIT refunded`
+          );
+          toast.success(
+            `Agent #${selectedId} killed`,
+            `${refundLabel} RIT refunded · status DEAD`
+          );
+          setSelectedId(null);
+          setErr("");
+          await refresh();
+          return;
+        } catch (killErr: unknown) {
+          // Only fall through to soft-close if kill is literally missing
+          if (!isMissingKillFunctionError(killErr)) {
+            throw killErr;
+          }
+          setCanKillOnChain(false);
+          hasKill = false;
         }
-        markAgentClosed(selectedId.toString());
-        setAgent({ ...live, status: 4, balance: BigInt(0) });
-        setAgentMeta((prev) => ({
-          ...prev,
-          [selectedId.toString()]: {
-            status: 4,
-            kind: live.kind,
-            name: live.name,
-            balance: "0",
-          },
-        }));
-        setMsg(
-          `Agent #${selectedId} killed · ${refundLabel} RIT refunded to wallet`
-        );
-        toast.success(
-          `Agent #${selectedId} killed`,
-          `${refundLabel} RIT refunded to wallet`
-        );
-        setSelectedId(null);
-        setErr("");
-        await refresh();
-        return;
       }
 
-      // --- Soft close: this Radar bytecode has NO killAgent (e.g. 0x5ed8…) ---
+      // --- Soft close: only when Radar has no killAgent (legacy 0x5ed8…) ---
       const ok = window.confirm(
         `Close agent #${selectedId.toString()} (${live.name})?\n\n` +
-          `This Radar contract does not include killAgent (older deploy).\n` +
-          `We will:\n` +
-          `  1) Withdraw full balance (${refundLabel} RIT) to your wallet\n` +
-          `  2) Pause the agent so it cannot tick\n\n` +
-          `You may confirm 1–2 MetaMask popups. Gas from wallet.`
+          `This Radar (${RADAR_CONTRACT?.slice(0, 10)}…) has no killAgent.\n` +
+          `We will withdraw balance and pause (not on-chain DEAD).\n\n` +
+          `To get real kill: set NEXT_PUBLIC_RADAR_CONTRACT to 0x50a3… and deploy new agents there.`
       );
       if (!ok) return;
 
@@ -894,7 +914,6 @@ export function AgentTab({
         withdrew = live.balance;
       }
 
-      // Pause if still Active (status 1)
       const after = await readAgentOnChain(selectedId);
       if (after && after.status === 1) {
         setMsg(`Confirm pause agent #${selectedId}…`);
@@ -924,37 +943,23 @@ export function AgentTab({
         },
       }));
       setMsg(
-        `Agent #${selectedId} closed` +
+        `Agent #${selectedId} soft-closed` +
           (withdrew > BigInt(0)
             ? ` · withdrew ${formatEther(withdrew)} RIT`
             : "") +
-          ` · paused (this contract has no killAgent)`
+          ` · paused (legacy Radar — not on-chain DEAD)`
       );
-      toast.success(
-        `Agent #${selectedId} closed`,
-        withdrew > BigInt(0)
-          ? `${formatEther(withdrew)} RIT withdrawn · paused`
-          : "Agent paused"
+      toast.info(
+        `Agent #${selectedId} soft-closed`,
+        "Legacy Radar has no killAgent — use Radar 0x50a3… for real kill"
       );
       setSelectedId(null);
       setErr("");
       await refresh();
     } catch (e: unknown) {
       const msg = errMsg(e, "killAgent");
-      const lower = msg.toLowerCase();
-      if (
-        lower.includes("killagent") ||
-        lower.includes("execution reverted") ||
-        lower.includes("would revert")
-      ) {
-        setErr(
-          "Close failed. This Radar may lack killAgent — try again for withdraw+pause. " +
-            msg
-        );
-      } else {
-        setErr(msg);
-      }
-      if (!/reject|denied/i.test(msg)) toast.error("Close / kill failed", msg);
+      setErr(msg);
+      if (!/reject|denied/i.test(msg)) toast.error("Kill failed", msg);
       setMsg("");
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
@@ -1887,14 +1892,22 @@ export function AgentTab({
           </>
           )}
 
-          <a
-            href={addressUrl(RADAR_CONTRACT)}
-            target="_blank"
-            rel="noreferrer"
-            className="block text-center text-[11px] text-white/35 underline"
-          >
-            RadarAgent contract ↗
-          </a>
+          <p className="text-center text-[10px] text-white/30">
+            Radar {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
+            {canKillOnChain === true
+              ? " · killAgent available"
+              : canKillOnChain === false
+                ? " · legacy (soft-close only)"
+                : ""}{" "}
+            <a
+              href={addressUrl(RADAR_CONTRACT)}
+              target="_blank"
+              rel="noreferrer"
+              className="underline"
+            >
+              explorer ↗
+            </a>
+          </p>
         </div>
       )}
 
