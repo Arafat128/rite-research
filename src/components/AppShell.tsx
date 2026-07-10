@@ -15,7 +15,7 @@ import { RecordsTab } from "./RecordsTab";
 import { AgentTab } from "./AgentTab";
 import { BountyBanner } from "./BountyBanner";
 
-type Tab = "research" | "records" | "agent";
+type Tab = "research" | "records" | "deploy" | "agents";
 
 export function AppShell() {
   const [tab, setTab] = useState<Tab>("research");
@@ -40,25 +40,26 @@ export function AppShell() {
     <div className="min-h-screen px-4 pb-16 pt-5 sm:px-8">
       <div className="mx-auto max-w-5xl">
         {/* Top bar */}
-        <header className="mb-10 flex items-center justify-between gap-3">
+        <header className="mb-10 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="text-xl font-bold tracking-tight text-[#c8ff4a]">Rite</span>
             <span className="hidden text-xs text-white/40 sm:inline">Research Desk</span>
           </div>
 
-          <nav className="pill-nav flex items-center gap-1 rounded-full px-1.5 py-1 text-xs font-medium sm:text-sm">
+          <nav className="pill-nav order-3 flex w-full items-center justify-center gap-1 rounded-full px-1.5 py-1 text-[11px] font-medium sm:order-none sm:w-auto sm:text-sm">
             {(
               [
                 ["research", "Research"],
                 ["records", "Records"],
-                ["agent", "Agent"],
+                ["deploy", "Deploy"],
+                ["agents", "My Agents"],
               ] as const
             ).map(([id, label]) => (
               <button
                 key={id}
                 type="button"
                 onClick={() => setTab(id)}
-                className={`rounded-full px-3 py-1.5 transition sm:px-4 ${
+                className={`rounded-full px-2.5 py-1.5 transition sm:px-3 ${
                   tab === id ? "active" : "hover:bg-black/5"
                 }`}
               >
@@ -114,7 +115,8 @@ export function AppShell() {
 
         {tab === "research" && <ResearchTab />}
         {tab === "records" && <RecordsTab />}
-        {tab === "agent" && <AgentTab />}
+        {tab === "deploy" && <AgentTab mode="deploy" />}
+        {tab === "agents" && <AgentTab mode="manage" />}
 
         <footer className="mt-14 border-t border-white/10 pt-6 pb-2 text-center">
           <p className="text-sm text-white/50">

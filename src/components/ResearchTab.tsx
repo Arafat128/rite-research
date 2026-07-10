@@ -46,8 +46,9 @@ type PaidCredit = {
 const STEPS = [
   { id: 1, label: "Connect" },
   { id: 2, label: "Prompt" },
-  { id: 3, label: "Pay fee" },
-  { id: 4, label: "Seal · unlock" },
+  { id: 3, label: "Pay" },
+  { id: 4, label: "Research" },
+  { id: 5, label: "Seal · reveal" },
 ] as const;
 
 const LS_KEY = "rite_paid_credits_v1";
@@ -129,12 +130,16 @@ export function ResearchTab() {
       : prompt.trim().length < 3
         ? 2
         : phase === "done"
-          ? 4
-          : busy
-            ? phase === "researching" || phase === "settling"
+          ? 5
+          : phase === "settling"
+            ? 5
+            : phase === "researching"
               ? 4
-              : 3
-            : 3;
+              : phase === "paying"
+                ? 3
+                : busy
+                  ? 3
+                  : 3;
 
   const refreshCredits = useCallback(async () => {
     if (!address || !publicClient || !RESEARCH_CONTRACT) {

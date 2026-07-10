@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useAccount,
   useConnect,
@@ -57,12 +57,10 @@ import {
 import {
   getAppAgent,
   isAgentClosed,
-  listAppAgents,
   listTicks,
   markAgentClosed,
   registerAppAgent,
   saveTick,
-  type AppAgentRecord,
   type TickRecord,
 } from "@/lib/agentStore";
 import { mergeTickRecords, tickFromAgentState } from "@/lib/agentTicks";
@@ -116,12 +114,19 @@ async function loadMergedTicks(
   return merged;
 }
 
-const FLOW = [
+/** Deploy tab steps only */
+const DEPLOY_FLOW = [
   { n: 1, t: "Class", d: "Persistent or Sovereign" },
-  { n: 2, t: "Data", d: "One Surf Data stream" },
-  { n: 3, t: "Deploy", d: "Pay deploy fee on-chain" },
-  { n: 4, t: "Activate", d: "Status → Live" },
-  { n: 5, t: "Tick", d: "Data API → seal" },
+  { n: 2, t: "Stream", d: "Lock one Data API kind" },
+  { n: 3, t: "Deploy", d: "Pay fee + fund balance" },
+] as const;
+
+/** Manage tab steps (live agent) */
+const MANAGE_FLOW = [
+  { n: 1, t: "Select", d: "Pick a live agent" },
+  { n: 2, t: "Activate", d: "Status → LIVE" },
+  { n: 3, t: "Fund", d: "Keep run balance" },
+  { n: 4, t: "Wake", d: "Data API → seal tick" },
 ] as const;
 
 function statusColor(s: number) {
@@ -155,7 +160,12 @@ function fmtMaxUint(n: bigint): string {
   return n.toString();
 }
 
-export function AgentTab() {
+export function AgentTab({
+  mode = "deploy",
+}: {
+  /** deploy = create agents · manage = live agents only */
+  mode?: "deploy" | "manage";
+}) {
   const { address, isConnected, chainId } = useAccount();
   // Wagmi client only for waitForTransactionReceipt after writes
   const publicClient = usePublicClient({ chainId: ritualChain.id });
@@ -166,6 +176,8 @@ export function AgentTab() {
     chainId: ritualChain.id,
   });
   const { writeContractAsync, isPending: writing } = useWriteContract();
+  /** Residual withdraws already prompted this session (dead agents) */
+  const autoWithdrawTried = useRef(new Set<string>());
 
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -193,7 +205,6 @@ export function AgentTab() {
 
   const [networkLive, setNetworkLive] = useState(0);
   const [networkTotal, setNetworkTotal] = useState(0);
-  const [appAgents, setAppAgents] = useState<AppAgentRecord[]>([]);
   const [ticks, setTicks] = useState<TickRecord[]>([]);
   const [lastSnapshot, setLastSnapshot] = useState<SurfDataSnapshot | null>(
     null
@@ -343,16 +354,18 @@ export function AgentTab() {
       setAgentMeta(meta);
 
       const liveIds = ids.filter((id) => meta[id.toString()]?.status !== 4);
-      const selectedStillOwned =
-        selectedId != null && ids.some((id) => id === selectedId);
+      const selectedStillLive =
+        selectedId != null &&
+        liveIds.some((id) => id === selectedId);
 
+      // Prefer live agents only — never auto-open a dead agent panel
       let pick: bigint | null = null;
-      if (selectedStillOwned) {
+      if (selectedStillLive) {
         pick = selectedId;
       } else if (liveIds.length) {
         pick = liveIds[liveIds.length - 1];
-      } else if (ids.length) {
-        pick = ids[ids.length - 1];
+      } else {
+        pick = null;
       }
 
       setSelectedId(pick);
@@ -391,7 +404,6 @@ export function AgentTab() {
         setTicksLeft(null);
       }
 
-      setAppAgents(listAppAgents(address));
       await refreshNetwork();
 
       // Public health no longer exposes config; infer readiness only if needed later
@@ -426,14 +438,123 @@ export function AgentTab() {
     else setTarget("_");
   }, [dataKind]);
 
-  const flowStep = useMemo(() => {
-    if (!agent) return track ? 3 : 1;
-    if (agent.status === 4) return 5;
+  const deployFlowStep = useMemo(() => {
+    // Deploy form progress only
+    if (!isConnected) return 1;
+    if (!dataKind) return 2;
+    return 3;
+  }, [isConnected, dataKind]);
+
+  const manageFlowStep = useMemo(() => {
+    if (!agent || agent.status === 4) return 1;
+    if (agent.status !== 1) return 2;
     if (agent.balance < fee) return 3;
-    if (!track) return 2;
-    if (agent.status !== 1) return 4;
-    return 5;
-  }, [agent, fee, track]);
+    return 4;
+  }, [agent, fee]);
+
+  const liveAgentIds = useMemo(
+    () =>
+      agentIds.filter((id) => {
+        const m = agentMeta[id.toString()];
+        return m && m.status !== 4 && !isAgentClosed(id.toString());
+      }),
+    [agentIds, agentMeta]
+  );
+
+  const deadAgentIds = useMemo(
+    () =>
+      agentIds.filter((id) => {
+        const m = agentMeta[id.toString()];
+        return !m || m.status === 4 || isAgentClosed(id.toString());
+      }),
+    [agentIds, agentMeta]
+  );
+
+  // Auto-withdraw residual RIT from dead/closed agents (one MetaMask confirm each)
+  useEffect(() => {
+    if (mode !== "manage") return;
+    if (!isConnected || !address || wrongChain || writing) return;
+    if (!RADAR_CONTRACT) return;
+
+    const pending = deadAgentIds.filter((id) => {
+      const key = id.toString();
+      if (autoWithdrawTried.current.has(key)) return false;
+      const m = agentMeta[key];
+      if (!m) return false;
+      try {
+        return BigInt(m.balance) > BigInt(0);
+      } catch {
+        return false;
+      }
+    });
+    if (!pending.length) return;
+
+    let cancelled = false;
+    (async () => {
+      for (const id of pending) {
+        if (cancelled) break;
+        const key = id.toString();
+        autoWithdrawTried.current.add(key);
+        const m = agentMeta[key];
+        if (!m) continue;
+        let bal: bigint;
+        try {
+          bal = BigInt(m.balance);
+        } catch {
+          continue;
+        }
+        if (bal <= BigInt(0)) continue;
+        try {
+          setMsg(
+            `Dead agent #${key} still holds ${formatEther(bal)} RIT — confirm auto-withdraw…`
+          );
+          setErr("");
+          const fees = await prepareRadarWrite({
+            account: address,
+            functionName: "withdraw",
+            args: [id, bal],
+            gasFloor: BigInt(120_000),
+          });
+          assertWalletCanPayGas(walletBal?.value, fees);
+          const hash = await writeContractAsync({
+            address: RADAR_CONTRACT,
+            abi: radarAgentAbi,
+            functionName: "withdraw",
+            args: [id, bal],
+            chainId: ritualChain.id,
+            gas: fees.gas,
+            gasPrice: fees.gasPrice,
+          } as never);
+          const client = publicClient ?? getRitualReadClient(true);
+          const receipt = await client.waitForTransactionReceipt({
+            hash,
+            confirmations: 1,
+          });
+          if (receipt.status === "success") {
+            setMsg(
+              `Residual ${formatEther(bal)} RIT from dead #${key} sent to your wallet`
+            );
+            setAgentMeta((prev) => ({
+              ...prev,
+              [key]: { ...prev[key], balance: "0", status: 4 },
+            }));
+          }
+        } catch (e: unknown) {
+          autoWithdrawTried.current.delete(key);
+          setErr(
+            `Could not auto-withdraw #${key}: ${errMsg(e, "withdraw")}`
+          );
+          break;
+        }
+      }
+      if (!cancelled) void refresh({ soft: true });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per residual dead agent
+  }, [mode, deadAgentIds, agentMeta, isConnected, address, wrongChain]);
 
   async function ensureWallet() {
     if (!isConnected) {
@@ -781,8 +902,9 @@ export function AgentTab() {
           },
         }));
         setMsg(
-          `Agent #${selectedId} killed · ${refundLabel} RIT refunded · compact DEAD card`
+          `Agent #${selectedId} killed · ${refundLabel} RIT refunded to wallet`
         );
+        setSelectedId(null);
         setErr("");
         await refresh();
         return;
@@ -852,11 +974,11 @@ export function AgentTab() {
             : "") +
           ` · paused (this contract has no killAgent)`
       );
+      setSelectedId(null);
       setErr("");
       await refresh();
     } catch (e: unknown) {
       const msg = errMsg(e, "killAgent");
-      // Friendly rewrite of generic MetaMask kill revert on old bytecode
       const lower = msg.toLowerCase();
       if (
         lower.includes("killagent") ||
@@ -864,7 +986,7 @@ export function AgentTab() {
         lower.includes("would revert")
       ) {
         setErr(
-          "Close failed. This Radar may lack killAgent — click Close again to use withdraw+pause, or Refresh. " +
+          "Close failed. This Radar may lack killAgent — try again for withdraw+pause. " +
             msg
         );
       } else {
@@ -1015,9 +1137,14 @@ export function AgentTab() {
       setErr("");
       setMsg(
         died
-          ? `Tick #${newCount}/3 sealed · sovereign agent DIED (life complete)`
+          ? `Tick #${newCount}/3 sealed · sovereign agent DIED — residual RIT will auto-withdraw`
           : `Tick #${newCount} sealed · ${snapshot.summary.slice(0, 72)} · fee ${feeLabel} RIT`
       );
+
+      // Residual on death: clear session flag so auto-withdraw effect can run
+      if (died && selectedId != null) {
+        autoWithdrawTried.current.delete(selectedId.toString());
+      }
 
       void refresh({ soft: true });
     } catch (e: unknown) {
@@ -1042,39 +1169,62 @@ export function AgentTab() {
     );
   }
 
+  const flowSteps = mode === "deploy" ? DEPLOY_FLOW : MANAGE_FLOW;
+  const flowStep = mode === "deploy" ? deployFlowStep : manageFlowStep;
+
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-1 flex flex-wrap items-end justify-between gap-3">
         <h2 className="font-[family-name:var(--font-display)] text-3xl text-[#c8ff4a]">
-          Data Agents
+          {mode === "deploy" ? "Deploy agent" : "My agents"}
         </h2>
         <span className="rounded-full border border-[#c8ff4a]/30 bg-[#c8ff4a]/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#c8ff4a]">
           Surf Data API
         </span>
       </div>
       <p className="mb-5 text-sm text-white/50">
-        <b className="text-white/80">Persistent</b> — deploy{" "}
-        <b className="text-[#c8ff4a]">{formatEther(PERSISTENT_DEPLOY_FEE)} RIT</b>
-        , never dies.{" "}
-        <b className="text-white/80">Sovereign</b> — deploy{" "}
-        <b className="text-[#c8ff4a]">{formatEther(SOVEREIGN_DEPLOY_FEE)} RIT</b>
-        , dies after <b className="text-white/80">{SOVEREIGN_MAX_RUNS}</b> ticks.
-        Each wake pulls one locked Surf Data API stream. Tick fee{" "}
-        <b className="text-[#c8ff4a]">{feeLabel} RIT</b> from agent balance.
+        {mode === "deploy" ? (
+          <>
+            <b className="text-white/80">Persistent</b> —{" "}
+            <b className="text-[#c8ff4a]">
+              {formatEther(PERSISTENT_DEPLOY_FEE)} RIT
+            </b>{" "}
+            deploy · never dies by tick count.{" "}
+            <b className="text-white/80">Sovereign</b> —{" "}
+            <b className="text-[#c8ff4a]">
+              {formatEther(SOVEREIGN_DEPLOY_FEE)} RIT
+            </b>{" "}
+            · dies after {SOVEREIGN_MAX_RUNS} ticks. Manage live agents in the{" "}
+            <b className="text-white/80">My Agents</b> tab.
+          </>
+        ) : (
+          <>
+            Control <b className="text-white/80">live</b> agents only — activate,
+            fund, schedule, wake. Dead agents stay out of the way; any residual
+            RIT is <b className="text-white/80">auto-withdrawn</b> to your wallet
+            (confirm in MetaMask).
+          </>
+        )}
       </p>
 
       <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Stat label="Network agents" value={networkTotal ? String(networkTotal) : "—"} />
-        <Stat label="Live (Active)" value={networkTotal ? String(networkLive) : "—"} />
-        <Stat label="Created in this app" value={String(appAgents.length)} />
-        <Stat label="Your agents" value={String(agentIds.length)} />
+        <Stat
+          label="Network agents"
+          value={networkTotal ? String(networkTotal) : "—"}
+        />
+        <Stat
+          label="Live (Active)"
+          value={networkTotal ? String(networkLive) : "—"}
+        />
+        <Stat label="Your live" value={String(liveAgentIds.length)} />
+        <Stat label="Your dead" value={String(deadAgentIds.length)} />
       </div>
 
       <div className="mb-6 flex flex-wrap gap-2">
-        {FLOW.map((f) => (
+        {flowSteps.map((f) => (
           <div
             key={f.n}
-            className={`min-w-[100px] flex-1 rounded-xl border p-3 text-center ${
+            className={`min-w-[88px] flex-1 rounded-xl border p-3 text-center ${
               flowStep === f.n
                 ? "border-[#c8ff4a] bg-[#c8ff4a]/15"
                 : flowStep > f.n
@@ -1093,7 +1243,9 @@ export function AgentTab() {
       {!isConnected ? (
         <div className="glass rounded-2xl p-6 text-center">
           <p className="mb-4 text-sm text-white/60">
-            Connect wallet to deploy agents
+            {mode === "deploy"
+              ? "Connect wallet to deploy agents"
+              : "Connect wallet to manage your agents"}
           </p>
           <button
             type="button"
@@ -1119,6 +1271,8 @@ export function AgentTab() {
         </button>
       ) : (
         <div className="space-y-4">
+          {mode === "deploy" && (
+          <>
           {/* Agent class */}
           <div className="glass rounded-2xl p-5">
             <h3 className="mb-3 text-sm font-semibold text-[#c8ff4a]">
@@ -1307,16 +1461,23 @@ export function AgentTab() {
                 : `Deploy ${AGENT_KIND_LABELS[agentKind]} · ${formatEther(totalDeployValue)} RIT`}
             </button>
           </div>
+          <p className="text-center text-[12px] text-white/40">
+            After deploy, open the <b className="text-white/60">My Agents</b>{" "}
+            tab to activate and wake.
+          </p>
+          </>
+          )}
 
-          {agentIds.length > 0 && (
+          {mode === "manage" && (
+          <>
+          {/* Live agents only */}
+          {liveAgentIds.length > 0 ? (
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-white/45">Your agents:</span>
-              {agentIds.map((id) => {
+              <span className="text-xs text-white/45">Live:</span>
+              {liveAgentIds.map((id) => {
                 const key = id.toString();
                 const reg = getAppAgent(key);
                 const meta = agentMeta[key];
-                const dead =
-                  meta?.status === 4 || isAgentClosed(key);
                 const selected = selectedId === id;
                 return (
                   <button
@@ -1329,29 +1490,17 @@ export function AgentTab() {
                     }}
                     className={`rounded-full px-3 py-1 text-xs ${
                       selected
-                        ? dead
-                          ? "bg-zinc-400 font-semibold text-black"
-                          : "bg-[#c8ff4a] font-semibold text-black"
-                        : dead
-                          ? "border border-zinc-500/40 bg-zinc-900/50 text-zinc-400"
-                          : "border border-white/15 bg-black/30 text-white/70"
+                        ? "bg-[#c8ff4a] font-semibold text-black"
+                        : "border border-white/15 bg-black/30 text-white/70"
                     }`}
-                    title={
-                      dead
-                        ? `Agent #${key} DEAD`
-                        : meta
-                          ? `Agent #${key} · ${statusText(meta.status)}`
-                          : `Agent #${key}`
-                    }
                   >
                     #{key}
-                    {dead ? " · DEAD" : ""}
-                    {!dead && reg
+                    {reg
                       ? ` · ${AGENT_KIND_LABELS[reg.agentKind] || "?"} · ${
                           DATA_KINDS.find((k) => k.id === reg.dataKind)?.short ||
                           reg.dataKind
                         }`
-                      : !dead && meta
+                      : meta
                         ? ` · ${AGENT_KIND_LABELS[meta.kind as AgentKindId] || "?"}`
                         : ""}
                   </button>
@@ -1365,100 +1514,28 @@ export function AgentTab() {
                 {loading ? "…" : "Refresh"}
               </button>
             </div>
+          ) : (
+            <div className="glass rounded-2xl p-6 text-center text-sm text-white/50">
+              No live agents. Deploy one in the{" "}
+              <b className="text-white/70">Deploy</b> tab, then return here.
+              <button
+                type="button"
+                onClick={() => refresh()}
+                className="mt-3 block w-full text-xs text-[#c8ff4a] underline"
+              >
+                {loading ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
           )}
 
-          {/* Finished agent — compact card only (no schedule/fund/kill clutter) */}
-          {agent && selectedId != null && agentFinished && (
-            <div className="glass rounded-2xl border border-zinc-500/30 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="text-base font-semibold text-white/90">
-                    {agent.name}
-                  </div>
-                  <div className="mt-0.5 text-xs text-white/40">
-                    #{selectedId.toString()} ·{" "}
-                    {AGENT_KIND_LABELS[agent.kind] || "Agent"}
-                    {agent.status === 4
-                      ? agent.runCount > BigInt(0)
-                        ? ` · finished ${agent.runCount.toString()} tick(s)`
-                        : " · killed"
-                      : " · closed (withdraw + pause)"}
-                  </div>
-                </div>
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-bold ${statusColor(4)}`}
-                >
-                  {agent.status === 4 ? "DEAD" : "CLOSED"}
-                </span>
-              </div>
-
-              <p className="mt-3 text-[12px] leading-relaxed text-white/50">
-                This agent is finished. Full controls are hidden.{" "}
-                {agent.balance > BigInt(0)
-                  ? "Withdraw residual RIT below, then deploy a new agent if you want to keep tracking."
-                  : "Balance is 0. Deploy a new agent to continue."}
-              </p>
-
-              {agent.balance > BigInt(0) ? (
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-amber-100/80">
-                    Residual{" "}
-                    <b className="text-[#c8ff4a]">
-                      {formatEther(agent.balance)} RIT
-                    </b>
-                  </span>
-                  <button
-                    type="button"
-                    disabled={writing}
-                    onClick={() => void withdrawSelected(agent.balance)}
-                    className="btn-primary rounded-lg px-4 py-2 text-sm"
-                  >
-                    {writing ? "Confirm…" : "Withdraw remaining"}
-                  </button>
-                </div>
-              ) : (
-                <p className="mt-3 text-[11px] text-white/35">
-                  No residual balance · use Deploy above for a new agent
-                </p>
-              )}
-
-              {ticks.length > 0 && (
-                <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-2">
-                  <summary className="cursor-pointer text-[11px] text-white/45">
-                    Past tick seals ({ticks.length})
-                  </summary>
-                  <div className="mt-2 space-y-2">
-                    {ticks.slice(0, 5).map((t) => (
-                      <div
-                        key={`${t.runCount}-${t.txHash || t.at}`}
-                        className="text-[11px] text-white/55"
-                      >
-                        Tick #{t.runCount}
-                        {t.snapshot?.kindLabel
-                          ? ` · ${t.snapshot.kindLabel}`
-                          : ""}
-                        {t.txHash &&
-                          t.txHash !==
-                            "0x0000000000000000000000000000000000000000000000000000000000000000" && (
-                            <>
-                              {" "}
-                              ·{" "}
-                              <a
-                                href={txUrl(t.txHash)}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-[#c8ff4a] underline"
-                              >
-                                tx
-                              </a>
-                            </>
-                          )}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              )}
-            </div>
+          {/* Dead — minimal one-liner (no big cards) */}
+          {deadAgentIds.length > 0 && (
+            <p className="text-[11px] text-white/30">
+              Dead / closed:{" "}
+              {deadAgentIds.map((id) => `#${id.toString()}`).join(", ")}
+              {" · "}
+              residual RIT auto-withdraws to your wallet when present
+            </p>
           )}
 
           {/* LIVE / active agent — full controls */}
@@ -1840,27 +1917,7 @@ export function AgentTab() {
             </div>
           )}
 
-          {appAgents.length > 0 && (
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/40">
-                Agents created in this app ({appAgents.length})
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {appAgents.map((a) => (
-                  <button
-                    key={a.agentId}
-                    type="button"
-                    onClick={() => setSelectedId(BigInt(a.agentId))}
-                    className="rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-left text-[11px] text-white/70 hover:border-[#c8ff4a]/40"
-                  >
-                    <span className="font-semibold text-[#c8ff4a]">
-                      #{a.agentId}
-                    </span>{" "}
-                    {AGENT_KIND_LABELS[a.agentKind] || "?"} · {a.name}
-                  </button>
-                ))}
-              </div>
-            </div>
+          </>
           )}
 
           <a
