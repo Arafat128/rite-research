@@ -13,7 +13,7 @@ Built by [@its_perseus_1](https://x.com/its_perseus_1)
 | Product | User pays | Off-chain | On-chain seal |
 |---------|-----------|-----------|----------------|
 | **Research** | 0.005 RITUAL per prompt | Surf **Responses** report | `payForResearch` → `settleResearch` |
-| **Data agents** | Deploy fee + 0.005 RIT per tick | Surf **Data API** (one stream per agent) | `runTick` digests |
+| **Data agents** | Deploy fee + 0.005 RIT per tick | Surf **Data API** or **Ritual LLM** custom (one stream per agent) | `runTick` digests |
 | **Bounty** | — (funded by fees) | — | 50% of fees → pool → pull claim |
 | **Telegram** | Free | Bot DMs after a sealed tick | — |
 
@@ -48,7 +48,9 @@ Fees always split **50% treasury / 50% BountyPool**.
 
 - Tick fee: **0.005** RIT from **agent balance** (not wallet)  
 - Gas: from **wallet** (or keeper for auto-wake)  
-- Streams (locked at deploy): price, fear & greed, news, perp funding, social mindshare  
+- Streams (locked at deploy): token price, fear & greed, news, stablecoin peg, gas, whales, OI skew, narrative, Ritual network, **Custom (Ritual LLM)**  
+- Custom stream: your short prompt → keeper calls Ritual LLM precompile `0x0802` (GLM-4.7 TEE) → same digest/`runTick` path · needs `KEEPER_PRIVATE_KEY` + RitualWallet RIT · optional `RITUAL_LLM_EXECUTOR`  
+
 
 ### Auto-wake (unattended)
 
