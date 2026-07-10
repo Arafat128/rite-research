@@ -5,6 +5,7 @@ import { WagmiProvider } from "wagmi";
 import { useEffect, useState, type ReactNode } from "react";
 import { wagmiConfig } from "@/lib/wagmi";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { ToastProvider } from "./ToastProvider";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [qc] = useState(() => new QueryClient());
@@ -53,7 +54,9 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <ErrorBoundary>
       <WagmiProvider config={wagmiConfig}>
-        <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+        <QueryClientProvider client={qc}>
+          <ToastProvider>{children}</ToastProvider>
+        </QueryClientProvider>
       </WagmiProvider>
     </ErrorBoundary>
   );

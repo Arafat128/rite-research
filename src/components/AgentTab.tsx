@@ -80,6 +80,7 @@ import {
   prepareRadarWrite,
   supportsKillAgent,
 } from "@/lib/radarWrite";
+import { useToast } from "@/components/ToastProvider";
 
 /** Load chain/keeper ticks and merge with this browser's localStorage history. */
 async function loadMergedTicks(
@@ -176,6 +177,7 @@ export function AgentTab({
     chainId: ritualChain.id,
   });
   const { writeContractAsync, isPending: writing } = useWriteContract();
+  const toast = useToast();
 
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -623,10 +625,18 @@ export function AgentTab({
             : " · never dies"
         }`
       );
+      toast.success(
+        `Agent #${newId} deployed`,
+        "Open My Agents to activate & wake"
+      );
       await refresh();
     } catch (e: unknown) {
-      setErr(errMsg(e));
+      const m = errMsg(e);
+      setErr(m);
       setMsg("");
+      if (!/reject|denied|connect wallet|switch wallet/i.test(m)) {
+        toast.error("Deploy failed", m);
+      }
     }
   }
 
@@ -660,10 +670,13 @@ export function AgentTab({
             ? "Use Wake when due — auto-wake only if keeper cron is configured."
             : "Activate → LIVE, fund if needed, then Wake.")
       );
+      toast.success("Schedule saved", formatInterval(blocks));
       await refresh({ soft: true });
     } catch (e: unknown) {
-      setErr(errMsg(e));
+      const m = errMsg(e);
+      setErr(m);
       setMsg("");
+      if (!/reject|denied/i.test(m)) toast.error("Schedule save failed", m);
     }
   }
 
@@ -683,10 +696,13 @@ export function AgentTab({
       });
       await waitTx(hash);
       setMsg(`Funded +${fundAmt} RITUAL`);
+      toast.success("Agent funded", `+${fundAmt} RIT to agent balance`);
       await refresh();
     } catch (e: unknown) {
-      setErr(errMsg(e));
+      const m = errMsg(e);
+      setErr(m);
       setMsg("");
+      if (!/reject|denied/i.test(m)) toast.error("Fund failed", m);
     }
   }
 
@@ -750,11 +766,14 @@ export function AgentTab({
         throw new Error("Withdraw transaction reverted on-chain");
       }
       setMsg(`Withdrew ${formatEther(amount)} RIT to your wallet`);
+      toast.success("Withdrawn", `${formatEther(amount)} RIT sent to your wallet`);
       setWithdrawAmt("");
       await refresh();
     } catch (e: unknown) {
-      setErr(errMsg(e, "withdraw"));
+      const m = errMsg(e, "withdraw");
+      setErr(m);
       setMsg("");
+      if (!/reject|denied/i.test(m)) toast.error("Withdraw failed", m);
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
           if (!a) return;
@@ -837,6 +856,10 @@ export function AgentTab({
         setMsg(
           `Agent #${selectedId} killed · ${refundLabel} RIT refunded to wallet`
         );
+        toast.success(
+          `Agent #${selectedId} killed`,
+          `${refundLabel} RIT refunded to wallet`
+        );
         setSelectedId(null);
         setErr("");
         await refresh();
@@ -907,6 +930,12 @@ export function AgentTab({
             : "") +
           ` · paused (this contract has no killAgent)`
       );
+      toast.success(
+        `Agent #${selectedId} closed`,
+        withdrew > BigInt(0)
+          ? `${formatEther(withdrew)} RIT withdrawn · paused`
+          : "Agent paused"
+      );
       setSelectedId(null);
       setErr("");
       await refresh();
@@ -925,6 +954,7 @@ export function AgentTab({
       } else {
         setErr(msg);
       }
+      if (!/reject|denied/i.test(msg)) toast.error("Close / kill failed", msg);
       setMsg("");
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
@@ -960,10 +990,13 @@ export function AgentTab({
       });
       await waitTx(hash);
       setMsg(active ? "Agent LIVE" : "Agent Paused");
+      toast.success(active ? "Agent is LIVE" : "Agent paused");
       await refresh();
     } catch (e: unknown) {
-      setErr(errMsg(e));
+      const m = errMsg(e);
+      setErr(m);
       setMsg("");
+      if (!/reject|denied/i.test(m)) toast.error("Status update failed", m);
     }
   }
 
@@ -1073,16 +1106,29 @@ export function AgentTab({
           ? `Tick #${newCount}/3 sealed · sovereign agent DIED (life complete)`
           : `Tick #${newCount} sealed · ${snapshot.summary.slice(0, 72)} · fee ${feeLabel} RIT`
       );
+      if (died) {
+        toast.success(
+          `Tick #${newCount} sealed · agent DIED`,
+          "Sovereign life complete"
+        );
+      } else {
+        toast.success(
+          `Tick #${newCount} sealed`,
+          snapshot.summary.slice(0, 80)
+        );
+      }
 
       void refresh({ soft: true });
     } catch (e: unknown) {
       // Drop any pending data — user cancelled or tx failed
       setLastSnapshot(null);
+      const m = errMsg(e);
       setErr(
-        errMsg(e) +
+        m +
           " — Data is only shown after you confirm runTick. Try Wake again and approve the transaction."
       );
       setMsg("");
+      if (!/reject|denied/i.test(m)) toast.error("Wake / tick failed", m);
     } finally {
       setTicking(false);
     }

@@ -31,6 +31,7 @@ import {
 import { buildClaimMessage } from "@/lib/researchClaim";
 import { ResearchReport } from "@/components/ResearchReport";
 import { ResearchLoading } from "@/components/ResearchLoading";
+import { useToast } from "@/components/ToastProvider";
 
 type Phase = "idle" | "paying" | "researching" | "settling" | "done" | "error";
 
@@ -85,6 +86,7 @@ export function ResearchTab() {
   const { switchChain, isPending: switching } = useSwitchChain();
   const { data: bal } = useBalance({ address });
   const { signMessageAsync } = useSignMessage();
+  const toast = useToast();
 
   const [prompt, setPrompt] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -503,15 +505,18 @@ export function ResearchTab() {
       setReport(plaintext);
       setStatus("Complete: report unlocked · sealed on-chain.");
       setPhase("done");
+      toast.success("Report unlocked", `Research #${data.researchId} sealed on-chain`);
       await refreshCredits();
     } catch (e: unknown) {
       console.error("claimPaid", e);
       setPhase("error");
       setReport("");
+      const m = errText(e);
       setStatus(
-        errText(e) +
+        m +
           " — Report is locked until you confirm the seal transaction. You already paid; try Claim again and approve seal."
       );
+      if (!/reject|denied/i.test(m)) toast.error("Claim failed", m);
     } finally {
       setClaimingId(null);
     }
@@ -635,6 +640,7 @@ export function ResearchTab() {
       setReport(plaintext);
       setStatus("Complete: report unlocked · sealed on-chain.");
       setPhase("done");
+      toast.success("Report unlocked", `Research #${data.researchId} sealed on-chain`);
       await refreshCredits();
     } catch (e: unknown) {
       console.error(e);
@@ -645,6 +651,11 @@ export function ResearchTab() {
         msg +
           " — If fee was paid but seal was rejected, use Claim free report and confirm the seal tx to unlock the report."
       );
+      if (!/reject|denied|already paid|Claim free/i.test(msg)) {
+        toast.error("Research failed", msg);
+      } else if (/paid|claim/i.test(msg)) {
+        toast.info("Payment recorded", "Use Claim free report if needed");
+      }
       await refreshCredits();
     }
   }

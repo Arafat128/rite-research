@@ -10,6 +10,7 @@ import {
   txUrl,
   addressUrl,
 } from "@/lib/ritual";
+import { useToast } from "@/components/ToastProvider";
 
 type WinnerInfo = {
   winner: Address;
@@ -32,6 +33,7 @@ const winnerPaidEvent = parseAbiItem(
 
 export function BountyBanner() {
   const { address, isConnected } = useAccount();
+  const toast = useToast();
 
   const [info, setInfo] = useState<WinnerInfo | null>(null);
   const [myPoints, setMyPoints] = useState<bigint>(BigInt(0));
@@ -73,6 +75,28 @@ export function BountyBanner() {
         threshold: raw[9],
       };
       setInfo(next);
+
+      // Notify only if *you* won — once per round (session)
+      if (
+        address &&
+        next.winner &&
+        next.winner.toLowerCase() === address.toLowerCase() &&
+        next.amount > BigInt(0) &&
+        next.wonRoundId > BigInt(0)
+      ) {
+        const k = `rite_bounty_toast_${next.wonRoundId.toString()}`;
+        try {
+          if (!sessionStorage.getItem(k)) {
+            sessionStorage.setItem(k, "1");
+            toast.success(
+              "You won the bounty!",
+              `${Number(formatEther(next.amount)).toFixed(4)} RIT · claim if pull-payout is enabled`
+            );
+          }
+        } catch {
+          /* private mode */
+        }
+      }
 
       if (address) {
         try {
@@ -118,7 +142,7 @@ export function BountyBanner() {
     } finally {
       setLoading(false);
     }
-  }, [address]);
+  }, [address, toast]);
 
   useEffect(() => {
     void load();
