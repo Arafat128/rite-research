@@ -8,6 +8,7 @@
  */
 
 import { resolveSurfBaseUrl, sanitizeDataTarget } from "@/lib/security";
+import { generateRitualLlmSnapshot } from "@/lib/ritualLlm";
 
 export type DataKindId =
   | "market_price"
@@ -18,7 +19,8 @@ export type DataKindId =
   | "whale_transfers"
   | "open_interest_skew"
   | "narrative_sector"
-  | "ritual_network";
+  | "ritual_network"
+  | "custom_ritual_llm";
 
 export type DataKindDef = {
   id: DataKindId;
@@ -137,6 +139,17 @@ export const DATA_KINDS: DataKindDef[] = [
     targetPlaceholder: "",
     defaultTarget: "_",
     path: () => "", // RPC + contract
+  },
+  {
+    id: "custom_ritual_llm",
+    label: "Custom (Ritual LLM)",
+    short: "Custom",
+    description:
+      "You describe what to track. Ritual LLM (on-chain TEE, GLM-4.7) returns a short table each tick. No OpenAI key.",
+    targetLabel: "What should this agent track?",
+    targetPlaceholder: "e.g. Overnight risk for ETH vs BTC in 5 bullets",
+    defaultTarget: "Summarize crypto market risk in one short table",
+    path: () => "", // Ritual LLM precompile
   },
 ];
 
@@ -1035,6 +1048,16 @@ export async function fetchSurfData(
       endpoint = "ritual-rpc+radar";
       break;
     }
+    case "custom_ritual_llm": {
+      const out = await generateRitualLlmSnapshot(t);
+      shaped = {
+        summary: out.summary,
+        rows: out.rows as Array<Record<string, SnapshotCell>>,
+        highlights: out.highlights,
+      };
+      endpoint = out.endpoint;
+      break;
+    }
     default:
       shaped = { summary: "Data fetched", rows: [], highlights: [] };
   }
@@ -1059,9 +1082,14 @@ export async function fetchSurfData(
 export function encodeAgentTrack(kind: DataKindId, target: string): string[] {
   const k = getDataKind(kind);
   if (!k) throw new Error("Invalid kind");
-  const t = (target || k.defaultTarget).trim() || k.defaultTarget;
+  let t = (target || k.defaultTarget).trim() || k.defaultTarget;
+  // Custom prompts may be longer; cap for on-chain string gas
+  if (kind === "custom_ritual_llm") {
+    t = t.slice(0, 100);
+  }
   const cell = `${kind}|${t}`;
-  if (cell.length > 48) throw new Error("Target too long for on-chain lock");
+  const max = kind === "custom_ritual_llm" ? 120 : 48;
+  if (cell.length > max) throw new Error("Target too long for on-chain lock");
   return [cell];
 }
 

@@ -1700,7 +1700,9 @@ export function AgentTab({
               2 · Data stream (locked at deploy)
             </h3>
             <p className="mb-3 text-[11px] text-white/40">
-              One Surf Data API kind only. Never uses Chat / Responses research.
+              One locked stream per agent. Hard data via Surf / RPC;{" "}
+              <b className="text-white/55">Custom</b> uses Ritual LLM (TEE) —
+              not Chat research.
             </p>
             <div className="mb-4 grid gap-2 sm:grid-cols-2">
               {DATA_KINDS.map((k) => (
@@ -1731,7 +1733,28 @@ export function AgentTab({
                   className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
                 />
               </div>
-              {dataDef.targetLabel ? (
+              {dataKind === "custom_ritual_llm" ? (
+                <div className="sm:col-span-2">
+                  <label className="text-[11px] text-white/40">
+                    {dataDef.targetLabel || "Custom prompt"}
+                  </label>
+                  <textarea
+                    value={target === "_" ? "" : target}
+                    onChange={(e) => setTarget(e.target.value.slice(0, 100))}
+                    placeholder={dataDef.targetPlaceholder}
+                    rows={3}
+                    maxLength={100}
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                  />
+                  <p className="mt-1 text-[10px] text-white/35">
+                    Locked on-chain (max 100 chars). Each wake runs Ritual LLM
+                    (GLM-4.7 TEE) → short table. Needs{" "}
+                    <code className="text-white/50">KEEPER_PRIVATE_KEY</code> +
+                    RitualWallet deposit on the keeper for LLM fees. Prefer
+                    schedule ≥ 5–15 min for cost/latency.
+                  </p>
+                </div>
+              ) : dataDef.targetLabel ? (
                 <div>
                   <label className="text-[11px] text-white/40">
                     {dataDef.targetLabel}
