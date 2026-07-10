@@ -93,9 +93,88 @@ function saveDurable(): void {
   }
 }
 
+/**
+ * Production durable links for unattended keeper (Vercel multi-instance).
+ *
+ * TELEGRAM_LINKS_JSON examples:
+ *   {"0xabc...":"123456789"}
+ *   {"0xabc...":{"chatId":"123456789","enabled":true,"username":"bob"}}
+ *
+ * TELEGRAM_DEFAULT_CHAT_ID=123456789  — single-operator fallback for all owners
+ */
+function envLinks(): Map<string, TelegramPref> {
+  const out = new Map<string, TelegramPref>();
+  const raw = process.env.TELEGRAM_LINKS_JSON?.trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Record<
+        string,
+        string | { chatId?: string; enabled?: boolean; username?: string }
+      >;
+      for (const [ownerRaw, v] of Object.entries(parsed)) {
+        const owner = ownerRaw.toLowerCase();
+        if (!owner.startsWith("0x") || owner.length !== 42) continue;
+        const chatId =
+          typeof v === "string"
+            ? v.trim()
+            : String(v?.chatId || "").trim();
+        if (!/^\d+$/.test(chatId)) continue;
+        const enabled =
+          typeof v === "object" && v && typeof v.enabled === "boolean"
+            ? v.enabled
+            : true;
+        const username =
+          typeof v === "object" && v?.username
+            ? String(v.username).replace(/^@/, "")
+            : undefined;
+        out.set(owner, {
+          owner,
+          chatId,
+          agentIds: [],
+          enabled,
+          linkedAt: 0,
+          username,
+        });
+      }
+    } catch (e) {
+      console.warn("[telegramPrefs] TELEGRAM_LINKS_JSON invalid", e);
+    }
+  }
+  const def = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim();
+  if (def && /^\d+$/.test(def) && !out.has("*")) {
+    // marker used only as fallback in getTelegramPref
+    out.set("__default__", {
+      owner: "__default__",
+      chatId: def,
+      agentIds: [],
+      enabled: true,
+      linkedAt: 0,
+    });
+  }
+  return out;
+}
+
 export function getTelegramPref(owner: string): TelegramPref | null {
   loadDurable();
-  return prefs().get(owner.toLowerCase()) || null;
+  const o = owner.toLowerCase();
+  const mem = prefs().get(o);
+  if (mem?.chatId) return mem;
+
+  const links = envLinks();
+  const fromEnv = links.get(o);
+  if (fromEnv) return fromEnv;
+
+  const def = links.get("__default__");
+  if (def?.chatId) {
+    return {
+      owner: o,
+      chatId: def.chatId,
+      agentIds: [],
+      enabled: true,
+      linkedAt: 0,
+    };
+  }
+  return null;
 }
 
 export function setTelegramPref(pref: TelegramPref) {
@@ -111,6 +190,19 @@ export function unlinkTelegram(owner: string) {
   loadDurable();
   prefs().delete(owner.toLowerCase());
   saveDurable();
+}
+
+/** Value to paste into Vercel TELEGRAM_LINKS_JSON for unattended DMs */
+export function formatLinksJsonSnippet(
+  owner: string,
+  chatId: string,
+  username?: string
+): string {
+  const o = owner.toLowerCase();
+  const entry = username
+    ? { chatId, enabled: true, username: username.replace(/^@/, "") }
+    : chatId;
+  return JSON.stringify({ [o]: entry });
 }
 
 /**

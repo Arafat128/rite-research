@@ -63,6 +63,7 @@ import {
   markAgentClosed,
   registerAppAgent,
   saveTick,
+  tickHasUsefulData,
   unmarkAgentClosed,
   type TickRecord,
 } from "@/lib/agentStore";
@@ -93,7 +94,7 @@ async function loadMergedTicks(
   agentId: string,
   agent?: AgentView | null
 ): Promise<TickRecord[]> {
-  const local = listTicks(agentId);
+  const local = listTicks(agentId, RADAR_CONTRACT);
   let remote: TickRecord[] = [];
   try {
     const res = await fetch(
@@ -108,7 +109,20 @@ async function loadMergedTicks(
     /* RPC / API flaky — keep local */
   }
   let merged = mergeTickRecords(local, remote);
-  if (merged.length === 0 && agent && agent.runCount > BigInt(0)) {
+  // Drop ticks that don't belong to this agent's current life (stale UI junk)
+  if (agent) {
+    const maxRun = Number(agent.runCount);
+    merged = merged.filter((t) => {
+      const n = Number(t.runCount);
+      if (!Number.isFinite(n) || n <= 0) return false;
+      if (maxRun > 0 && n > maxRun) return false;
+      return true;
+    });
+  }
+  // Prefer useful snapshots for the history list
+  const useful = merged.filter(tickHasUsefulData);
+  if (useful.length > 0) merged = useful;
+  else if (merged.length === 0 && agent && agent.runCount > BigInt(0)) {
     const fromState = tickFromAgentState({
       agentId,
       runCount: agent.runCount,
@@ -577,7 +591,7 @@ export function AgentTab({
                 raw: undefined,
               },
             };
-            saveTick(rec);
+            saveTick(rec, RADAR_CONTRACT);
 
             // Telegram: server may have no linked prefs on this instance —
             // always re-push from browser with chatId + full rows when linked
@@ -1368,7 +1382,7 @@ export function AgentTab({
         digest,
         snapshot,
       };
-      saveTick(rec);
+      saveTick(rec, RADAR_CONTRACT);
       setTicks(await loadMergedTicks(selectedId.toString(), {
         ...agent,
         runCount: newCount,
@@ -1959,20 +1973,28 @@ export function AgentTab({
                       Wake schedule
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      Saved on-chain as <b className="text-white/55">block</b>{" "}
-                      interval (1 min ≈{" "}
+                      Saved on-chain as block interval (1 min ≈{" "}
                       {scheduleToBlocks({ value: 1, unit: "minutes" }).toString()}{" "}
-                      blocks @ ~{BLOCK_TIME_SEC}s).{" "}
-                      <b className="text-white/55">Manual Wake</b> always works
-                      when LIVE + funded.{" "}
-                      <b className="text-white/55">Auto-wake</b> runs while this
-                      tab is open (polls the server keeper every ~20s) — needs{" "}
-                      <code className="text-white/45">KEEPER_PRIVATE_KEY</code>{" "}
-                      + agent LIVE + balance. Vercel native cron is only daily;
-                      keep My Agents open for 1m schedules (or use external
-                      cron → <code className="text-white/45">/api/agent/cron</code>
-                      ).
+                      blocks).{" "}
+                      <b className="text-white/55">Unattended</b> ticks need
+                      GitHub Actions / cron-job.org →{" "}
+                      <code className="text-white/45">/api/agent/cron</code>{" "}
+                      (see UNATTENDED_KEEPER.md). This tab also polls as a
+                      backup while open. Use{" "}
+                      <b className="text-[#c8ff4a]">Persistent</b> agents for
+                      long unattended runs — Sovereign dies after{" "}
+                      {SOVEREIGN_MAX_RUNS} ticks.
                     </p>
+                    {agent.kind === AGENT_KIND.Sovereign &&
+                      agent.status === 1 && (
+                        <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
+                          This is <b>Sovereign</b> (
+                          {agent.runCount.toString()}/{SOVEREIGN_MAX_RUNS}{" "}
+                          ticks). After {SOVEREIGN_MAX_RUNS} seals it dies and
+                          unattended cron will skip it. Deploy{" "}
+                          <b>Persistent</b> for ongoing 1m auto-wake.
+                        </p>
+                      )}
                     {autoWakeNote && mode === "manage" && (
                       <p
                         className={`mb-2 rounded-lg border px-2 py-1.5 text-[11px] ${
@@ -2238,53 +2260,67 @@ export function AgentTab({
             </div>
           )}
 
-          {ticks.length > 0 && agent && !agentFinished && (
-            <div className="glass rounded-2xl p-5">
-              <h3 className="mb-3 text-sm font-semibold text-[#c8ff4a]">
-                Tick results
-              </h3>
-              <div className="space-y-3">
-                {ticks.slice(0, 8).map((t) => (
-                  <div
-                    key={`${t.at}-${t.runCount}-${t.txHash || ""}`}
-                    className="rounded-xl border border-white/10 bg-black/25 p-3"
-                  >
-                    <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-xs font-semibold text-white/80">
-                        Tick #{t.runCount} · {t.snapshot.kindLabel}
-                        {t.snapshot.target && t.snapshot.target !== "_"
-                          ? ` · ${t.snapshot.target}`
-                          : ""}
-                        {t.source === "chain" || t.source === "keeper" ? (
-                          <span className="ml-1 text-[10px] font-normal text-white/40">
-                            ({t.source === "keeper" ? "auto-wake" : "on-chain"})
-                          </span>
-                        ) : null}
-                      </span>
-                      <span className="text-[10px] text-white/40">
-                        {new Date(t.at).toLocaleString()}
-                      </span>
+          {(() => {
+            // Only this agent + useful data (hide stale/empty placeholders)
+            const history = ticks
+              .filter(
+                (t) =>
+                  t.agentId === selectedId?.toString() && tickHasUsefulData(t)
+              )
+              .slice(0, 8);
+            if (!history.length || !agent || agentFinished) return null;
+            return (
+              <div className="glass rounded-2xl p-5">
+                <h3 className="mb-3 text-sm font-semibold text-[#c8ff4a]">
+                  Tick results
+                </h3>
+                <div className="space-y-3">
+                  {history.map((t) => (
+                    <div
+                      key={`${t.agentId}-${t.runCount}-${t.txHash || t.at}`}
+                      className="rounded-xl border border-white/10 bg-black/25 p-3"
+                    >
+                      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-white/80">
+                          Tick #{t.runCount} · {t.snapshot.kindLabel}
+                          {t.snapshot.target && t.snapshot.target !== "_"
+                            ? ` · ${t.snapshot.target}`
+                            : ""}
+                          {t.source === "chain" || t.source === "keeper" ? (
+                            <span className="ml-1 text-[10px] font-normal text-white/40">
+                              (
+                              {t.source === "keeper"
+                                ? "auto-wake"
+                                : "on-chain"}
+                              )
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="text-[10px] text-white/40">
+                          {new Date(t.at).toLocaleString()}
+                        </span>
+                      </div>
+                      <p className="text-[12px] text-white/65">
+                        {t.snapshot.summary}
+                      </p>
+                      {t.txHash &&
+                        t.txHash !==
+                          "0x0000000000000000000000000000000000000000000000000000000000000000" && (
+                          <a
+                            href={txUrl(t.txHash)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1 inline-block text-[11px] text-[#c8ff4a] underline"
+                          >
+                            Seal tx ↗
+                          </a>
+                        )}
                     </div>
-                    <p className="text-[12px] text-white/65">
-                      {t.snapshot.summary}
-                    </p>
-                    {t.txHash &&
-                      t.txHash !==
-                        "0x0000000000000000000000000000000000000000000000000000000000000000" && (
-                      <a
-                        href={txUrl(t.txHash)}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-1 inline-block text-[11px] text-[#c8ff4a] underline"
-                      >
-                        Seal tx ↗
-                      </a>
-                    )}
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           </>
           )}

@@ -14,6 +14,13 @@ type Status = {
   enabled: boolean;
   username: string | null;
   agentIds: string[];
+  chatId?: string | null;
+  hasEnvLinks?: boolean;
+  unattendedHint?: {
+    envName: string;
+    envValue: string;
+    altEnv: string;
+  } | null;
 };
 
 /** Full link snapshot kept in this browser (survives server cold starts). */
@@ -359,10 +366,13 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
             ) : (
               <>Linked to Telegram</>
             )}
-            {localLink?.chatId && (
+            {(st.chatId || localLink?.chatId) && (
               <span className="text-white/35">
                 {" "}
-                · chat <code className="text-white/50">{localLink.chatId}</code>
+                · chat{" "}
+                <code className="text-white/50">
+                  {st.chatId || localLink?.chatId}
+                </code>
               </span>
             )}
           </p>
@@ -376,6 +386,63 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
               Browser has chat id — rehydrating server… click Refresh if status
               stays incomplete.
             </p>
+          )}
+          {/* Unattended DMs need env on Vercel — serverless memory is empty for cron */}
+          {(st.chatId || localLink?.chatId) && (
+            <div className="mt-2 rounded-lg border border-amber-400/25 bg-amber-950/30 px-2 py-2 text-[10px] leading-relaxed text-amber-50/90">
+              <p className="font-semibold text-amber-100">
+                Unattended Telegram (site closed)
+              </p>
+              <p className="mt-1 text-white/60">
+                GitHub/cron ticks only DM you if Vercel has your chat id. Add
+                one env on Production and redeploy:
+              </p>
+              <p className="mt-1 break-all font-mono text-[9px] text-[#c8ff4a]/90">
+                {st.unattendedHint?.envName || "TELEGRAM_LINKS_JSON"}=
+                {st.unattendedHint?.envValue ||
+                  (localLink?.chatId
+                    ? JSON.stringify({
+                        [owner.toLowerCase()]: localLink.chatId,
+                      })
+                    : "…")}
+              </p>
+              <p className="mt-1 break-all font-mono text-[9px] text-white/45">
+                or{" "}
+                {st.unattendedHint?.altEnv ||
+                  `TELEGRAM_DEFAULT_CHAT_ID=${localLink?.chatId || "YOUR_CHAT_ID"}`}
+              </p>
+              {st.hasEnvLinks ? (
+                <p className="mt-1 text-emerald-200/90">
+                  Env link detected on server — unattended DMs should work.
+                </p>
+              ) : (
+                <p className="mt-1 text-amber-200/80">
+                  Env not set yet — DMs only when this browser pushes after a
+                  tick.
+                </p>
+              )}
+              <button
+                type="button"
+                className="mt-1.5 rounded border border-white/15 px-2 py-0.5 text-[10px] text-white/80"
+                onClick={async () => {
+                  const v =
+                    st.unattendedHint?.envValue ||
+                    (localLink?.chatId
+                      ? JSON.stringify({
+                          [owner.toLowerCase()]: localLink.chatId,
+                        })
+                      : "");
+                  try {
+                    await navigator.clipboard.writeText(v);
+                    toast.success("Copied", "Paste into Vercel env value");
+                  } catch {
+                    toast.info("Copy manually", v.slice(0, 40));
+                  }
+                }}
+              >
+                Copy TELEGRAM_LINKS_JSON value
+              </button>
+            </div>
           )}
         </div>
       )}

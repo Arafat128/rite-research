@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isAddress } from "viem";
 import {
   createLinkToken,
+  formatLinksJsonSnippet,
   getTelegramPref,
   setTelegramPref,
   unlinkTelegram,
@@ -34,15 +35,33 @@ export async function GET(req: NextRequest) {
     }
     const pref = getTelegramPref(owner);
     const bot = telegramBotUsername();
+    const linked = Boolean(pref?.chatId);
     return NextResponse.json({
       ok: true,
       configured: telegramConfigured(),
       botUsername: bot || null,
-      linked: Boolean(pref?.chatId),
+      linked,
       enabled: pref?.enabled ?? false,
       username: pref?.username || null,
       agentIds: pref?.agentIds || [],
       linkedAt: pref?.linkedAt || null,
+      chatId: pref?.chatId || null,
+      // For unattended keeper DMs on Vercel (multi-instance memory is empty)
+      unattendedHint: pref?.chatId
+        ? {
+            envName: "TELEGRAM_LINKS_JSON",
+            envValue: formatLinksJsonSnippet(
+              owner,
+              pref.chatId,
+              pref.username
+            ),
+            altEnv: `TELEGRAM_DEFAULT_CHAT_ID=${pref.chatId}`,
+          }
+        : null,
+      hasEnvLinks: Boolean(
+        process.env.TELEGRAM_LINKS_JSON?.trim() ||
+          process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim()
+      ),
     });
   } catch (e: unknown) {
     return NextResponse.json(

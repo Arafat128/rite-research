@@ -7,7 +7,15 @@ import type { DataKindId, SurfDataSnapshot } from "@/lib/surfData";
 import type { AgentKindId } from "@/lib/ritual";
 
 const REG_KEY = "rite_agents_v2";
-const TICK_KEY = "rite_agent_ticks_v1";
+const TICK_KEY_LEGACY = "rite_agent_ticks_v1";
+/** Per-Radar tick history — avoids mixing agents across contracts */
+const TICK_KEY_PREFIX = "rite_agent_ticks_v2:";
+
+function tickStorageKey(radar?: string | null): string {
+  const r = (radar || "").toLowerCase().trim();
+  if (r && /^0x[a-f0-9]{40}$/.test(r)) return `${TICK_KEY_PREFIX}${r}`;
+  return TICK_KEY_LEGACY;
+}
 
 export type AppAgentRecord = {
   agentId: string;
@@ -97,17 +105,58 @@ export function getAppAgent(agentId: string): AppAgentRecord | undefined {
   return listAppAgents().find((a) => a.agentId === agentId);
 }
 
-export function listTicks(agentId: string): TickRecord[] {
-  const all = readJson<TickRecord[]>(TICK_KEY, []);
+export function listTicks(
+  agentId: string,
+  radar?: string | null
+): TickRecord[] {
+  const key = tickStorageKey(radar);
+  let all = readJson<TickRecord[]>(key, []);
+  // One-time merge from legacy global key into radar-scoped store
+  if (radar && key !== TICK_KEY_LEGACY) {
+    const legacy = readJson<TickRecord[]>(TICK_KEY_LEGACY, []);
+    if (legacy.length) {
+      const mine = legacy.filter((t) => t.agentId === agentId);
+      if (mine.length) {
+        const byRun = new Map<string, TickRecord>();
+        for (const t of [...all, ...mine]) {
+          const prev = byRun.get(`${t.agentId}:${t.runCount}`);
+          if (!prev || (t.snapshot?.rows?.length ?? 0) > (prev.snapshot?.rows?.length ?? 0)) {
+            byRun.set(`${t.agentId}:${t.runCount}`, t);
+          }
+        }
+        all = Array.from(byRun.values());
+        writeJson(key, all.slice(0, 60));
+      }
+    }
+  }
   return all
     .filter((t) => t.agentId === agentId)
-    .sort((a, b) => b.at - a.at);
+    .sort((a, b) => Number(b.runCount) - Number(a.runCount) || b.at - a.at);
 }
 
-export function saveTick(rec: TickRecord) {
-  const all = readJson<TickRecord[]>(TICK_KEY, []);
-  all.unshift(rec);
-  writeJson(TICK_KEY, all.slice(0, 40));
+export function saveTick(rec: TickRecord, radar?: string | null) {
+  const key = tickStorageKey(radar);
+  const all = readJson<TickRecord[]>(key, []);
+  const next = [
+    rec,
+    ...all.filter(
+      (t) => !(t.agentId === rec.agentId && t.runCount === rec.runCount)
+    ),
+  ].slice(0, 60);
+  writeJson(key, next);
+}
+
+/** True if snapshot has real data (not empty on-chain placeholder). */
+export function tickHasUsefulData(t: TickRecord): boolean {
+  const s = t.snapshot;
+  if (!s) return false;
+  if ((s.rows?.length ?? 0) > 0) return true;
+  if (t.source === "local" || t.source === "keeper") {
+    return Boolean(s.summary && s.summary.length > 2);
+  }
+  // Chain placeholders like "Sealed on-chain · …" without rows — hide from table
+  if (/^Sealed on-chain|^Latest seal #/i.test(s.summary || "")) return false;
+  return Boolean(s.summary && s.summary.length > 8 && s.endpoint !== "on-chain");
 }
 
 /**

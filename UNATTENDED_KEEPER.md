@@ -83,12 +83,23 @@ cast send 0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f \
 
 Keeper address = public address of `KEEPER_PRIVATE_KEY`.
 
-### 7. Telegram (optional)
+### 7. Telegram unattended DMs (required for closed-tab alerts)
 
-1. Webhook → production:  
-   `https://YOUR_APP.vercel.app/api/notify/telegram/webhook`  
-2. Open the **production** site → Connect Telegram once  
-3. After cold starts, browser rehydrate helps; server may need re-link if prefs were only in memory
+Serverless instances **forget** in-memory links. For DMs when the site is closed:
+
+1. Webhook → production URL  
+2. Open production → **Connect Telegram** once  
+3. Copy the shown **`TELEGRAM_LINKS_JSON`** value (or chat id)  
+4. Vercel → Environment Variables → Production:
+
+| Name | Value |
+|------|--------|
+| `TELEGRAM_LINKS_JSON` | `{"0xyourwallet…":"YOUR_CHAT_ID"}` |
+| **or** `TELEGRAM_DEFAULT_CHAT_ID` | `YOUR_CHAT_ID` only |
+
+5. **Redeploy**
+
+Without this, ticks still seal unattended, but Telegram only fires when a browser pushes after open.
 
 ---
 
