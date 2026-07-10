@@ -5,14 +5,15 @@ Fully automatic ticks **without** leaving **My Agents** open.
 ## Architecture
 
 ```
-GitHub Actions (every 1 min)  ──Bearer CRON_SECRET──►  Vercel /api/agent/cron
+GitHub Actions (1m poke loop)  ──Bearer CRON_SECRET──►  Vercel /api/agent/cron
                                                          │
                                                          ├─ KEEPER_PRIVATE_KEY (gas)
                                                          ├─ Surf data fetch
                                                          └─ runTick on LIVE + due agents
 ```
 
-Vercel **Hobby** native cron is only **daily** — use GitHub Actions (or cron-job.org) for 1m.
+Vercel **Hobby** native cron is only **daily**.  
+GitHub’s `*/1` schedule often fires only ~hourly, so the **Agent keeper** workflow runs a **50× / 60s poke loop** (restarted around `:00/:15/:30/:45`) so LIVE agents tick with the tab closed.
 
 ---
 
@@ -133,7 +134,7 @@ Expect:
 
 ---
 
-## Reliable 1m (recommended — GitHub schedules often lag / skip)
+## Extra-reliable 1m (optional — QStash / cron-job)
 
 ### Option A — Upstash QStash (you already use Upstash)
 
