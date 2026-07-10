@@ -46,6 +46,7 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
   const [err, setErr] = useState("");
   const [manualChat, setManualChat] = useState("");
   const [localChat, setLocalChat] = useState<string | null>(null);
+  const [deepLink, setDeepLink] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -146,11 +147,20 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
       if (!res.ok) throw new Error(data.error || "Request failed");
 
       if (action === "link" && data.deepLink) {
-        window.open(data.deepLink, "_blank", "noopener,noreferrer");
-        toast.info(
-          "Press Start in Telegram",
-          "Then return here and click Refresh status (or open the confirm link the bot sends)"
-        );
+        setDeepLink(data.deepLink);
+        // Popup blockers often kill window.open — link is shown below too
+        const opened = window.open(data.deepLink, "_blank", "noopener,noreferrer");
+        if (!opened) {
+          toast.info(
+            "Open the Telegram link below",
+            "Popup blocked — use Open bot or Copy link"
+          );
+        } else {
+          toast.info(
+            "Press Start in Telegram",
+            "Then return here and click Refresh status"
+          );
+        }
       } else if (action === "test" && data.sent) {
         toast.success("Test sent", "Check your Telegram DMs");
       } else if (action === "unlink") {
@@ -248,6 +258,43 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         </p>
       )}
 
+      {deepLink && !showLinked && (
+        <div className="mb-3 space-y-2 rounded-lg border border-[#c8ff4a]/25 bg-black/40 px-2.5 py-2">
+          <p className="text-[11px] font-semibold text-[#c8ff4a]">
+            Your link (opens bot with wallet token)
+          </p>
+          <p className="break-all font-mono text-[10px] text-white/70">{deepLink}</p>
+          <div className="flex flex-wrap gap-2">
+            <a
+              href={deepLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-primary rounded-lg px-3 py-1.5 text-xs"
+            >
+              Open bot
+            </a>
+            <button
+              type="button"
+              className="rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs text-white"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(deepLink);
+                  toast.success("Copied", "Paste in browser or Telegram");
+                } catch {
+                  toast.info("Copy manually", deepLink.slice(0, 48) + "…");
+                }
+              }}
+            >
+              Copy link
+            </button>
+          </div>
+          <p className="text-[10px] text-white/40">
+            Must open this link (or press Start from it) — bare{" "}
+            <code className="text-white/50">/start</code> has no wallet token.
+          </p>
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2">
         {!showLinked ? (
           <button
@@ -256,7 +303,7 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
             onClick={() => void post("link")}
             className="btn-primary rounded-lg px-3 py-2 text-sm"
           >
-            {busy ? "…" : "Connect Telegram"}
+            {busy ? "…" : deepLink ? "New link" : "Connect Telegram"}
           </button>
         ) : (
           <>

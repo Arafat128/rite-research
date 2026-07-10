@@ -51,9 +51,17 @@ export function unlinkTelegram(owner: string) {
 }
 
 /**
- * Stateless link token for t.me/bot?start=TOKEN (Telegram max ~64 chars).
- * Format: base64url(20-byte address + 4-byte exp) + 11-char sig  (~43 chars)
+ * Stateless link token for t.me/bot?start=TOKEN.
+ *
+ * Telegram deep-link payload: max 64 chars, ONLY [A-Za-z0-9_-]
+ * (a bare "." is illegal — Telegram drops the whole start param → bare /start).
+ *
+ * Format: base64url(20-byte address + 4-byte exp)[32] + sig[11] = 43 chars
+ * (no separator; fixed lengths)
  */
+const LINK_PAYLOAD_LEN = 32;
+const LINK_SIG_LEN = 11;
+
 export function createLinkToken(owner: string): string {
   const hex = owner.toLowerCase().replace(/^0x/, "");
   if (!/^[a-f0-9]{40}$/.test(hex)) {
@@ -64,25 +72,38 @@ export function createLinkToken(owner: string): string {
   Buffer.from(hex, "hex").copy(buf, 0);
   buf.writeUInt32BE(exp >>> 0, 20);
   const payload = buf.toString("base64url");
+  if (payload.length !== LINK_PAYLOAD_LEN) {
+    throw new Error("Unexpected link payload length");
+  }
   const sig = createHmac("sha256", linkSecret())
     .update(payload)
     .digest("base64url")
-    .slice(0, 11);
-  return `${payload}.${sig}`;
+    .slice(0, LINK_SIG_LEN);
+  return `${payload}${sig}`;
 }
 
 export function verifyLinkToken(
   token: string
 ): { owner: string } | null {
-  const raw = (token || "").trim();
-  const parts = raw.split(".");
-  if (parts.length !== 2) return null;
-  const [payload, sig] = parts;
-  if (!payload || !sig) return null;
+  let raw = (token || "").trim();
+  // Legacy tokens used "payload.sig" — Telegram never delivered the ".";
+  // still accept if something forwards them with a separator.
+  if (raw.includes(".")) {
+    const parts = raw.split(".");
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      raw = `${parts[0]}${parts[1]}`;
+    } else {
+      return null;
+    }
+  }
+  if (raw.length !== LINK_PAYLOAD_LEN + LINK_SIG_LEN) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(raw)) return null;
+  const payload = raw.slice(0, LINK_PAYLOAD_LEN);
+  const sig = raw.slice(LINK_PAYLOAD_LEN);
   const expect = createHmac("sha256", linkSecret())
     .update(payload)
     .digest("base64url")
-    .slice(0, 11);
+    .slice(0, LINK_SIG_LEN);
   try {
     const a = Buffer.from(sig);
     const b = Buffer.from(expect);

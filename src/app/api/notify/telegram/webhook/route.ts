@@ -94,10 +94,16 @@ export async function POST(req: NextRequest) {
           [
             `<b>Rite notifications</b>`,
             ``,
-            `Do <b>not</b> only type /start here.`,
-            `In the Rite app open <b>My Agents → Connect Telegram</b> so the link includes your wallet token.`,
+            `This Start had <b>no wallet token</b> (Telegram dropped it or you opened the bot directly).`,
             ``,
-            `If you already pressed Start from the app and got nothing, the webhook is blocked or the secret_token is wrong — see TELEGRAM.md.`,
+            `<b>Fix:</b>`,
+            `1. Rite → My Agents → <b>Connect Telegram</b> / <b>New link</b>`,
+            `2. Use <b>Open bot</b> or <b>Copy link</b> (must look like <code>t.me/…?start=…</code>)`,
+            `3. Press Start from that link`,
+            ``,
+            `<b>Backup:</b> send`,
+            `<code>/link 0xYourWalletAddress</code>`,
+            `then paste the chat id into the app.`,
           ].join("\n")
         );
         return NextResponse.json({ ok: true });
