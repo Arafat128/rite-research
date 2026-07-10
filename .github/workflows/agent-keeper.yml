@@ -1,4 +1,8 @@
-# Unattended agent auto-wake
+# Unattended agent auto-wake (closed-tab ticks)
+#
+# GitHub free/public schedule often drops `*/1` to ~hourly. We compensate with
+# a long runner that pokes /api/agent/cron every 60s for ~50 minutes so LIVE
+# agents still wake without the browser open.
 #
 # Secrets (repo → Settings → Secrets → Actions):
 #   APP_URL      https://your-app.vercel.app  (no trailing slash)
@@ -6,28 +10,32 @@
 # Optional:
 #   VERCEL_AUTOMATION_BYPASS_SECRET
 #
-# For reliable 1-minute cadence, ALSO set free cron-job.org → same URL
-# (GitHub schedules can lag under load).
+# Optional extra reliability: QStash / cron-job.org → same URL+Bearer
+# (see scripts/setup-qstash-cron.mjs).
 
 name: Agent keeper (unattended)
 
 on:
   schedule:
-    # GitHub may delay high-frequency crons; still useful as backup.
-    # For reliable 1m unattended, also run: node scripts/setup-qstash-cron.mjs
-    # (Upstash QStash) or cron-job.org → POST /api/agent/cron with Bearer.
-    - cron: "*/1 * * * *"
+    # Multiple entries improve odds under Actions schedule load.
+    - cron: "0 * * * *"
+    - cron: "15 * * * *"
+    - cron: "30 * * * *"
+    - cron: "45 * * * *"
   workflow_dispatch:
 
 concurrency:
+  # One keeper at a time. Cancel stale loop when a fresh schedule fires so
+  # jobs don't queue for hours (each loop is ~50m).
   group: agent-keeper
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   wake:
-    name: Poke /api/agent/cron
+    name: Poke /api/agent/cron (1m loop)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # ~50 pokes × ~1m + curl margin
+    timeout-minutes: 55
     steps:
       - name: Check secrets
         env:
@@ -44,51 +52,83 @@ jobs:
           fi
           echo "APP_URL configured"
 
-      - name: Health + run due ticks
+      - name: Keeper loop (every 60s × 50)
         env:
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           BYPASS: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
-          set -e
+          set -u
           BASE="${APP_URL%/}"
           Q=""
-          if [ -n "$BYPASS" ]; then
+          if [ -n "${BYPASS:-}" ]; then
             Q="&x-vercel-protection-bypass=${BYPASS}"
           fi
 
-          echo "== health =="
-          code=$(curl -sS -o /tmp/health.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${CRON_SECRET}" \
-            -H "User-Agent: rite-agent-keeper/1.1" \
-            "${BASE}/api/agent/cron?health=1${Q}")
-          echo "HTTP $code"
-          cat /tmp/health.json; echo
-          test "$code" = "200"
+          poke() {
+            local label="$1"
+            echo ""
+            echo "=== ${label} $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
-          echo "== cron =="
-          code=$(curl -sS -o /tmp/cron.json -w "%{http_code}" \
-            -X POST \
-            -H "Authorization: Bearer ${CRON_SECRET}" \
-            -H "User-Agent: rite-agent-keeper/1.1" \
-            -H "Content-Type: application/json" \
-            "${BASE}/api/agent/cron?max=40${Q}")
-          echo "HTTP $code"
-          cat /tmp/cron.json; echo
-          test "$code" = "200"
+            code=$(curl -sS -o /tmp/health.json -w "%{http_code}" \
+              --max-time 45 \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "User-Agent: rite-agent-keeper/1.2" \
+              "${BASE}/api/agent/cron?health=1${Q}" || echo "000")
+            echo "health HTTP $code"
+            if [ "$code" != "200" ]; then
+              cat /tmp/health.json 2>/dev/null || true
+              echo
+              return 1
+            fi
 
-          # Summarize for Actions log
-          if command -v python3 >/dev/null 2>&1; then
-            python3 - <<'PY'
+            code=$(curl -sS -o /tmp/cron.json -w "%{http_code}" \
+              --max-time 90 \
+              -X POST \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "User-Agent: rite-agent-keeper/1.2" \
+              -H "Content-Type: application/json" \
+              "${BASE}/api/agent/cron?max=40${Q}" || echo "000")
+            echo "cron HTTP $code"
+            cat /tmp/cron.json; echo
+
+            if [ "$code" != "200" ]; then
+              return 1
+            fi
+
+            if command -v python3 >/dev/null 2>&1; then
+              python3 - <<'PY'
           import json
-          d=json.load(open("/tmp/cron.json"))
+          try:
+              d=json.load(open("/tmp/cron.json"))
+          except Exception as e:
+              print("parse err", e)
+              raise SystemExit(0)
           print("ticked=", d.get("ticked"), "scanned=", d.get("scanned"))
           for r in d.get("results") or []:
               if r.get("ok"):
-                  print("OK agent", r.get("agentId"), r.get("txHash","")[:18], r.get("telegram"))
+                  print("OK agent", r.get("agentId"), str(r.get("txHash") or "")[:18], r.get("telegram"))
               elif r.get("error"):
-                  print("ERR", r.get("agentId"), str(r.get("error"))[:120])
+                  print("ERR", r.get("agentId"), str(r.get("error"))[:140])
               else:
                   print("skip", r.get("agentId"), r.get("skipped"))
           PY
+            fi
+            return 0
+          }
+
+          # First poke immediately; fail the job only if the first call is bad
+          # (misconfigured secrets / protection). Later pokes may fail transiently.
+          if ! poke "1/50"; then
+            echo "::error::First keeper poke failed — check APP_URL, CRON_SECRET, Vercel Deployment Protection"
+            exit 1
           fi
+
+          # 49 more pokes ~1 minute apart → ~50 minutes of closed-tab coverage.
+          # Overlaps with the next :00/:15/:30/:45 schedule keep gaps small.
+          for i in $(seq 2 50); do
+            sleep 60
+            poke "${i}/50" || echo "::warning::poke ${i} failed (will retry next minute)"
+          done
+
+          echo "Keeper loop finished"
