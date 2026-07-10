@@ -4,7 +4,7 @@
 
 **Live app:** [https://rite-mehidy-s-projects.vercel.app](https://rite-mehidy-s-projects.vercel.app)
 
-Built by [mehidy](https://x.com/its_perseus_1) · [@its_perseus_1](https://x.com/its_perseus_1)
+Built by [@its_perseus_1](https://x.com/its_perseus_1)
 
 ---
 
