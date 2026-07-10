@@ -515,6 +515,37 @@ export const radarAgentAbi = [
     outputs: [{ type: "uint256" }],
   },
   {
+    type: "function",
+    name: "lastTickBlock",
+    stateMutability: "view",
+    inputs: [{ name: "agentId", type: "uint256" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "isKeeper",
+    stateMutability: "view",
+    inputs: [{ name: "who", type: "address" }],
+    outputs: [{ type: "bool" }],
+  },
+  {
+    type: "function",
+    name: "setKeeper",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "keeper", type: "address" },
+      { name: "allowed", type: "bool" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "admin",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
     type: "event",
     name: "AgentCreated",
     inputs: [

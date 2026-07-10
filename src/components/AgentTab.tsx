@@ -223,6 +223,9 @@ export function AgentTab({
   >({});
   /** False on older Radar deploys without killAgent in bytecode */
   const [canKillOnChain, setCanKillOnChain] = useState<boolean | null>(null);
+  /** In-app auto-wake poller status (My Agents) */
+  const [autoWakeNote, setAutoWakeNote] = useState("");
+  const [autoWakeBusy, setAutoWakeBusy] = useState(false);
 
   /**
    * On-chain Dead, or soft-closed on THIS Radar only.
@@ -462,6 +465,137 @@ export function AgentTab({
     }, 30_000);
     return () => clearInterval(t);
   }, [isConnected, selectedId, refreshNetwork]);
+
+  /**
+   * Auto-schedule: schedule alone does NOT fire ticks.
+   * Vercel Hobby cron is once/day — so while My Agents is open we poke
+   * /api/agent/auto-wake every ~20s. Server only runTicks agents that are
+   * due on-chain (block interval); early calls no-op.
+   */
+  useEffect(() => {
+    if (mode !== "manage" || !isConnected || !address) {
+      setAutoWakeNote("");
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+
+    const poke = async (reason: string) => {
+      if (cancelled || inFlight || autoWakeBusy || ticking || writing) return;
+      // Only when we have at least one non-dead agent (or none yet — still poke owner)
+      inFlight = true;
+      setAutoWakeBusy(true);
+      try {
+        const res = await fetch("/api/agent/auto-wake", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            owner: address,
+            max: 20,
+          }),
+          cache: "no-store",
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          error?: string;
+          ticked?: number;
+          results?: Array<{
+            agentId: string;
+            ok: boolean;
+            skipped?: string;
+            txHash?: string;
+            error?: string;
+            summary?: string;
+          }>;
+          keeperOnChain?: boolean | null;
+        };
+
+        if (!res.ok) {
+          if (!cancelled) {
+            setAutoWakeNote(
+              data.error ||
+                `Auto-wake unavailable (${res.status}). Check KEEPER_PRIVATE_KEY on server.`
+            );
+          }
+          return;
+        }
+
+        const ticked = data.ticked ?? 0;
+        if (ticked > 0) {
+          const hits = (data.results || []).filter((r) => r.ok);
+          const first = hits[0];
+          if (!cancelled) {
+            setAutoWakeNote(
+              `Auto-wake sealed ${ticked} tick(s)` +
+                (first?.agentId ? ` · #${first.agentId}` : "") +
+                (first?.summary ? ` · ${first.summary.slice(0, 48)}` : "")
+            );
+            toast.success(
+              `Auto-wake: ${ticked} tick(s)`,
+              first?.summary?.slice(0, 80) || "Schedule fired"
+            );
+            setMsg(
+              `Auto-wake tick` +
+                (first?.agentId ? ` #${first.agentId}` : "") +
+                (first?.txHash ? ` · ${first.txHash.slice(0, 10)}…` : "")
+            );
+          }
+          await refresh({ soft: true });
+        } else {
+          const mine = (data.results || []).filter(
+            (r) => r.skipped !== "not_owner"
+          );
+          const dueWait = mine.find((r) => r.skipped?.startsWith("not_due"));
+          const notActive = mine.find((r) => r.skipped === "not_active");
+          const dead = mine.find((r) => r.skipped === "dead");
+          const err = mine.find((r) => r.error);
+          if (!cancelled) {
+            if (err?.error) {
+              setAutoWakeNote(err.error.slice(0, 160));
+            } else if (dueWait?.skipped) {
+              setAutoWakeNote(
+                `Auto-wake on · watching (${reason}) · ${dueWait.skipped.replace(/^not_due_/, "next in ")}`
+              );
+            } else if (notActive) {
+              setAutoWakeNote(
+                "Auto-wake on · agent not LIVE — Activate first"
+              );
+            } else if (dead && mine.every((r) => r.skipped === "dead" || r.skipped === "not_owner")) {
+              setAutoWakeNote("Auto-wake on · no live agents to tick");
+            } else if (data.keeperOnChain === false) {
+              setAutoWakeNote(
+                "Keeper wallet not setKeeper(true) on Radar — admin must allowlist it"
+              );
+            } else {
+              setAutoWakeNote(`Auto-wake on · watching schedule (${reason})`);
+            }
+          }
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setAutoWakeNote(
+            e instanceof Error
+              ? `Auto-wake error: ${e.message.slice(0, 80)}`
+              : "Auto-wake error"
+          );
+        }
+      } finally {
+        inFlight = false;
+        if (!cancelled) setAutoWakeBusy(false);
+      }
+    };
+
+    // Immediate check when opening My Agents / agent becomes LIVE
+    void poke("start");
+    const t = setInterval(() => void poke("poll"), 20_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+    // Intentionally not depending on autoWakeBusy/ticking every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isConnected, address]);
 
   useEffect(() => {
     const d = DATA_KINDS.find((k) => k.id === dataKind);
@@ -1711,14 +1845,36 @@ export function AgentTab({
                       Wake schedule
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      Saved on-chain as block interval. Example: 3 minutes ≈{" "}
-                      {scheduleToBlocks({ value: 3, unit: "minutes" }).toString()}{" "}
-                      blocks (~{BLOCK_TIME_SEC}s/block).{" "}
+                      Saved on-chain as <b className="text-white/55">block</b>{" "}
+                      interval (1 min ≈{" "}
+                      {scheduleToBlocks({ value: 1, unit: "minutes" }).toString()}{" "}
+                      blocks @ ~{BLOCK_TIME_SEC}s).{" "}
                       <b className="text-white/55">Manual Wake</b> always works
-                      when LIVE + funded. Automatic wakes need a server keeper
-                      (CRON_SECRET + KEEPER_PRIVATE_KEY) — not just saving a
-                      schedule.
+                      when LIVE + funded.{" "}
+                      <b className="text-white/55">Auto-wake</b> runs while this
+                      tab is open (polls the server keeper every ~20s) — needs{" "}
+                      <code className="text-white/45">KEEPER_PRIVATE_KEY</code>{" "}
+                      + agent LIVE + balance. Vercel native cron is only daily;
+                      keep My Agents open for 1m schedules (or use external
+                      cron → <code className="text-white/45">/api/agent/cron</code>
+                      ).
                     </p>
+                    {autoWakeNote && mode === "manage" && (
+                      <p
+                        className={`mb-2 rounded-lg border px-2 py-1.5 text-[11px] ${
+                          /sealed|tick/i.test(autoWakeNote)
+                            ? "border-emerald-400/30 bg-emerald-950/30 text-emerald-100"
+                            : /NotAuthorized|unavailable|error|not setKeeper/i.test(
+                                autoWakeNote
+                              )
+                              ? "border-amber-400/30 bg-amber-950/30 text-amber-100"
+                              : "border-white/10 bg-black/30 text-white/55"
+                        }`}
+                      >
+                        {autoWakeBusy ? "… " : ""}
+                        {autoWakeNote}
+                      </p>
+                    )}
                     <p className="mb-2 text-[11px] text-white/50">
                       On-chain interval now:{" "}
                       <b className="text-[#c8ff4a]">
@@ -1761,7 +1917,7 @@ export function AgentTab({
                         }`}
                       >
                         {dueInfo.due
-                          ? "Interval elapsed — click Wake now (or wait for keeper if configured)."
+                          ? "Interval elapsed — auto-wake will fire on next poll (~20s) or click Wake now."
                           : `Next interval in ${formatCountdown(dueInfo.secondsUntilDue)} · ${new Date(dueInfo.nextRunAt * 1000).toLocaleString()}`}
                       </p>
                     )}
