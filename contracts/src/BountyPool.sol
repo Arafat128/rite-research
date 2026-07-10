@@ -40,6 +40,10 @@ contract BountyPool {
     uint256 public lastRoundId;
     uint256 public totalPaidOut;
     uint256 public totalRoundsFinalized;
+    /// @notice Pull-payment credits (winner claims; prevents push DoS)
+    mapping(address => uint256) public pendingPayouts;
+    /// @dev Extra entropy mixed into lottery seed each credit
+    uint256 private _entropy;
 
     // -------------------------------------------------------------------------
     // Events
@@ -65,6 +69,8 @@ contract BountyPool {
     );
     event AutoFinalized(uint256 indexed roundId, address indexed winner, uint256 amount);
     event OwnershipTransferred(address indexed previous, address indexed next);
+    event PayoutCredited(uint256 indexed roundId, address indexed winner, uint256 amount);
+    event PayoutClaimed(address indexed winner, uint256 amount);
 
     // -------------------------------------------------------------------------
     // Errors
@@ -79,6 +85,7 @@ contract BountyPool {
     error ThresholdNotMet(uint256 have, uint256 need);
     error TransferFailed();
     error BadThreshold();
+    error NothingToClaim();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -133,6 +140,10 @@ contract BountyPool {
         points[user] += msg.value;
         totalPoints += msg.value;
         interactionCount += 1;
+        // Mix external entropy each credit (mitigates single-block grind; not VRF)
+        _entropy = uint256(
+            keccak256(abi.encodePacked(_entropy, msg.sender, user, msg.value, block.prevrandao, block.number))
+        );
 
         emit Credited(
             roundId, user, msg.value, points[user], interactionCount, msg.sender
@@ -178,18 +189,21 @@ contract BountyPool {
             revert ThresholdNotMet(interactionCount, interactionThreshold);
         }
 
-        // Random weighted lottery among entrants (weight = fee points)
+        // Weighted lottery. Still chain-influenced without VRF — prefer commit-reveal/VRF for mainnet.
         uint256 seed = uint256(
             keccak256(
                 abi.encodePacked(
                     block.prevrandao,
+                    blockhash(block.number > 0 ? block.number - 1 : 0),
                     block.timestamp,
                     block.number,
                     roundId,
                     totalPoints,
                     interactionCount,
                     n,
-                    amount
+                    amount,
+                    _entropy,
+                    msg.sender
                 )
             )
         );
@@ -211,8 +225,8 @@ contract BountyPool {
         uint256 interactions = interactionCount;
         _resetRound();
 
-        (bool ok,) = winner.call{value: amount}("");
-        if (!ok) revert TransferFailed();
+        // Pull payment — avoids DoS if winner rejects ETH
+        pendingPayouts[winner] += amount;
 
         lastWinner = winner;
         lastPayout = amount;
@@ -221,10 +235,24 @@ contract BountyPool {
         totalPaidOut += amount;
         totalRoundsFinalized += 1;
 
+        emit PayoutCredited(paidRound, winner, amount);
         emit WinnerPaid(paidRound, winner, amount, nEntrants, pts, interactions);
         if (isAuto) {
             emit AutoFinalized(paidRound, winner, amount);
         }
+    }
+
+    /// @notice Winner withdraws credited bounty (pull pattern).
+    function claimPayout() external returns (uint256 amount) {
+        amount = pendingPayouts[msg.sender];
+        if (amount == 0) revert NothingToClaim();
+        pendingPayouts[msg.sender] = 0;
+        (bool ok,) = msg.sender.call{value: amount}("");
+        if (!ok) {
+            pendingPayouts[msg.sender] = amount;
+            revert TransferFailed();
+        }
+        emit PayoutClaimed(msg.sender, amount);
     }
 
     function _resetRound() internal {

@@ -9,8 +9,16 @@ import {
   useBalance,
   useConnect,
   useSwitchChain,
+  useSignMessage,
 } from "wagmi";
-import { keccak256, stringToBytes, formatEther, type Hex, type Address } from "viem";
+import {
+  keccak256,
+  stringToBytes,
+  formatEther,
+  decodeEventLog,
+  type Hex,
+  type Address,
+} from "viem";
 import {
   RESEARCH_CONTRACT,
   RESEARCH_FEE,
@@ -20,6 +28,7 @@ import {
   addressUrl,
   ritualChain,
 } from "@/lib/ritual";
+import { buildClaimMessage } from "@/lib/researchClaim";
 import { ResearchReport } from "@/components/ResearchReport";
 import { ResearchLoading } from "@/components/ResearchLoading";
 
@@ -74,6 +83,7 @@ export function ResearchTab() {
   const { connect, connectors, isPending: connecting, error: connectError } = useConnect();
   const { switchChain, isPending: switching } = useSwitchChain();
   const { data: bal } = useBalance({ address });
+  const { signMessageAsync } = useSignMessage();
 
   const [prompt, setPrompt] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -87,6 +97,7 @@ export function ResearchTab() {
     settleTx?: string;
     model?: string;
     resultHash?: string;
+    sealedReport?: string;
     claimed?: boolean;
   }>({});
 
@@ -252,6 +263,22 @@ export function ResearchTab() {
     }
   }
 
+  async function signClaim(researchId: string, promptHash: string) {
+    const nonce =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const expiry = Math.floor(Date.now() / 1000) + 10 * 60;
+    const message = buildClaimMessage({
+      researchId,
+      promptHash,
+      nonce,
+      expiry,
+    });
+    const signature = (await signMessageAsync({ message })) as Hex;
+    return { signature, nonce, expiry };
+  }
+
   async function callSurf(opts: {
     prompt: string;
     researcher: Address;
@@ -261,18 +288,30 @@ export function ResearchTab() {
     setPhase("researching");
     setStatus(
       opts.researchId
-        ? `Claiming paid #${opts.researchId} — Surf /responses…`
-        : "Fee paid. Calling Surf /responses…"
+        ? `Claiming paid #${opts.researchId} — sign then Surf…`
+        : "Fee paid. Sign claim, then Surf /responses…"
     );
+
+    // Need researchId for signature — for tx path we resolve after server event;
+    // first request without sig fails; for claim path we have researchId.
+    // Flow: if researchId known, sign first. If only txHash, two-step:
+    //   1) server would need id — we always have researchId for claim;
+    //   for pay path we decode id from receipt before callSurf (see runResearchPay).
+    if (!opts.researchId) {
+      throw new Error("researchId required for signed research claim");
+    }
+    const promptHash = keccak256(stringToBytes(opts.prompt));
+    const sig = await signClaim(opts.researchId, promptHash);
 
     const res = await fetch("/api/research", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts),
+      body: JSON.stringify({ ...opts, ...sig, researchId: opts.researchId }),
     });
     let data: {
       error?: string;
       report?: string;
+      sealedReport?: string;
       researchId?: string;
       paymentTx?: string | null;
       model?: string;
@@ -298,6 +337,34 @@ export function ResearchTab() {
       );
     }
     return data;
+  }
+
+  async function revealReport(opts: {
+    researchId: string;
+    researcher: Address;
+    resultHash: Hex;
+    sealedReport?: string;
+    prompt: string;
+  }) {
+    setStatus("Sealed on-chain — revealing report…");
+    const promptHash = keccak256(stringToBytes(opts.prompt));
+    const sig = await signClaim(opts.researchId, promptHash);
+    const res = await fetch("/api/research/reveal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        researchId: opts.researchId,
+        researcher: opts.researcher,
+        resultHash: opts.resultHash,
+        sealedReport: opts.sealedReport,
+        ...sig,
+      }),
+    });
+    const data = (await res.json()) as { error?: string; report?: string };
+    if (!res.ok || !data.report) {
+      throw new Error(data.error || "Could not reveal report after settle");
+    }
+    return data.report;
   }
 
   /**
@@ -391,16 +458,19 @@ export function ResearchTab() {
         researchId: credit.researchId,
       });
 
-      if (!data.researchId || !data.resultHash || !data.report) {
-        throw new Error("Research incomplete — no report or seal hash from server");
+      if (!data.researchId || !data.resultHash || !data.sealedReport) {
+        throw new Error(
+          "Research incomplete — no sealed report or seal hash from server"
+        );
       }
 
-      // Hold report until settle succeeds — never show early
+      // Hold sealed blob until settle + reveal — never show plaintext early
       setMeta({
         researchId: data.researchId,
         paymentTx: data.paymentTx || credit.paymentTx,
         model: data.model,
         resultHash: data.resultHash,
+        sealedReport: data.sealedReport,
         claimed: true,
       });
       saveLocalCredit(address, {
@@ -418,7 +488,14 @@ export function ResearchTab() {
         data.paymentTx || credit.paymentTx
       );
 
-      setReport(data.report);
+      const plaintext = await revealReport({
+        researchId: data.researchId,
+        researcher: address,
+        resultHash: data.resultHash as Hex,
+        sealedReport: data.sealedReport,
+        prompt: clean,
+      });
+      setReport(plaintext);
       setStatus("Complete: report unlocked · sealed on-chain.");
       setPhase("done");
       await refreshCredits();
@@ -477,24 +554,56 @@ export function ResearchTab() {
         settled: false,
       });
 
+      // Resolve researchId from payment receipt so we can sign the claim
+      let researchIdFromTx: string | null = null;
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: researchDeskAbi,
+            data: log.data,
+            topics: log.topics,
+          });
+          if (decoded.eventName === "ResearchPaid") {
+            const args = decoded.args as { id: bigint };
+            researchIdFromTx = args.id.toString();
+            break;
+          }
+        } catch {
+          /* skip */
+        }
+      }
+      if (!researchIdFromTx) {
+        throw new Error(
+          "Could not read research id from payment tx. Use Claim free report with the on-chain id."
+        );
+      }
+      saveLocalCredit(address, {
+        researchId: researchIdFromTx,
+        prompt: clean,
+        promptHash,
+        paymentTx: hash,
+        settled: false,
+      });
+
       const data = await callSurf({
         prompt: clean,
         researcher: address,
+        researchId: researchIdFromTx,
         txHash: hash,
       });
 
-      if (!data.researchId || !data.resultHash || !data.report) {
+      if (!data.researchId || !data.resultHash || !data.sealedReport) {
         throw new Error(
-          "Research incomplete — payment recorded but no report. Use Claim free report with the same prompt."
+          "Research incomplete — payment recorded but no sealed report. Use Claim free report with the same prompt."
         );
       }
 
-      // Do NOT show report yet — user must seal on-chain first
       setMeta({
         researchId: data.researchId,
         paymentTx: data.paymentTx || hash,
         model: data.model,
         resultHash: data.resultHash,
+        sealedReport: data.sealedReport,
       });
       saveLocalCredit(address, {
         researchId: data.researchId,
@@ -511,7 +620,14 @@ export function ResearchTab() {
         hash
       );
 
-      setReport(data.report);
+      const plaintext = await revealReport({
+        researchId: data.researchId,
+        researcher: address,
+        resultHash: data.resultHash as Hex,
+        sealedReport: data.sealedReport,
+        prompt: clean,
+      });
+      setReport(plaintext);
       setStatus("Complete: report unlocked · sealed on-chain.");
       setPhase("done");
       await refreshCredits();

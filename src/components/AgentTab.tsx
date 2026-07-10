@@ -394,18 +394,8 @@ export function AgentTab() {
       setAppAgents(listAppAgents(address));
       await refreshNetwork();
 
-      // Detect whether server keeper is configured (does not prove cron is unblocked)
-      try {
-        const h = await fetch("/api/agent/cron?health=1", { cache: "no-store" });
-        if (h.ok) {
-          const j = (await h.json()) as { autoWakeReady?: boolean };
-          setAutoWakeReady(Boolean(j.autoWakeReady));
-        } else {
-          setAutoWakeReady(false);
-        }
-      } catch {
-        setAutoWakeReady(null);
-      }
+      // Public health no longer exposes config; infer readiness only if needed later
+      setAutoWakeReady(null);
     } catch (e: unknown) {
       // Soft mode: never overwrite a success message with RPC noise
       if (!opts?.soft) setErr(errMsg(e));

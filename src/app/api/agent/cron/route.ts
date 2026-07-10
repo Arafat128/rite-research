@@ -7,27 +7,17 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
- * Automatic agent wakes (Vercel Cron or manual with secret).
+ * Automatic agent wakes (Vercel Cron or manual).
  *
- * Auth: Authorization: Bearer CRON_SECRET  OR  ?secret=CRON_SECRET
+ * Auth (strict): Authorization: Bearer <CRON_SECRET> only.
+ * Set CRON_SECRET in Vercel; native Cron injects that header when configured.
  * Env: KEEPER_PRIVATE_KEY (gas only), CRON_SECRET, SURF_API_KEY
- *
- * Keeper pattern: anyone can runTick when Active; fee from agent balance.
  */
 function authorized(req: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
   const auth = req.headers.get("authorization") || "";
-  const q = req.nextUrl.searchParams.get("secret");
-  const isVercelCron = req.headers.get("x-vercel-cron") === "1";
-
-  // Vercel Cron with CRON_SECRET env → Authorization: Bearer <CRON_SECRET>
-  if (secret && auth === `Bearer ${secret}`) return true;
-  if (secret && q === secret) return true;
-
-  // Native Vercel Cron header (when protection allows cron)
-  if (isVercelCron) return true;
-
-  return false;
+  return auth === `Bearer ${secret}`;
 }
 
 export async function GET(req: NextRequest) {
@@ -40,7 +30,20 @@ export async function POST(req: NextRequest) {
 
 async function handle(req: NextRequest) {
   try {
-    // Lightweight health (no secrets) — UI can detect auto-wake readiness
+    if (!authorized(req)) {
+      return NextResponse.json(
+        {
+          error: "Unauthorized",
+          hint:
+            "Send Authorization: Bearer CRON_SECRET. " +
+            "Query ?secret= and x-vercel-cron alone are not accepted. " +
+            "If you see a Vercel login page, disable Deployment Protection or use a Protection Bypass header.",
+        },
+        { status: 401 }
+      );
+    }
+
+    // Health only with auth (no config leak on public endpoints)
     if (req.nextUrl.searchParams.get("health") === "1") {
       return NextResponse.json({
         ok: true,
@@ -48,40 +51,19 @@ async function handle(req: NextRequest) {
           Boolean(process.env.KEEPER_PRIVATE_KEY) &&
           Boolean(process.env.NEXT_PUBLIC_RADAR_CONTRACT) &&
           Boolean(process.env.SURF_API_KEY),
-        hasCronSecret: Boolean(process.env.CRON_SECRET),
+        hasCronSecret: true,
         hasKeeperKey: Boolean(process.env.KEEPER_PRIVATE_KEY),
         hasRadar: Boolean(process.env.NEXT_PUBLIC_RADAR_CONTRACT),
         hasSurf: Boolean(process.env.SURF_API_KEY),
-        schedule: "*/5 * * * *",
       });
     }
 
-    if (!authorized(req)) {
-      return NextResponse.json(
-        {
-          error: "Unauthorized",
-          autoWakeReady:
-            Boolean(process.env.KEEPER_PRIVATE_KEY) &&
-            Boolean(process.env.NEXT_PUBLIC_RADAR_CONTRACT),
-          hasCronSecret: Boolean(process.env.CRON_SECRET),
-          hasKeeperKey: Boolean(process.env.KEEPER_PRIVATE_KEY),
-          hint:
-            "Use ?secret=CRON_SECRET or Authorization: Bearer CRON_SECRET. " +
-            "If you see a Vercel login/SSO page (HTML), disable Deployment Protection for Production " +
-            "or add Protection Bypass for Automation and pass x-vercel-protection-bypass.",
-        },
-        { status: 401 }
-      );
-    }
     if (!keeperConfigured()) {
       return NextResponse.json(
         {
           error:
             "Keeper not configured. Set KEEPER_PRIVATE_KEY (gas wallet) on Vercel Production.",
           autoWake: false,
-          hasCronSecret: Boolean(process.env.CRON_SECRET),
-          hasKeeperKey: Boolean(process.env.KEEPER_PRIVATE_KEY),
-          hasRadar: Boolean(process.env.NEXT_PUBLIC_RADAR_CONTRACT),
         },
         { status: 503 }
       );
@@ -105,7 +87,6 @@ async function handle(req: NextRequest) {
       ok: true,
       autoWake: true,
       at: new Date().toISOString(),
-      radar: process.env.NEXT_PUBLIC_RADAR_CONTRACT,
       ...out,
     });
   } catch (e: unknown) {

@@ -57,13 +57,24 @@ contract BountyPoolTest is Test {
         vm.prank(alice);
         desk.payForResearch{value: 0.005 ether}(h);
 
-        // auto finalized: pool empty, new round, winner set
-        assertEq(address(pool).balance, 0);
+        // auto finalized: credits pull-payment, new round
         assertEq(pool.interactionCount(), 0);
         assertEq(pool.roundId(), 2);
         assertTrue(pool.lastWinner() == alice || pool.lastWinner() == bob);
-        assertEq(pool.lastPayout(), poolBefore + 0.0025 ether); // third credit included before draw
+        uint256 expected = poolBefore + 0.0025 ether; // third credit included before draw
+        assertEq(pool.lastPayout(), expected);
         assertEq(pool.totalRoundsFinalized(), 1);
+        address w = pool.lastWinner();
+        assertEq(pool.pendingPayouts(w), expected);
+        // ETH still in pool until claim
+        assertEq(address(pool).balance, expected);
+
+        uint256 before = w.balance;
+        vm.prank(w);
+        pool.claimPayout();
+        assertEq(w.balance, before + expected);
+        assertEq(pool.pendingPayouts(w), 0);
+        assertEq(address(pool).balance, 0);
     }
 
     function test_ManualFinalizeBeforeThresholdReverts() public {

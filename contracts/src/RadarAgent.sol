@@ -59,6 +59,11 @@ contract RadarAgent {
     mapping(uint256 => Agent) public agents;
     mapping(uint256 => string[]) private _watchlist;
     mapping(address => uint256[]) private _byOwner;
+    /// @notice Block number of last successful runTick (enforces wakeIntervalBlocks)
+    mapping(uint256 => uint256) public lastTickBlock;
+    /// @notice Optional keepers who may runTick for Active agents (auto-wake bots)
+    mapping(address => bool) public isKeeper;
+    address public admin;
 
     // -------------------------------------------------------------------------
     // Events
@@ -87,12 +92,15 @@ contract RadarAgent {
     event AgentDied(uint256 indexed agentId, AgentKind kind, uint256 runCount);
     event AgentKilled(uint256 indexed agentId, address indexed owner, uint256 refunded);
     event RunFeeUpdated(uint256 fee);
+    event KeeperUpdated(address indexed keeper, bool allowed);
+    event AdminTransferred(address indexed previous, address indexed next);
 
     // -------------------------------------------------------------------------
     // Errors
     // -------------------------------------------------------------------------
 
     error NotOwner();
+    error NotAuthorized();
     error UnknownAgent();
     error BadName();
     error BadStatus();
@@ -103,6 +111,8 @@ contract RadarAgent {
     error TransferFailed();
     error ZeroAmount();
     error AgentIsDead();
+    error ZeroDigest();
+    error TooEarly(uint256 readyBlock, uint256 currentBlock);
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -114,6 +124,26 @@ contract RadarAgent {
         treasury = _treasury;
         bountyPool = _bountyPool;
         runFee = _runFee == 0 ? 0.005 ether : _runFee;
+        admin = msg.sender;
+        emit AdminTransferred(address(0), msg.sender);
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin / keepers
+    // -------------------------------------------------------------------------
+
+    function setKeeper(address keeper, bool allowed) external {
+        if (msg.sender != admin) revert NotOwner();
+        if (keeper == address(0)) revert ZeroAmount();
+        isKeeper[keeper] = allowed;
+        emit KeeperUpdated(keeper, allowed);
+    }
+
+    function transferAdmin(address next) external {
+        if (msg.sender != admin) revert NotOwner();
+        if (next == address(0)) revert ZeroAmount();
+        emit AdminTransferred(admin, next);
+        admin = next;
     }
 
     /// @dev 50% → bounty (credits user), 50% → treasury
@@ -296,12 +326,23 @@ contract RadarAgent {
     // Run tick
     // -------------------------------------------------------------------------
 
-    /// @notice Pull is off-chain (Surf Data API); this seals the digest and charges runFee.
+    /// @notice Seals off-chain data digest and charges runFee from agent balance.
+    /// @dev Only agent owner or an allowlisted keeper. Enforces wakeIntervalBlocks
+    ///      between ticks. Digest must be non-zero (no filler digests).
     function runTick(uint256 agentId, bytes32 digest) external {
         Agent storage a = _requireAgent(agentId);
+        if (msg.sender != a.owner && !isKeeper[msg.sender]) revert NotAuthorized();
         if (a.status == Status.Dead) revert AgentIsDead();
         if (a.status != Status.Active) revert BadStatus();
         if (_watchlist[agentId].length == 0) revert EmptyWatchlist();
+        if (digest == bytes32(0)) revert ZeroDigest();
+
+        // Enforce schedule (blocks since last tick)
+        uint256 lastB = lastTickBlock[agentId];
+        uint256 interval = a.wakeIntervalBlocks == 0 ? 1 : a.wakeIntervalBlocks;
+        if (lastB != 0 && block.number < lastB + interval) {
+            revert TooEarly(lastB + interval, block.number);
+        }
 
         // Sovereign life check before charging
         if (a.maxRuns > 0 && a.runCount >= a.maxRuns) {
@@ -326,8 +367,8 @@ contract RadarAgent {
         a.runCount += 1;
         a.lastRunAt = block.timestamp;
         a.lastTopic = topic;
-        a.lastDigest =
-            digest == bytes32(0) ? keccak256(abi.encodePacked(topic, block.timestamp, a.runCount)) : digest;
+        a.lastDigest = digest;
+        lastTickBlock[agentId] = block.number;
 
         emit AgentTick(agentId, msg.sender, topic, a.lastDigest, runFee, a.runCount);
 

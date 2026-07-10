@@ -37,7 +37,8 @@ contract RadarAgentTest is Test {
         radar.setActive(id);
 
         for (uint256 i = 0; i < 4; i++) {
-            radar.runTick(id, keccak256(abi.encodePacked(i)));
+            if (i > 0) vm.roll(block.number + 500); // wakeIntervalBlocks = 500
+            radar.runTick(id, keccak256(abi.encodePacked(i + 1)));
         }
         a = radar.getAgent(id);
         assertEq(a.runCount, 4);
@@ -45,6 +46,46 @@ contract RadarAgentTest is Test {
         assertEq(uint256(a.status), uint256(RadarAgent.Status.Active));
         assertEq(radar.ticksRemaining(id), type(uint256).max);
         vm.stopPrank();
+    }
+
+    function test_RunTickOnlyOwnerOrKeeper() public {
+        address attacker = makeAddr("attacker");
+        address keeper = makeAddr("keeper");
+        vm.prank(user);
+        uint256 id = radar.createAgent{value: 0.15 ether}(
+            "Guard", 10, RadarAgent.AgentKind.Persistent
+        );
+        vm.startPrank(user);
+        string[] memory topics = new string[](1);
+        topics[0] = "news_feed|_";
+        radar.setWatchlist(id, topics);
+        radar.setActive(id);
+        vm.stopPrank();
+
+        vm.prank(attacker);
+        vm.expectRevert(RadarAgent.NotAuthorized.selector);
+        radar.runTick(id, bytes32(uint256(1)));
+
+        radar.setKeeper(keeper, true);
+        vm.prank(keeper);
+        radar.runTick(id, bytes32(uint256(1)));
+        assertEq(radar.getAgent(id).runCount, 1);
+
+        // Too early for keeper
+        vm.prank(keeper);
+        vm.expectRevert();
+        radar.runTick(id, bytes32(uint256(2)));
+
+        vm.roll(block.number + 10);
+        vm.prank(keeper);
+        radar.runTick(id, bytes32(uint256(2)));
+        assertEq(radar.getAgent(id).runCount, 2);
+
+        // Zero digest rejected
+        vm.roll(block.number + 10);
+        vm.prank(user);
+        vm.expectRevert(RadarAgent.ZeroDigest.selector);
+        radar.runTick(id, bytes32(0));
     }
 
     function test_SovereignDeployFeeAndDiesAfter3() public {
@@ -66,7 +107,9 @@ contract RadarAgentTest is Test {
         radar.setActive(id);
 
         radar.runTick(id, bytes32(uint256(1)));
+        vm.roll(block.number + 100);
         radar.runTick(id, bytes32(uint256(2)));
+        vm.roll(block.number + 100);
         radar.runTick(id, bytes32(uint256(3)));
 
         a = radar.getAgent(id);

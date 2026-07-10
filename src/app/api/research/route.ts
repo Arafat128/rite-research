@@ -4,6 +4,7 @@ import {
   http,
   keccak256,
   stringToBytes,
+  verifyMessage,
   type Hex,
   type Address,
   decodeEventLog,
@@ -19,6 +20,13 @@ import {
   publicErrorMessage,
   rateLimit,
 } from "@/lib/security";
+import {
+  buildClaimMessage,
+  cacheReport,
+  getCachedReport,
+  sealReport,
+  withResearchLock,
+} from "@/lib/researchSeal";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,6 +45,10 @@ type Body = {
   researcher: Address;
   txHash?: Hex;
   researchId?: string | number;
+  /** EIP-191 signature of claim message */
+  signature?: Hex;
+  nonce?: string;
+  expiry?: number;
 };
 
 type RecordTuple = {
@@ -63,10 +75,47 @@ async function getPaymentReceipt(txHash: Hex) {
   });
 }
 
+async function verifyClaimSig(opts: {
+  researcher: Address;
+  researchId: string;
+  promptHash: Hex;
+  signature?: Hex;
+  nonce?: string;
+  expiry?: number;
+}): Promise<string | null> {
+  if (!opts.signature || !opts.nonce || !opts.expiry) {
+    return "Missing wallet signature (signature, nonce, expiry required)";
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (opts.expiry < now) return "Signature expired — request again";
+  if (opts.expiry > now + 30 * 60) return "Signature expiry too far in the future";
+  if (opts.nonce.length < 8 || opts.nonce.length > 128) {
+    return "Invalid nonce";
+  }
+  const message = buildClaimMessage({
+    researchId: opts.researchId,
+    promptHash: opts.promptHash,
+    nonce: opts.nonce,
+    expiry: opts.expiry,
+  });
+  try {
+    const ok = await verifyMessage({
+      address: opts.researcher,
+      message,
+      signature: opts.signature,
+    });
+    if (!ok) return "Invalid wallet signature for research claim";
+  } catch {
+    return "Could not verify wallet signature";
+  }
+  return null;
+}
+
 /**
  * POST /api/research
- * Path A: { prompt, researcher, txHash }
- * Path B: { prompt, researcher, researchId }
+ * Runs Surf after payment verification + wallet signature.
+ * Returns sealedReport + resultHash only — never plaintext report.
+ * Client must settleResearch then POST /api/research/reveal.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -82,7 +131,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Bound body size (abuse)
     const cl = req.headers.get("content-length");
     if (cl && Number(cl) > 64_000) {
       return NextResponse.json({ error: "Request too large" }, { status: 413 });
@@ -276,24 +324,57 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await runSurfResearch(prompt);
-    const resultHash = keccak256(stringToBytes(result.content));
+    const sigErr = await verifyClaimSig({
+      researcher,
+      researchId: researchId!,
+      promptHash,
+      signature: body.signature,
+      nonce: body.nonce,
+      expiry: body.expiry,
+    });
+    if (sigErr) {
+      return NextResponse.json({ error: sigErr }, { status: 401 });
+    }
+
+    // Idempotent Surf call per researchId (prevents concurrent double-spend of API)
+    const payload = await withResearchLock(researchId!, async () => {
+      const cached = getCachedReport(researchId!);
+      if (cached) {
+        return {
+          resultHash: cached.resultHash,
+          report: cached.report,
+          model: "cached",
+        };
+      }
+      const result = await runSurfResearch(prompt);
+      const resultHash = keccak256(stringToBytes(result.content));
+      cacheReport(researchId!, resultHash, result.content);
+      return {
+        resultHash,
+        report: result.content,
+        model: result.model,
+      };
+    });
+
+    const sealedReport = sealReport(researchId!, payload.report);
 
     const explorerBase = (
       process.env.NEXT_PUBLIC_EXPLORER_URL ||
       "https://explorer.ritualfoundation.org"
     ).replace(/\/$/, "");
 
+    // NEVER return plaintext report — only sealed blob + hash for settle
     return NextResponse.json({
       ok: true,
       researchId,
       promptHash,
-      resultHash,
-      model: result.model,
-      report: result.content,
+      resultHash: payload.resultHash,
+      model: payload.model,
+      sealedReport,
       paymentTx,
       claimed: Boolean(researchIdRaw),
       explorerTx: paymentTx ? `${explorerBase}/tx/${paymentTx}` : null,
+      revealRequired: true,
     });
   } catch (e: unknown) {
     console.error("[api/research]", e);
