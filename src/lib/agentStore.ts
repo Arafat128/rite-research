@@ -160,6 +160,32 @@ export function tickHasUsefulData(t: TickRecord): boolean {
 }
 
 /**
+ * Drop local ticks that cannot belong to this agent life
+ * (wrong id, runCount past max, or timestamp before agent.createdAt).
+ */
+export function pruneTicksForAgent(
+  agentId: string,
+  maxRunCount: number,
+  createdAtMs: number,
+  radar?: string | null
+) {
+  const key = tickStorageKey(radar);
+  const all = readJson<TickRecord[]>(key, []);
+  const id = String(agentId);
+  const next = all.filter((t) => {
+    if (String(t.agentId) !== id) return true; // keep other agents
+    const n = Number(t.runCount);
+    if (!Number.isFinite(n) || n <= 0) return false;
+    if (maxRunCount > 0 && n > maxRunCount) return false;
+    if (createdAtMs > 0 && t.at > 0 && t.at < createdAtMs - 120_000) {
+      return false;
+    }
+    return true;
+  });
+  if (next.length !== all.length) writeJson(key, next);
+}
+
+/**
  * Soft-closed agents (legacy Radar without killAgent).
  * MUST be scoped by Radar address — agent id "2" on 0x5ed8… is NOT agent "2" on 0x50a3….
  * Old global key `rite_closed_agents_v1` caused new deploys to appear instantly DEAD.

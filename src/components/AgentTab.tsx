@@ -61,6 +61,7 @@ import {
   isAgentClosed,
   listTicks,
   markAgentClosed,
+  pruneTicksForAgent,
   registerAppAgent,
   saveTick,
   tickHasUsefulData,
@@ -108,21 +109,42 @@ async function loadMergedTicks(
   } catch {
     /* RPC / API flaky — keep local */
   }
-  let merged = mergeTickRecords(local, remote);
-  // Drop ticks that don't belong to this agent's current life (stale UI junk)
+  let merged = mergeTickRecords(local, remote).filter(
+    (t) => String(t.agentId) === String(agentId)
+  );
+
   if (agent) {
     const maxRun = Number(agent.runCount);
+    // Ritual createdAt is often ms
+    const createdRaw = Number(agent.createdAt);
+    const createdMs =
+      createdRaw > 1e12
+        ? createdRaw
+        : createdRaw > 0
+          ? createdRaw * 1000
+          : 0;
+
     merged = merged.filter((t) => {
       const n = Number(t.runCount);
       if (!Number.isFinite(n) || n <= 0) return false;
       if (maxRun > 0 && n > maxRun) return false;
+      // Drop local junk from previous agents (saved before this agent existed)
+      if (createdMs > 0 && t.at > 0 && t.at < createdMs - 120_000) {
+        return false;
+      }
       return true;
     });
+
+    // Persist prune so bottom list stays clean
+    pruneTicksForAgent(agentId, maxRun, createdMs, RADAR_CONTRACT);
   }
-  // Prefer useful snapshots for the history list
+
   const useful = merged.filter(tickHasUsefulData);
-  if (useful.length > 0) merged = useful;
-  else if (merged.length === 0 && agent && agent.runCount > BigInt(0)) {
+  if (useful.length > 0) {
+    merged = useful.sort(
+      (a, b) => Number(b.runCount) - Number(a.runCount) || b.at - a.at
+    );
+  } else if (merged.length === 0 && agent && agent.runCount > BigInt(0)) {
     const fromState = tickFromAgentState({
       agentId,
       runCount: agent.runCount,
@@ -132,7 +154,7 @@ async function loadMergedTicks(
     });
     if (fromState) merged = [fromState];
   }
-  return merged;
+  return merged.slice(0, 8);
 }
 
 /** Deploy tab steps only */
@@ -593,9 +615,9 @@ export function AgentTab({
             };
             saveTick(rec, RADAR_CONTRACT);
 
-            // Telegram: server may have no linked prefs on this instance —
-            // always re-push from browser with chatId + full rows when linked
-            if (chatId && address) {
+            // Only browser-push if server did NOT already DM (avoids double Telegram)
+            const serverSent = hit.telegram?.sent === true;
+            if (chatId && address && !serverSent) {
               void fetch("/api/notify/telegram/push", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -2265,9 +2287,14 @@ export function AgentTab({
             const history = ticks
               .filter(
                 (t) =>
-                  t.agentId === selectedId?.toString() && tickHasUsefulData(t)
+                  String(t.agentId) === String(selectedId) &&
+                  tickHasUsefulData(t)
               )
-              .slice(0, 8);
+              .sort(
+                (a, b) =>
+                  Number(b.runCount) - Number(a.runCount) || b.at - a.at
+              )
+              .slice(0, 5);
             if (!history.length || !agent || agentFinished) return null;
             return (
               <div className="glass rounded-2xl p-5">

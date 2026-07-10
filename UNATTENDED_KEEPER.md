@@ -133,16 +133,30 @@ Expect:
 
 ---
 
-## Optional: tighter 1m than GitHub
+## Reliable 1m (recommended — GitHub schedules often lag / skip)
 
-GitHub schedules can lag. For stricter 1m:
+### Option A — Upstash QStash (you already use Upstash)
+
+1. Upstash console → **QStash** → copy **QSTASH_TOKEN**  
+2. Locally:
+
+```powershell
+$env:QSTASH_TOKEN="from_upstash_qstash"
+$env:CRON_SECRET="same_as_vercel"
+$env:APP_URL="https://rite-mehidy-s-projects.vercel.app"
+node scripts/setup-qstash-cron.mjs
+```
+
+3. Confirm schedule appears under QStash → Schedules  
+
+### Option B — cron-job.org
 
 1. [cron-job.org](https://cron-job.org) → every **1 minute**  
 2. URL: `https://YOUR_APP.vercel.app/api/agent/cron?max=25`  
-3. Method: POST  
+3. Method: **POST**  
 4. Header: `Authorization: Bearer YOUR_CRON_SECRET`  
 
-You can run **both** GitHub + cron-job (idempotent: early calls skip with `not_due`).
+GitHub Actions alone is **not enough** if you only see “Manually triggered” runs.
 
 ---
 

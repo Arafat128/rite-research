@@ -13,8 +13,10 @@ name: Agent keeper (unattended)
 
 on:
   schedule:
-    # Every minute UTC (best-effort on GitHub)
-    - cron: "* * * * *"
+    # GitHub may delay high-frequency crons; still useful as backup.
+    # For reliable 1m unattended, also run: node scripts/setup-qstash-cron.mjs
+    # (Upstash QStash) or cron-job.org → POST /api/agent/cron with Bearer.
+    - cron: "*/1 * * * *"
   workflow_dispatch:
 
 concurrency:
