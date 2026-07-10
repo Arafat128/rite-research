@@ -5,6 +5,7 @@ import {
   getTelegramPref,
   setTelegramPref,
   unlinkTelegram,
+  verifyConfirmCode,
 } from "@/lib/telegramPrefs";
 import {
   telegramBotUsername,
@@ -64,6 +65,9 @@ export async function POST(req: NextRequest) {
       owner?: string;
       enabled?: boolean;
       agentIds?: string[];
+      chatId?: string;
+      code?: string;
+      username?: string;
     };
     const owner = (body.owner || "").toLowerCase();
     if (!owner || !isAddress(owner)) {
@@ -150,6 +154,61 @@ export async function POST(req: NextRequest) {
         ].join("\n")
       );
       return NextResponse.json({ ok: true, sent: true });
+    }
+
+    // Confirm link from Telegram deep-link back into the app (durable across instances)
+    if (action === "confirm") {
+      const chatId = String(body.chatId || "").trim();
+      const code = String(body.code || "").trim();
+      if (!chatId || !code) {
+        return NextResponse.json(
+          { error: "chatId and code required" },
+          { status: 400 }
+        );
+      }
+      if (!verifyConfirmCode(owner, chatId, code)) {
+        return NextResponse.json(
+          { error: "Invalid confirm code" },
+          { status: 403 }
+        );
+      }
+      const existing = getTelegramPref(owner);
+      setTelegramPref({
+        owner,
+        chatId,
+        agentIds: existing?.agentIds || [],
+        enabled: true,
+        linkedAt: Date.now(),
+        username: body.username || existing?.username,
+      });
+      return NextResponse.json({ ok: true, linked: true, chatId });
+    }
+
+    // Manual chat id paste (backup)
+    if (action === "register_chat") {
+      const chatId = String(body.chatId || "").trim();
+      if (!/^\d+$/.test(chatId)) {
+        return NextResponse.json(
+          { error: "chatId must be numeric (from the bot message)" },
+          { status: 400 }
+        );
+      }
+      setTelegramPref({
+        owner,
+        chatId,
+        agentIds: [],
+        enabled: true,
+        linkedAt: Date.now(),
+      });
+      try {
+        await sendTelegramMessage(
+          chatId,
+          `<b>Rite</b>: chat id registered for <code>${owner.slice(0, 6)}…${owner.slice(-4)}</code>. Alerts ON.`
+        );
+      } catch {
+        /* still save */
+      }
+      return NextResponse.json({ ok: true, linked: true, chatId });
     }
 
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });

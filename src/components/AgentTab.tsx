@@ -1126,6 +1126,15 @@ export function AgentTab({
 
       // Telegram DM after successful seal (no flow change if unlinked)
       if (address) {
+        let chatId: string | undefined;
+        try {
+          chatId =
+            localStorage.getItem(
+              `rite_telegram_chat_v1:${address.toLowerCase()}`
+            ) || undefined;
+        } catch {
+          /* ignore */
+        }
         void fetch("/api/notify/telegram/push", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1139,6 +1148,7 @@ export function AgentTab({
             target: snapshot.target,
             txHash: hash,
             died,
+            chatId,
           }),
         }).catch(() => undefined);
       }

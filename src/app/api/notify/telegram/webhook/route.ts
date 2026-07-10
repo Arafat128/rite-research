@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  consumeLinkToken,
+  createConfirmCode,
   findPrefByChatId,
   getTelegramPref,
   setTelegramPref,
+  verifyLinkToken,
 } from "@/lib/telegramPrefs";
 import { sendTelegramMessage, telegramConfigured } from "@/lib/telegram";
 import { publicErrorMessage } from "@/lib/security";
@@ -12,18 +13,25 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Telegram will POST updates here.
- * Set webhook:
- *   https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://YOUR_APP/api/notify/telegram/webhook&secret_token=YOUR_SECRET
+ * Telegram POSTs updates here.
  *
- * Auth: header X-Telegram-Bot-Api-Secret-Token === TELEGRAM_WEBHOOK_SECRET
- *   (or CRON_SECRET if webhook secret unset)
+ * setWebhook MUST use the SAME secret_token as env TELEGRAM_WEBHOOK_SECRET:
+ *   secret_token=<TELEGRAM_WEBHOOK_SECRET>
+ * Telegram then sends header: X-Telegram-Bot-Api-Secret-Token
+ *
+ * If Vercel Deployment Protection is on, use bypass query on the webhook URL.
  */
 function webhookAuthorized(req: NextRequest): boolean {
-  const secret =
-    process.env.TELEGRAM_WEBHOOK_SECRET || process.env.CRON_SECRET || "";
-  if (!secret) return true; // allow if not configured (dev only)
-  const header = req.headers.get("x-telegram-bot-api-secret-token") || "";
+  const secret = (
+    process.env.TELEGRAM_WEBHOOK_SECRET ||
+    process.env.CRON_SECRET ||
+    ""
+  ).trim();
+  // No secret configured → accept (dev). Production should always set one.
+  if (!secret) return true;
+  const header = (
+    req.headers.get("x-telegram-bot-api-secret-token") || ""
+  ).trim();
   return header === secret;
 }
 
@@ -38,10 +46,20 @@ type TgUpdate = {
 export async function POST(req: NextRequest) {
   try {
     if (!telegramConfigured()) {
-      return NextResponse.json({ ok: false }, { status: 503 });
+      console.warn("[telegram/webhook] TELEGRAM_BOT_TOKEN missing");
+      return NextResponse.json({ ok: false, error: "bot not configured" }, { status: 503 });
     }
     if (!webhookAuthorized(req)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      console.warn(
+        "[telegram/webhook] Unauthorized — secret_token must match TELEGRAM_WEBHOOK_SECRET on Vercel. Re-run setWebhook."
+      );
+      return NextResponse.json(
+        {
+          error: "Unauthorized",
+          hint: "setWebhook secret_token must equal TELEGRAM_WEBHOOK_SECRET env exactly",
+        },
+        { status: 401 }
+      );
     }
 
     const update = (await req.json()) as TgUpdate;
@@ -54,8 +72,19 @@ export async function POST(req: NextRequest) {
 
     const chat = String(chatId);
     const username = msg?.from?.username || msg?.chat?.username;
+    const appUrl = (
+      process.env.NEXT_PUBLIC_APP_URL ||
+      process.env.VERCEL_PROJECT_PRODUCTION_URL ||
+      ""
+    ).replace(/\/$/, "");
+    const site =
+      appUrl.startsWith("http")
+        ? appUrl
+        : appUrl
+          ? `https://${appUrl}`
+          : "https://rite-mehidy-s-projects.vercel.app";
 
-    // /start <token> — link wallet from Rite app
+    // /start <token> — link wallet from Rite app deep link
     if (text.startsWith("/start")) {
       const parts = text.split(/\s+/);
       const token = parts[1]?.trim();
@@ -65,25 +94,35 @@ export async function POST(req: NextRequest) {
           [
             `<b>Rite notifications</b>`,
             ``,
-            `Open the Rite app → <b>My Agents</b> → <b>Telegram</b> → Connect.`,
-            `That opens this bot with a one-time link so we can DM your agent ticks.`,
+            `Do <b>not</b> only type /start here.`,
+            `In the Rite app open <b>My Agents → Connect Telegram</b> so the link includes your wallet token.`,
+            ``,
+            `If you already pressed Start from the app and got nothing, the webhook is blocked or the secret_token is wrong — see TELEGRAM.md.`,
           ].join("\n")
         );
         return NextResponse.json({ ok: true });
       }
 
-      const pending = consumeLinkToken(token);
-      if (!pending) {
+      const verified = verifyLinkToken(token);
+      if (!verified) {
         await sendTelegramMessage(
           chat,
-          `Link expired or invalid. Go back to Rite → My Agents → Connect Telegram and try again.`
+          [
+            `Link expired or invalid.`,
+            ``,
+            `1. Open Rite → <b>My Agents</b>`,
+            `2. Click <b>Connect Telegram</b> again (new link)`,
+            `3. Press <b>Start</b> in this bot`,
+            ``,
+            `Do not type /start yourself without the app link.`,
+          ].join("\n")
         );
         return NextResponse.json({ ok: true });
       }
 
-      const existing = getTelegramPref(pending.owner);
+      const existing = getTelegramPref(verified.owner);
       setTelegramPref({
-        owner: pending.owner,
+        owner: verified.owner,
         chatId: chat,
         agentIds: existing?.agentIds || [],
         enabled: true,
@@ -91,18 +130,22 @@ export async function POST(req: NextRequest) {
         username,
       });
 
+      const confirm = createConfirmCode(verified.owner, chat);
+      const confirmUrl = `${site}/?tg_owner=${encodeURIComponent(verified.owner)}&tg_chat=${encodeURIComponent(chat)}&tg_code=${encodeURIComponent(confirm)}`;
+
       await sendTelegramMessage(
         chat,
         [
           `<b>Linked to Rite</b> ✅`,
           ``,
-          `Wallet: <code>${pending.owner.slice(0, 6)}…${pending.owner.slice(-4)}</code>`,
-          `You will receive DMs when your agents seal a tick.`,
+          `Wallet: <code>${verified.owner.slice(0, 6)}…${verified.owner.slice(-4)}</code>`,
+          `Chat id: <code>${chat}</code>`,
           ``,
-          `Commands:`,
-          `/status — link status`,
-          `/stop — pause notifications`,
-          `/start — help`,
+          `Back in Rite, click <b>Refresh status</b> (or open this link once):`,
+          confirmUrl,
+          ``,
+          `You will get DMs when agents seal a tick.`,
+          `/status · /stop`,
         ].join("\n")
       );
       return NextResponse.json({ ok: true });
@@ -122,6 +165,7 @@ export async function POST(req: NextRequest) {
             `<b>Status</b>`,
             `Wallet: <code>${found.owner.slice(0, 6)}…${found.owner.slice(-4)}</code>`,
             `Notifications: ${found.enabled ? "ON" : "OFF"}`,
+            `Chat id: <code>${chat}</code>`,
           ].join("\n")
         );
       }
@@ -135,14 +179,47 @@ export async function POST(req: NextRequest) {
       }
       await sendTelegramMessage(
         chat,
-        `Notifications paused. Re-enable from Rite → My Agents → Telegram, or Connect again.`
+        `Notifications paused. Re-enable from Rite → My Agents → Telegram.`
+      );
+      return NextResponse.json({ ok: true });
+    }
+
+    // Manual paste: /link 0xWALLET (backup if deep link fails)
+    if (text.startsWith("/link ")) {
+      const owner = text.slice(6).trim().toLowerCase();
+      if (!/^0x[a-f0-9]{40}$/.test(owner)) {
+        await sendTelegramMessage(
+          chat,
+          `Usage: <code>/link 0xYourWalletAddress</code>`
+        );
+        return NextResponse.json({ ok: true });
+      }
+      setTelegramPref({
+        owner,
+        chatId: chat,
+        agentIds: [],
+        enabled: true,
+        linkedAt: Date.now(),
+        username,
+      });
+      const confirm = createConfirmCode(owner, chat);
+      const confirmUrl = `${site}/?tg_owner=${encodeURIComponent(owner)}&tg_chat=${encodeURIComponent(chat)}&tg_code=${encodeURIComponent(confirm)}`;
+      await sendTelegramMessage(
+        chat,
+        [
+          `<b>Linked</b> ✅ via /link`,
+          `Wallet: <code>${owner.slice(0, 6)}…${owner.slice(-4)}</code>`,
+          ``,
+          `Confirm in Rite:`,
+          confirmUrl,
+        ].join("\n")
       );
       return NextResponse.json({ ok: true });
     }
 
     await sendTelegramMessage(
       chat,
-      `Unknown command. Use /start, /status, or /stop.`
+      `Commands: /start · /status · /stop · /link 0xYourWallet`
     );
     return NextResponse.json({ ok: true });
   } catch (e: unknown) {
