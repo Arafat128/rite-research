@@ -1,6 +1,6 @@
 # Rite
 
-**Pay-per-prompt crypto research**, **Surf Data agents**, **Telegram tick alerts**, and an **auto bounty pool** on **Ritual testnet** (chain id `1979`).
+**Pay-per-prompt crypto research** platform on **Ritual testnet**, **Surf Data Agents** on **Ritual testnet**, **Telegram tick alerts** and an **auto bounty pool** on **Ritual testnet** (chain id `1979`).
 
 **Live app:** [https://rite-mehidy-s-projects.vercel.app](https://rite-mehidy-s-projects.vercel.app)
 
