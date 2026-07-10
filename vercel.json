@@ -10,6 +10,9 @@
     },
     "src/app/api/agent/cron/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/agent/auto-wake/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [

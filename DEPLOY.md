@@ -70,3 +70,14 @@ npx vercel
 ```
 
 Framework preset: Next.js. Root: this folder.
+
+### Unattended 1‑minute auto-wake
+
+Hobby Vercel cron is **daily only**. For real unattended schedules:
+
+1. Set `KEEPER_PRIVATE_KEY` + `CRON_SECRET` on Vercel Production and redeploy  
+2. Add GitHub secrets `APP_URL` + `CRON_SECRET` (see **UNATTENDED_KEEPER.md**)  
+3. Enable workflow **Agent keeper (unattended)** (`.github/workflows/agent-keeper.yml`)  
+4. Agent must be **LIVE**, funded, schedule saved  
+
+Full checklist: **[UNATTENDED_KEEPER.md](./UNATTENDED_KEEPER.md)**
