@@ -46,15 +46,37 @@ Redeploy after saving env.
 
 ## 3. Point Telegram at your app (webhook)
 
-Replace placeholders and run once (browser or curl):
+### ⚠️ Critical: Vercel Deployment Protection
+
+If the project has **Deployment Protection** (SSO / “Vercel Authentication”), Telegram gets **401 Protected deployment** and the bot **never answers** `/start`.
+
+**Fix one of these:**
+
+**A. Recommended for a public app**  
+Vercel → Project → **Settings → Deployment Protection** → for **Production** set to **None** (or disable Vercel Authentication).
+
+**B. Keep protection, allow automation**  
+1. Settings → Deployment Protection → **Protection Bypass for Automation** → enable, copy the secret.  
+2. Put it in env as `VERCEL_AUTOMATION_BYPASS_SECRET` (optional; only for your notes).  
+3. Set webhook URL **with** the bypass query param:
+
+```text
+https://YOUR_APP.vercel.app/api/notify/telegram/webhook?x-vercel-protection-bypass=YOUR_BYPASS_SECRET
+```
+
+(Your app secret `TELEGRAM_WEBHOOK_SECRET` is still separate — that is `secret_token` for Telegram.)
+
+### setWebhook (after protection is fixed)
 
 ```bash
-# Production example
-curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://YOUR_APP.vercel.app/api/notify/telegram/webhook" \
-  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
+# Production example (PowerShell-friendly)
+curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" `
+  -d "url=https://YOUR_APP.vercel.app/api/notify/telegram/webhook" `
+  -d "secret_token=rite_tg_wh_k7m9p2xQ4vL8nR3wY6zA1bC5dE0fG" `
   -d "drop_pending_updates=true"
 ```
+
+If using bypass (option B), put the **full** URL including `?x-vercel-protection-bypass=...` in `url=`.
 
 Check:
 
@@ -62,7 +84,7 @@ Check:
 curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
 ```
 
-You should see your `url` and no errors.
+You should see your `url`. If `last_error_message` mentions 401 / Unauthorized, protection is still blocking.
 
 **Local dev:** use [ngrok](https://ngrok.com/) or similar:
 
@@ -203,9 +225,21 @@ If Deployment Protection blocks Telegram’s webhook, add a **Protection Bypass*
 |---------|-----|
 | “Telegram not configured” | Env missing or not redeployed |
 | Connect opens wrong bot | Fix `NEXT_PUBLIC_TELEGRAM_BOT_USERNAME` |
-| Start does nothing | Webhook URL wrong / Protection blocking |
+| **Start does nothing / bot silent** | **1)** Webhook not set · **2)** **Vercel Deployment Protection 401** (most common) · **3)** Typed bare `/start` without opening **Connect Telegram** deep link · **4)** `secret_token` ≠ `TELEGRAM_WEBHOOK_SECRET` on Vercel |
 | Linked but no tick DMs | Wake must succeed on-chain; check agent LIVE + funded; `/status` → ON |
 | Lost link after idle | Cold start cleared memory — reconnect (or add Redis) |
+
+### Verify protection is the issue
+
+```bash
+# Should return JSON, NOT HTML login / 401 Protected deployment
+curl -i -X POST "https://YOUR_APP.vercel.app/api/notify/telegram/webhook" `
+  -H "Content-Type: application/json" `
+  -H "X-Telegram-Bot-Api-Secret-Token: YOUR_WEBHOOK_SECRET" `
+  -d "{\"message\":{\"text\":\"/start\",\"chat\":{\"id\":1}}}"
+```
+
+If you see `Protected deployment` or HTML, fix Deployment Protection first.
 
 ---
 

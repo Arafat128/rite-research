@@ -122,14 +122,26 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         )}
       </div>
       <p className="mb-3 text-[11px] leading-relaxed text-white/45">
-        Get a DM when your agents seal a tick (after Wake or keeper). Link once
-        with the bot — no flow change on-chain.
+        Get a DM when your agents seal a tick (after Wake or keeper). Use{" "}
+        <b className="text-white/70">Connect Telegram</b> (not a bare{" "}
+        <code className="text-white/50">/start</code> only) so the bot receives
+        your link token. See <code className="text-[#c8ff4a]">TELEGRAM.md</code>.
       </p>
 
       {!st.configured && (
         <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
           Server missing <code className="text-[#c8ff4a]">TELEGRAM_BOT_TOKEN</code>
-          . See <code className="text-[#c8ff4a]">TELEGRAM.md</code>.
+          . Add it on Vercel and redeploy.
+        </p>
+      )}
+
+      {st.configured && !st.linked && (
+        <p className="mb-2 rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white/45">
+          If the bot stays silent after Start: Vercel{" "}
+          <b className="text-white/60">Deployment Protection</b> is likely
+          blocking Telegram (401). Disable protection on Production or add
+          Protection Bypass and set the webhook URL with{" "}
+          <code className="text-[#c8ff4a]">x-vercel-protection-bypass</code>.
         </p>
       )}
 
