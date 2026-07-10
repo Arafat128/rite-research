@@ -44,6 +44,7 @@ import {
   type SnapshotCell,
   type SurfDataSnapshot,
 } from "@/lib/surfData";
+// SurfDataSnapshot used by auto-wake result typing
 import { sanitizeHttpUrl } from "@/lib/safeUrl";
 import {
   BLOCK_TIME_SEC,
@@ -507,6 +508,13 @@ export function AgentTab({
             txHash?: string;
             error?: string;
             summary?: string;
+            runCount?: string;
+            agentName?: string;
+            kindLabel?: string;
+            target?: string;
+            died?: boolean;
+            telegram?: { sent?: boolean; reason?: string };
+            snapshot?: SurfDataSnapshot;
           }>;
           keeperOnChain?: boolean | null;
         };
@@ -525,11 +533,117 @@ export function AgentTab({
         if (ticked > 0) {
           const hits = (data.results || []).filter((r) => r.ok);
           const first = hits[0];
+
+          // Persist full Surf snapshots in this browser + show table + Telegram
+          // (server memory cache is lost across Vercel instances / cold starts)
+          let chatId: string | undefined;
+          try {
+            const o = address.toLowerCase();
+            const v2 = localStorage.getItem(`rite_telegram_link_v2:${o}`);
+            if (v2) {
+              const p = JSON.parse(v2) as { chatId?: string };
+              if (p?.chatId && /^\d+$/.test(p.chatId)) chatId = p.chatId;
+            }
+            if (!chatId) {
+              chatId =
+                localStorage.getItem(`rite_telegram_chat_v1:${o}`) ||
+                undefined;
+            }
+          } catch {
+            /* ignore */
+          }
+
+          for (const hit of hits) {
+            if (!hit.snapshot) continue;
+            const snap = hit.snapshot as SurfDataSnapshot;
+            const rec: TickRecord = {
+              agentId: hit.agentId,
+              runCount: hit.runCount || "?",
+              at: Date.now(),
+              txHash: hit.txHash,
+              source: "keeper",
+              snapshot: {
+                ...snap,
+                kind: (snap.kind || "market_price") as SurfDataSnapshot["kind"],
+                kindLabel: snap.kindLabel || hit.kindLabel || "",
+                target: snap.target || hit.target || "_",
+                fetchedAt: snap.fetchedAt || new Date().toISOString(),
+                endpoint: snap.endpoint || "keeper",
+                summary: snap.summary || hit.summary || "",
+                rows: Array.isArray(snap.rows) ? snap.rows : [],
+                highlights: Array.isArray(snap.highlights)
+                  ? snap.highlights
+                  : [],
+                raw: undefined,
+              },
+            };
+            saveTick(rec);
+
+            // Telegram: server may have no linked prefs on this instance —
+            // always re-push from browser with chatId + full rows when linked
+            if (chatId && address) {
+              void fetch("/api/notify/telegram/push", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  owner: address,
+                  agentId: hit.agentId,
+                  agentName: hit.agentName,
+                  runCount: hit.runCount || rec.runCount,
+                  summary: rec.snapshot.summary,
+                  kindLabel: rec.snapshot.kindLabel,
+                  target: rec.snapshot.target,
+                  txHash: hit.txHash,
+                  died: Boolean(hit.died),
+                  chatId,
+                  rows: rec.snapshot.rows,
+                  highlights: rec.snapshot.highlights,
+                }),
+              }).catch(() => undefined);
+            }
+          }
+
           if (!cancelled) {
+            // Show data immediately for selected agent
+            const forSelected = hits.find(
+              (h) =>
+                selectedId != null && h.agentId === selectedId.toString()
+            );
+            const show = forSelected || first;
+            if (show?.snapshot) {
+              const snap = show.snapshot as SurfDataSnapshot;
+              setLastSnapshot({
+                ...snap,
+                kind: (snap.kind || "market_price") as SurfDataSnapshot["kind"],
+                kindLabel: snap.kindLabel || "",
+                target: snap.target || "_",
+                fetchedAt: snap.fetchedAt || new Date().toISOString(),
+                endpoint: snap.endpoint || "keeper",
+                summary: snap.summary || show.summary || "",
+                rows: Array.isArray(snap.rows) ? snap.rows : [],
+                highlights: Array.isArray(snap.highlights)
+                  ? snap.highlights
+                  : [],
+                raw: undefined,
+              });
+              if (selectedId != null) {
+                setTicks(await loadMergedTicks(selectedId.toString()));
+              }
+            }
+
+            const tgNote =
+              first?.telegram?.sent === true
+                ? " · Telegram sent"
+                : chatId
+                  ? " · Telegram push"
+                  : first?.telegram?.reason
+                    ? ` · TG: ${first.telegram.reason}`
+                    : "";
             setAutoWakeNote(
               `Auto-wake sealed ${ticked} tick(s)` +
                 (first?.agentId ? ` · #${first.agentId}` : "") +
-                (first?.summary ? ` · ${first.summary.slice(0, 48)}` : "")
+                (first?.summary ? ` · ${first.summary.slice(0, 48)}` : "") +
+                tgNote
             );
             toast.success(
               `Auto-wake: ${ticked} tick(s)`,
@@ -2073,9 +2187,10 @@ export function AgentTab({
             !agentFinished &&
             (lastSnapshot ||
               (ticks[0]?.snapshot &&
-                (ticks[0].snapshot.rows?.length > 0 ||
+                ((ticks[0].snapshot.rows?.length ?? 0) > 0 ||
                   ticks[0].source === "local" ||
-                  ticks[0].source === "keeper"))) && (
+                  ticks[0].source === "keeper" ||
+                  Boolean(ticks[0].snapshot.summary)))) && (
             <DataSnapshotCard
               snapshot={lastSnapshot || ticks[0].snapshot}
               title="Latest tick data"
@@ -2086,21 +2201,39 @@ export function AgentTab({
             ticks.length === 0 &&
             agent &&
             !agentFinished &&
-            agent.status === 1 && (
+            agent.status === 1 &&
+            agent.runCount === BigInt(0) && (
             <div className="glass rounded-2xl p-5 text-sm text-white/55">
               <h3 className="mb-2 text-sm font-semibold text-[#c8ff4a]">
                 No ticks yet
               </h3>
               <p className="text-[12px] leading-relaxed">
-                On-chain run count is <b className="text-white/80">{agent.runCount.toString()}</b>
-                {agent.lastRunAt === BigInt(0) ? " · last wake: never" : ""}.
-                Tick results appear here after a successful{" "}
-                <code className="text-[#c8ff4a]">runTick</code> (manual Wake or
-                server keeper). Auto-wake needs{" "}
-                <code className="text-[#c8ff4a]">KEEPER_PRIVATE_KEY</code> +{" "}
-                <code className="text-[#c8ff4a]">CRON_SECRET</code> on Vercel
-                Production and no Deployment Protection blocking{" "}
-                <code className="text-[#c8ff4a]">/api/agent/cron</code>.
+                On-chain run count is <b className="text-white/80">0</b>.
+                After manual Wake or auto-wake, full table data appears here.
+                Keep <b className="text-white/70">My Agents</b> open for 1m
+                auto-wake (polls keeper every ~20s).
+              </p>
+            </div>
+          )}
+
+          {!ticking &&
+            ticks.length === 0 &&
+            agent &&
+            !agentFinished &&
+            agent.status === 1 &&
+            agent.runCount > BigInt(0) &&
+            !lastSnapshot && (
+            <div className="glass rounded-2xl p-5 text-sm text-white/55">
+              <h3 className="mb-2 text-sm font-semibold text-[#c8ff4a]">
+                Sealed on-chain — loading full data…
+              </h3>
+              <p className="text-[12px] leading-relaxed">
+                Run count is{" "}
+                <b className="text-white/80">{agent.runCount.toString()}</b>.
+                Full headlines/rows are stored when auto-wake returns the
+                snapshot to this browser (or after a manual Wake). Click{" "}
+                <b className="text-white/70">Refresh</b> after the next
+                auto-wake poll.
               </p>
             </div>
           )}

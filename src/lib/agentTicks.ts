@@ -227,7 +227,9 @@ export function tickFromAgentState(opts: {
     typeof opts.lastRunAt === "bigint"
       ? Number(opts.lastRunAt)
       : opts.lastRunAt;
-  const atMs = last > 0 ? last * 1000 : Date.now();
+  // Ritual timestamps are often milliseconds already
+  const atMs =
+    last > 1e12 ? last : last > 0 ? last * 1000 : Date.now();
   return {
     agentId: opts.agentId,
     runCount: String(run),

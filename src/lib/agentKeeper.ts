@@ -22,7 +22,11 @@ import {
   ritualChain,
   RPC_URL,
 } from "@/lib/ritual";
-import { decodeAgentTrack, fetchSurfData } from "@/lib/surfData";
+import {
+  decodeAgentTrack,
+  fetchSurfData,
+  type SurfDataSnapshot,
+} from "@/lib/surfData";
 import { computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
 import { cacheKeeperTick } from "@/lib/keeperCache";
@@ -35,6 +39,23 @@ export type KeeperTickResult = {
   txHash?: string;
   summary?: string;
   error?: string;
+  runCount?: string;
+  agentName?: string;
+  kindLabel?: string;
+  target?: string;
+  died?: boolean;
+  telegram?: { sent: boolean; reason?: string };
+  /** Full Surf snapshot for UI + Telegram (no huge raw blob) */
+  snapshot?: {
+    kind: string;
+    kindLabel: string;
+    target: string;
+    fetchedAt: string;
+    endpoint: string;
+    summary: string;
+    rows: SurfDataSnapshot["rows"];
+    highlights: SurfDataSnapshot["highlights"];
+  };
 };
 
 function publicClient() {
@@ -308,6 +329,8 @@ export async function runDueAgentTicks(opts?: {
       }
 
       const newCount = agent.runCount + BigInt(1);
+      const died =
+        agent.maxRuns > BigInt(0) && newCount >= agent.maxRuns;
       cacheKeeperTick({
         agentId: String(i),
         runCount: newCount.toString(),
@@ -317,7 +340,8 @@ export async function runDueAgentTicks(opts?: {
         snapshot,
       });
 
-      void notifyAgentTick({
+      // Await notify so durable prefs + send finish in this request
+      const telegram = await notifyAgentTick({
         owner: agent.owner,
         agentId: String(i),
         agentName: agent.name,
@@ -326,7 +350,7 @@ export async function runDueAgentTicks(opts?: {
         kindLabel: snapshot.kindLabel,
         target: snapshot.target,
         txHash: hash,
-        died: agent.maxRuns > BigInt(0) && newCount >= agent.maxRuns,
+        died,
         rows: snapshot.rows,
         highlights: snapshot.highlights,
       });
@@ -336,7 +360,24 @@ export async function runDueAgentTicks(opts?: {
         agentId: String(i),
         ok: true,
         txHash: hash,
-        summary: snapshot.summary.slice(0, 120),
+        runCount: newCount.toString(),
+        agentName: agent.name,
+        kindLabel: snapshot.kindLabel,
+        target: snapshot.target,
+        died,
+        summary: snapshot.summary.slice(0, 200),
+        telegram,
+        // Client persists this to localStorage + shows table + can re-push Telegram
+        snapshot: {
+          kind: snapshot.kind,
+          kindLabel: snapshot.kindLabel,
+          target: snapshot.target,
+          fetchedAt: snapshot.fetchedAt,
+          endpoint: snapshot.endpoint || "keeper",
+          summary: snapshot.summary,
+          rows: snapshot.rows,
+          highlights: snapshot.highlights,
+        },
       });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message.slice(0, 200) : String(e);

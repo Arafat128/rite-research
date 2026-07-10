@@ -42,13 +42,13 @@ function linkSecret(): string {
 /** Writable path for durable prefs (works locally; may work on some serverless). */
 function durablePath(): string | null {
   try {
-    const base =
-      process.env.TELEGRAM_PREFS_PATH ||
-      process.env.RITE_DATA_DIR ||
-      (process.env.VERCEL
-        ? path.join("/tmp", "rite-telegram-prefs.json")
-        : path.join(process.cwd(), ".data", "telegram-prefs.json"));
-    return base;
+    if (process.env.TELEGRAM_PREFS_PATH) return process.env.TELEGRAM_PREFS_PATH;
+    if (process.env.RITE_DATA_DIR) {
+      return path.join(process.env.RITE_DATA_DIR, "telegram-prefs.json");
+    }
+    return process.env.VERCEL
+      ? path.join("/tmp", "rite-telegram-prefs.json")
+      : path.join(process.cwd(), ".data", "telegram-prefs.json");
   } catch {
     return null;
   }
