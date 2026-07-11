@@ -1415,12 +1415,28 @@ export function AgentTab({
         gasFloor: BigInt(280_000),
       });
       const receipt = await waitTx(hash);
-      if (receipt.status !== "success") {
-        throw new Error("runTick transaction reverted");
+      const receiptOk =
+        receipt.status === "success" ||
+        (receipt as { status?: unknown }).status === 1 ||
+        (receipt as { status?: unknown }).status === "0x1";
+
+      // Re-read agent — race/RPC may mark receipt failed while tick landed
+      let onChainRuns = agent.runCount + BigInt(1);
+      try {
+        const live = await readAgentOnChain(selectedId);
+        if (live && live.runCount > agent.runCount) {
+          onChainRuns = live.runCount;
+        } else if (!receiptOk) {
+          throw new Error(
+            `runTick reverted (tx ${hash.slice(0, 12)}…). Wait for schedule or fund/activate, then Wake again.`
+          );
+        }
+      } catch (e) {
+        if (!receiptOk) throw e;
       }
 
       // ONLY after on-chain confirm: persist + show
-      const newCount = agent.runCount + BigInt(1);
+      const newCount = onChainRuns;
       const rec: TickRecord = {
         agentId: selectedId.toString(),
         runCount: newCount.toString(),

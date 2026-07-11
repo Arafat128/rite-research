@@ -134,8 +134,8 @@ async function sendKeeperRunTick(opts: {
     args: [opts.agentId, opts.digest],
   });
 
-  // ~117k observed for runTick; keep headroom without over-reserving gas*price
-  const gas = BigInt(220_000);
+  // Observed ~108k–150k; leave headroom (out-of-gas shows as receipt.reverted)
+  const gas = BigInt(350_000);
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -200,6 +200,94 @@ async function sendKeeperRunTick(opts: {
   throw lastErr instanceof Error
     ? lastErr
     : new Error(errBlob(lastErr).slice(0, 240) || "runTick send failed");
+}
+
+/**
+ * Turn a failed runTick receipt into a short actionable error.
+ * Live Radar 0x50a3 may not expose lastTickBlock() even when ticks succeed.
+ */
+async function explainFailedRunTick(
+  client: PublicClient,
+  opts: {
+    hash: Hex;
+    from: Address;
+    agentId: bigint;
+    digest: Hex;
+    gasUsed?: bigint;
+    gasLimit?: bigint;
+  }
+): Promise<string> {
+  const short = opts.hash.slice(0, 12);
+  // Out of gas: used almost all limit
+  if (
+    opts.gasUsed != null &&
+    opts.gasLimit != null &&
+    opts.gasUsed >= (opts.gasLimit * BigInt(95)) / BigInt(100)
+  ) {
+    return `runTick out of gas (used ${opts.gasUsed.toString()}/${opts.gasLimit.toString()}) tx ${short}…`;
+  }
+
+  // eth_call replay often returns the custom error
+  try {
+    await client.simulateContract({
+      address: RADAR_CONTRACT as Address,
+      abi: radarAgentAbi,
+      functionName: "runTick",
+      args: [opts.agentId, opts.digest],
+      account: opts.from,
+    });
+  } catch (e) {
+    const blob = errBlob(e);
+    if (/TooEarly|too early/i.test(blob)) {
+      return `TooEarly: schedule not elapsed yet (tx ${short}…). Next poll will retry.`;
+    }
+    if (/NotAuthorized|0x82b42900/i.test(blob)) {
+      return `NotAuthorized: keeper not allowlisted for runTick (tx ${short}…)`;
+    }
+    if (/AgentIsDead|dead/i.test(blob)) {
+      return `AgentIsDead (tx ${short}…)`;
+    }
+    if (/BadStatus|not active|BadStatus/i.test(blob)) {
+      return `BadStatus: agent not LIVE (tx ${short}…)`;
+    }
+    if (/InsufficientBalance|insufficient/i.test(blob)) {
+      return `InsufficientBalance: fund the agent (tx ${short}…)`;
+    }
+    if (/EmptyWatchlist|watchlist/i.test(blob)) {
+      return `EmptyWatchlist: no data stream locked (tx ${short}…)`;
+    }
+    if (/ZeroDigest/i.test(blob)) {
+      return `ZeroDigest (tx ${short}…)`;
+    }
+    const brief = blob.replace(/\s+/g, " ").slice(0, 140);
+    if (brief) {
+      return `runTick reverted: ${brief} (tx ${short}…)`;
+    }
+  }
+
+  return `runTick receipt not successful (tx ${short}…). Often a race with another wake — check explorer; if run count increased, ignore.`;
+}
+
+/** Serialize ticks per agent on this instance (avoids double-fire races). */
+const agentTickLocks = new Map<string, Promise<unknown>>();
+
+async function withAgentTickLock<T>(
+  agentId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const prev = agentTickLocks.get(agentId) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const chained = prev.then(() => gate);
+  agentTickLocks.set(agentId, chained);
+  await prev.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
 }
 
 export function keeperConfigured(): boolean {
@@ -424,43 +512,154 @@ export async function runDueAgentTicks(opts?: {
         continue;
       }
 
-      const snapshot = await fetchSurfData(track.kind, track.target);
-      const digestPayload = JSON.stringify({
-        kind: snapshot.kind,
-        target: snapshot.target,
-        summary: snapshot.summary,
-        highlights: snapshot.highlights,
-        fetchedAt: snapshot.fetchedAt,
-        agentId: String(i),
-        keeper: true,
-      });
-      const digest = keccak256(stringToBytes(digestPayload));
+      // Serialize per-agent ticks on this instance (auto-wake + cron race)
+      const locked = await withAgentTickLock(String(i), async () => {
+        // Re-read after wait — prior tick may have just landed
+        let fresh = agent;
+        try {
+          fresh = (await client.readContract({
+            address: RADAR_CONTRACT as Address,
+            abi: radarAgentAbi,
+            functionName: "getAgent",
+            args: [id],
+          })) as AgentView;
+        } catch {
+          /* use stale */
+        }
+        if (fresh.status !== 1) {
+          return {
+            kind: "skip" as const,
+            skipped: fresh.status === 4 ? "dead" : "not_active",
+          };
+        }
+        if (fresh.balance < runFee) {
+          return { kind: "skip" as const, skipped: "insufficient_balance" };
+        }
+        const due2 = await isAgentDue(
+          id,
+          fresh.wakeIntervalBlocks,
+          fresh.lastRunAt
+        );
+        if (!due2.due) {
+          return {
+            kind: "skip" as const,
+            skipped: `not_due_${due2.detail}`,
+          };
+        }
 
-      const hash = await sendKeeperRunTick({
-        wallet,
-        client,
-        account,
-        agentId: id,
-        digest,
+        const snapshot = await fetchSurfData(track.kind, track.target);
+        const digestPayload = JSON.stringify({
+          kind: snapshot.kind,
+          target: snapshot.target,
+          summary: snapshot.summary,
+          highlights: snapshot.highlights,
+          fetchedAt: snapshot.fetchedAt,
+          agentId: String(i),
+          keeper: true,
+        });
+        const digest = keccak256(stringToBytes(digestPayload));
+
+        const hash = await sendKeeperRunTick({
+          wallet,
+          client,
+          account,
+          agentId: id,
+          digest,
+        });
+
+        const receipt = await client.waitForTransactionReceipt({
+          hash,
+          timeout: 90_000,
+          confirmations: 1,
+        });
+
+        const receiptOk =
+          receipt.status === "success" ||
+          (receipt as { status?: unknown }).status === 1 ||
+          (receipt as { status?: unknown }).status === "0x1";
+
+        let postAgent = fresh;
+        try {
+          postAgent = (await client.readContract({
+            address: RADAR_CONTRACT as Address,
+            abi: radarAgentAbi,
+            functionName: "getAgent",
+            args: [id],
+          })) as AgentView;
+        } catch {
+          /* keep pre */
+        }
+
+        const runAdvanced = postAgent.runCount > fresh.runCount;
+        if (!receiptOk && !runAdvanced) {
+          const reason = await explainFailedRunTick(client, {
+            hash,
+            from: account.address,
+            agentId: id,
+            digest,
+            gasUsed: receipt.gasUsed,
+            gasLimit: BigInt(350_000),
+          });
+          return {
+            kind: "fail" as const,
+            error: reason,
+            txHash: hash,
+          };
+        }
+        if (!receiptOk && runAdvanced) {
+          console.warn(
+            `[agentKeeper] agent ${i} receipt status=${String(receipt.status)} but runCount advanced — treating as success`,
+            hash
+          );
+        }
+
+        return {
+          kind: "ok" as const,
+          hash,
+          snapshot,
+          fresh,
+          postAgent,
+          newCount:
+            postAgent.runCount > fresh.runCount
+              ? postAgent.runCount
+              : fresh.runCount + BigInt(1),
+        };
       });
 
-      const receipt = await client.waitForTransactionReceipt({
-        hash,
-        timeout: 90_000,
-        confirmations: 1,
-      });
-      if (receipt.status !== "success") {
+      if (locked.kind === "skip") {
         results.push({
           agentId: String(i),
           ok: false,
-          error: "runTick receipt not successful",
+          skipped: locked.skipped,
+        });
+        continue;
+      }
+      if (locked.kind === "fail") {
+        results.push({
+          agentId: String(i),
+          ok: false,
+          error: locked.error,
+          txHash: locked.txHash,
         });
         continue;
       }
 
-      const newCount = agent.runCount + BigInt(1);
+      const { hash, snapshot, newCount, fresh } = locked;
       const died =
-        agent.maxRuns > BigInt(0) && newCount >= agent.maxRuns;
+        fresh.maxRuns > BigInt(0) && newCount >= fresh.maxRuns;
+      const digest = keccak256(
+        stringToBytes(
+          JSON.stringify({
+            kind: snapshot.kind,
+            target: snapshot.target,
+            summary: snapshot.summary,
+            highlights: snapshot.highlights,
+            fetchedAt: snapshot.fetchedAt,
+            agentId: String(i),
+            keeper: true,
+          })
+        )
+      );
       cacheKeeperTick({
         agentId: String(i),
         runCount: newCount.toString(),
@@ -472,9 +671,9 @@ export async function runDueAgentTicks(opts?: {
 
       // Await notify so durable prefs + send finish in this request
       const telegram = await notifyAgentTick({
-        owner: agent.owner,
+        owner: fresh.owner,
         agentId: String(i),
-        agentName: agent.name,
+        agentName: fresh.name,
         runCount: newCount.toString(),
         summary: snapshot.summary,
         kindLabel: snapshot.kindLabel,
@@ -491,7 +690,7 @@ export async function runDueAgentTicks(opts?: {
         ok: true,
         txHash: hash,
         runCount: newCount.toString(),
-        agentName: agent.name,
+        agentName: fresh.name,
         kindLabel: snapshot.kindLabel,
         target: snapshot.target,
         died,
