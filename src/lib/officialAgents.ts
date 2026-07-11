@@ -86,7 +86,78 @@ const StorageRefComponents = [
   { name: "keyRef", type: "string" },
 ] as const;
 
+/** Shared SovereignAgentParams components (factory + harness). */
+export const sovereignParamsComponents = [
+  { name: "executor", type: "address" },
+  { name: "ttl", type: "uint256" },
+  { name: "userPublicKey", type: "bytes" },
+  { name: "pollIntervalBlocks", type: "uint64" },
+  { name: "maxPollBlock", type: "uint64" },
+  { name: "taskIdMarker", type: "string" },
+  { name: "deliveryTarget", type: "address" },
+  { name: "deliverySelector", type: "bytes4" },
+  { name: "deliveryGasLimit", type: "uint256" },
+  { name: "deliveryMaxFeePerGas", type: "uint256" },
+  { name: "deliveryMaxPriorityFeePerGas", type: "uint256" },
+  { name: "cliType", type: "uint16" },
+  { name: "prompt", type: "string" },
+  { name: "encryptedSecrets", type: "bytes" },
+  {
+    name: "convoHistory",
+    type: "tuple",
+    components: [...StorageRefComponents],
+  },
+  {
+    name: "output",
+    type: "tuple",
+    components: [...StorageRefComponents],
+  },
+  {
+    name: "skills",
+    type: "tuple[]",
+    components: [...StorageRefComponents],
+  },
+  {
+    name: "systemPrompt",
+    type: "tuple",
+    components: [...StorageRefComponents],
+  },
+  { name: "model", type: "string" },
+  { name: "tools", type: "string[]" },
+  { name: "maxTurns", type: "uint16" },
+  { name: "maxTokens", type: "uint32" },
+  { name: "rpcUrls", type: "string" },
+] as const;
+
+export const sovereignScheduleComponents = [
+  { name: "schedulerGas", type: "uint32" },
+  { name: "frequency", type: "uint32" },
+  { name: "schedulerTtl", type: "uint32" },
+  { name: "maxFeePerGas", type: "uint256" },
+  { name: "maxPriorityFeePerGas", type: "uint256" },
+  { name: "value", type: "uint256" },
+] as const;
+
+export const sovereignRollingComponents = [
+  { name: "windowNumCalls", type: "uint32" },
+  { name: "rolloverThresholdBps", type: "uint16" },
+  { name: "rolloverRetryEveryCalls", type: "uint16" },
+] as const;
+
 export const sovereignFactoryAbi = [
+  {
+    name: "predictHarness",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "userSalt", type: "bytes32" },
+    ],
+    outputs: [
+      { name: "harness", type: "address" },
+      { name: "childSalt", type: "bytes32" },
+    ],
+  },
   {
     name: "predictCompressedHarness",
     type: "function",
@@ -102,6 +173,13 @@ export const sovereignFactoryAbi = [
     ],
   },
   {
+    name: "deployHarness",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "userSalt", type: "bytes32" }],
+    outputs: [{ name: "harness", type: "address" }],
+  },
+  {
     name: "launchSovereignCompressed",
     type: "function",
     stateMutability: "payable",
@@ -113,59 +191,12 @@ export const sovereignFactoryAbi = [
       {
         name: "params",
         type: "tuple",
-        components: [
-          { name: "executor", type: "address" },
-          { name: "ttl", type: "uint256" },
-          { name: "userPublicKey", type: "bytes" },
-          { name: "pollIntervalBlocks", type: "uint64" },
-          { name: "maxPollBlock", type: "uint64" },
-          { name: "taskIdMarker", type: "string" },
-          { name: "deliveryTarget", type: "address" },
-          { name: "deliverySelector", type: "bytes4" },
-          { name: "deliveryGasLimit", type: "uint256" },
-          { name: "deliveryMaxFeePerGas", type: "uint256" },
-          { name: "deliveryMaxPriorityFeePerGas", type: "uint256" },
-          { name: "cliType", type: "uint16" },
-          { name: "prompt", type: "string" },
-          { name: "encryptedSecrets", type: "bytes" },
-          {
-            name: "convoHistory",
-            type: "tuple",
-            components: [...StorageRefComponents],
-          },
-          {
-            name: "output",
-            type: "tuple",
-            components: [...StorageRefComponents],
-          },
-          {
-            name: "skills",
-            type: "tuple[]",
-            components: [...StorageRefComponents],
-          },
-          {
-            name: "systemPrompt",
-            type: "tuple",
-            components: [...StorageRefComponents],
-          },
-          { name: "model", type: "string" },
-          { name: "tools", type: "string[]" },
-          { name: "maxTurns", type: "uint16" },
-          { name: "maxTokens", type: "uint32" },
-          { name: "rpcUrls", type: "string" },
-        ],
+        components: [...sovereignParamsComponents],
       },
       {
         name: "schedule",
         type: "tuple",
-        components: [
-          { name: "schedulerGas", type: "uint32" },
-          { name: "frequency", type: "uint32" },
-          { name: "schedulerTtl", type: "uint32" },
-          { name: "maxFeePerGas", type: "uint256" },
-          { name: "maxPriorityFeePerGas", type: "uint256" },
-          { name: "value", type: "uint256" },
-        ],
+        components: [...sovereignScheduleComponents],
       },
       { name: "schedulerLockDuration", type: "uint256" },
       { name: "schedulerFunding", type: "uint256" },
@@ -176,6 +207,48 @@ export const sovereignFactoryAbi = [
       { name: "dkmsPaymentAddress", type: "address" },
       { name: "schedulerCallId", type: "uint256" },
     ],
+  },
+] as const;
+
+/** Child harness deployed by SovereignAgentFactory */
+export const sovereignHarnessAbi = [
+  {
+    name: "configureFundAndStart",
+    type: "function",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [...sovereignParamsComponents],
+      },
+      {
+        name: "schedule",
+        type: "tuple",
+        components: [...sovereignScheduleComponents],
+      },
+      {
+        name: "rolling",
+        type: "tuple",
+        components: [...sovereignRollingComponents],
+      },
+      { name: "schedulerLockDuration", type: "uint256" },
+    ],
+    outputs: [{ name: "schedulerCallId", type: "uint256" }],
+  },
+  {
+    name: "owner",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
+    name: "configured",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "bool" }],
   },
 ] as const;
 
@@ -310,7 +383,24 @@ export function encryptSecretsToExecutor(
   return bytesToHex(encrypted instanceof Uint8Array ? encrypted : new Uint8Array(encrypted));
 }
 
+/** Two-step path: harness owned by user EOA (recommended). */
 export async function predictSovereignHarness(
+  owner: Address,
+  userSalt: Hex,
+  client?: PublicClient
+): Promise<Address> {
+  const c = client || getRitualReadClient();
+  const [harness] = (await c.readContract({
+    address: SOVEREIGN_FACTORY,
+    abi: sovereignFactoryAbi,
+    functionName: "predictHarness",
+    args: [owner, userSalt],
+  })) as [Address, Hex];
+  return harness;
+}
+
+/** Compressed path: harness owned via factory intermediate salt. */
+export async function predictSovereignCompressedHarness(
   owner: Address,
   userSalt: Hex,
   client?: PublicClient
@@ -357,25 +447,42 @@ export type SovereignLaunchParams = {
   frequency?: number;
 };
 
-export type BuiltSovereignLaunch = {
+export type BuiltSovereignTwoStep = {
   userSalt: Hex;
   harness: Address;
   executor: TeeExecutor;
-  value: bigint;
-  args: readonly unknown[];
-  gasLimit: bigint;
-  factory: Address;
+  /** Funding for configureFundAndStart (RitualWallet deposit on harness) */
+  configureValue: bigint;
+  model: string;
+  params: Record<string, unknown>;
+  schedule: Record<string, unknown>;
+  rolling: {
+    windowNumCalls: number;
+    rolloverThresholdBps: number;
+    rolloverRetryEveryCalls: number;
+  };
+  schedulerLockDuration: bigint;
+  gasDeploy: bigint;
+  gasConfigure: bigint;
 };
 
-export async function buildSovereignCompressedLaunch(
+/**
+ * Build two-step Sovereign launch (more reliable than compressed):
+ * 1) factory.deployHarness(userSalt)
+ * 2) harness.configureFundAndStart{value}(params, schedule, rolling, lock)
+ *
+ * Avoids factory-inline DKMS extraction (common compressed-path revert).
+ */
+export async function buildSovereignTwoStepLaunch(
   p: SovereignLaunchParams,
   client?: PublicClient
-): Promise<BuiltSovereignLaunch> {
+): Promise<BuiltSovereignTwoStep> {
   const c = client || getRitualReadClient();
   const executor = await findHealthyExecutor(c);
   const userSalt = makeUserSalt(
     `rite-sov:${p.owner.toLowerCase()}:${p.name}:${Date.now()}`
   );
+  // Two-step uses predictHarness(owner, salt) — NOT compressed predict
   const harness = await predictSovereignHarness(p.owner, userSalt, c);
 
   const useRitual = p.useRitualLlm !== false && !p.anthropicKey;
@@ -408,10 +515,17 @@ export async function buildSovereignCompressedLaunch(
       ? CLI_TYPE.ZEROCLAW
       : CLI_TYPE.CRUSH);
 
-  const dkmsFunding = parseEther(p.dkmsFundingRit || "0");
-  const schedulerFunding = parseEther(p.schedulerFundingRit || "5");
-  const windowNumCalls = p.windowNumCalls ?? 5;
+  // Keep lifespan safely under Scheduler MAX_LIFESPAN (10_000):
+  // frequency * windowNumCalls <= 10000
+  const windowNumCalls = p.windowNumCalls ?? 3;
   const frequency = p.frequency ?? 2000;
+  if (frequency * windowNumCalls > 10_000) {
+    throw new Error(
+      `Invalid schedule: frequency×window (${frequency}×${windowNumCalls}) exceeds 10000 block lifespan`
+    );
+  }
+
+  const schedulerFunding = parseEther(p.schedulerFundingRit || "2");
 
   const params = {
     executor: executor.teeAddress,
@@ -423,8 +537,8 @@ export async function buildSovereignCompressedLaunch(
     deliveryTarget: harness,
     deliverySelector: SOVEREIGN_DELIVERY_SELECTOR,
     deliveryGasLimit: BigInt(3_000_000),
-    deliveryMaxFeePerGas: BigInt(1_000_000_000),
-    deliveryMaxPriorityFeePerGas: BigInt(100_000_000),
+    deliveryMaxFeePerGas: BigInt(20_000_000_000),
+    deliveryMaxPriorityFeePerGas: BigInt(1_000_000_000),
     cliType,
     prompt: p.prompt || `You are ${p.name}, a Ritual sovereign agent for Rite.`,
     encryptedSecrets,
@@ -439,36 +553,83 @@ export async function buildSovereignCompressedLaunch(
     rpcUrls: JSON.stringify({ ritual: RPC_URL }),
   };
 
+  // schedulerGas is gas for each scheduled wake callback — keep moderate
   const schedule = {
-    schedulerGas: 3_000_000,
+    schedulerGas: 1_500_000,
     frequency,
     schedulerTtl: 500,
-    maxFeePerGas: BigInt(1_000_000_000),
-    maxPriorityFeePerGas: BigInt(100_000_000),
+    maxFeePerGas: BigInt(20_000_000_000),
+    maxPriorityFeePerGas: BigInt(1_000_000_000),
     value: BigInt(0),
   };
 
-  const schedulerLockDuration = BigInt(100_000);
+  const rolling = {
+    windowNumCalls,
+    rolloverThresholdBps: 5000,
+    rolloverRetryEveryCalls: 1,
+  };
 
   return {
     userSalt,
     harness,
     executor,
-    value: dkmsFunding + schedulerFunding,
-    gasLimit: BigInt(5_000_000),
-    factory: SOVEREIGN_FACTORY,
-    args: [
-      userSalt,
-      executor.teeAddress,
-      BigInt(300), // dkmsTtl
-      dkmsFunding,
-      params,
-      schedule,
-      schedulerLockDuration,
-      schedulerFunding,
-      windowNumCalls,
-    ],
+    configureValue: schedulerFunding,
+    model,
+    params,
+    schedule,
+    rolling,
+    schedulerLockDuration: BigInt(100_000),
+    gasDeploy: BigInt(1_000_000),
+    gasConfigure: BigInt(4_000_000),
   };
+}
+
+/** @deprecated prefer buildSovereignTwoStepLaunch — kept for tests */
+export async function buildSovereignCompressedLaunch(
+  p: SovereignLaunchParams,
+  client?: PublicClient
+) {
+  const two = await buildSovereignTwoStepLaunch(p, client);
+  return {
+    userSalt: two.userSalt,
+    harness: two.harness,
+    executor: two.executor,
+    value: two.configureValue,
+    gasLimit: two.gasConfigure,
+    factory: SOVEREIGN_FACTORY,
+    args: [] as unknown[],
+    twoStep: two,
+  };
+}
+
+/** Decode common factory/harness revert strings for user reports. */
+export function explainSovereignRevert(raw: string): string {
+  const t = raw || "";
+  if (/InvalidDeliveryTarget/i.test(t)) {
+    return "Harness address mismatch — refresh and try again (delivery target bug).";
+  }
+  if (/InvalidValue/i.test(t)) {
+    return "msg.value must equal funding total. Check Scheduler funding field.";
+  }
+  if (/InvalidDkmsOutput|DkmsFunding/i.test(t)) {
+    return "DKMS derivation failed on this executor — try again (different TEE node).";
+  }
+  if (/ScheduleLifespanExceeded|lifespan/i.test(t)) {
+    return "Schedule lifespan too long (frequency × window > 10000 blocks).";
+  }
+  if (/AlreadyRunning|already configured|configured/i.test(t)) {
+    return "This harness is already configured. Use a new agent name.";
+  }
+  if (/insufficient funds|exceeds the balance/i.test(t)) {
+    return "Not enough RIT in wallet for funding + gas.";
+  }
+  if (/out of gas|OutOfGas/i.test(t)) {
+    return "Transaction ran out of gas — retry (we use higher limits now).";
+  }
+  if (/execution reverted/i.test(t) && t.length < 80) {
+    return "On-chain revert. Ensure ≥2 RIT for scheduler funding + gas, then retry.";
+  }
+  return t.slice(0, 280);
 }
 
 export type PersistentLaunchParams = {

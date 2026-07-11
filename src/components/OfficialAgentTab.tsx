@@ -16,9 +16,12 @@ import {
 } from "@/lib/ritual";
 import {
   buildPersistentCompressedLaunch,
-  buildSovereignCompressedLaunch,
+  buildSovereignTwoStepLaunch,
+  explainSovereignRevert,
   PERSISTENT_FACTORY,
   SOVEREIGN_FACTORY,
+  sovereignFactoryAbi,
+  sovereignHarnessAbi,
   type OfficialKind,
 } from "@/lib/officialAgents";
 import {
@@ -58,7 +61,7 @@ export function OfficialAgentTab({ mode }: Props) {
   const [llmKey, setLlmKey] = useState("");
   const [hfToken, setHfToken] = useState("");
   const [hfRepoId, setHfRepoId] = useState("");
-  const [schedulerFunding, setSchedulerFunding] = useState("5");
+  const [schedulerFunding, setSchedulerFunding] = useState("2");
   const [dkmsFunding, setDkmsFunding] = useState("0");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -129,7 +132,8 @@ export function OfficialAgentTab({ mode }: Props) {
       );
 
       if (kind === "sovereign") {
-        const built = await buildSovereignCompressedLaunch({
+        // Two-step: deployHarness → configureFundAndStart (avoids compressed DKMS reverts)
+        const built = await buildSovereignTwoStepLaunch({
           owner: address,
           name: name.trim(),
           prompt: prompt.trim(),
@@ -140,33 +144,121 @@ export function OfficialAgentTab({ mode }: Props) {
           dkmsFundingRit: dkmsFunding,
         });
 
+        if (publicClient) {
+          const bal = await publicClient.getBalance({ address });
+          const need = built.configureValue + parseEther("0.05"); // funding + gas buffer
+          if (bal < need) {
+            throw new Error(
+              `Need ~${formatEther(need)} RIT (funding ${formatEther(built.configureValue)} + gas). Wallet has ${formatEther(bal)} RIT.`
+            );
+          }
+        }
+
         setMsg(
-          `Confirm launch in wallet · harness ${built.harness.slice(0, 10)}… · total ${formatEther(built.value)} RIT`
+          `Step 1/2 · Confirm deployHarness · child ${built.harness.slice(0, 10)}…`
         );
 
-        const hash = await walletClient.writeContract({
+        // Preflight deploy (no value)
+        if (publicClient) {
+          try {
+            await publicClient.simulateContract({
+              address: SOVEREIGN_FACTORY,
+              abi: sovereignFactoryAbi,
+              functionName: "deployHarness",
+              args: [built.userSalt],
+              account: address,
+              gas: built.gasDeploy,
+            });
+          } catch (simErr: unknown) {
+            const raw =
+              simErr instanceof Error ? simErr.message : String(simErr);
+            throw new Error(explainSovereignRevert(raw));
+          }
+        }
+
+        const deployHash = await walletClient.writeContract({
           chain: ritualChain,
           account: address,
           address: SOVEREIGN_FACTORY,
-          abi: (
-            await import("@/lib/officialAgents")
-          ).sovereignFactoryAbi,
-          functionName: "launchSovereignCompressed",
-          args: built.args as never,
-          value: built.value,
-          gas: built.gasLimit,
-          maxFeePerGas: BigInt(2_000_000_000),
-          maxPriorityFeePerGas: BigInt(100_000_000),
+          abi: sovereignFactoryAbi,
+          functionName: "deployHarness",
+          args: [built.userSalt],
+          gas: built.gasDeploy,
+          maxFeePerGas: BigInt(20_000_000_000),
+          maxPriorityFeePerGas: BigInt(1_000_000_000),
         });
 
-        setMsg(`Launch sent ${hash.slice(0, 12)}… waiting for confirmation`);
+        setMsg(`Step 1/2 sent ${deployHash.slice(0, 12)}… waiting…`);
         if (publicClient) {
-          const receipt = await publicClient.waitForTransactionReceipt({
-            hash,
+          const r1 = await publicClient.waitForTransactionReceipt({
+            hash: deployHash,
             timeout: 180_000,
           });
-          if (receipt.status !== "success") {
-            throw new Error("Launch transaction reverted on-chain");
+          if (r1.status !== "success") {
+            throw new Error(
+              "deployHarness reverted — try a new agent name (salt may be taken)."
+            );
+          }
+        }
+
+        setMsg(
+          `Step 2/2 · Confirm configure + fund ${formatEther(built.configureValue)} RIT`
+        );
+
+        if (publicClient) {
+          try {
+            await publicClient.simulateContract({
+              address: built.harness,
+              abi: sovereignHarnessAbi,
+              functionName: "configureFundAndStart",
+              args: [
+                built.params as never,
+                built.schedule as never,
+                built.rolling as never,
+                built.schedulerLockDuration,
+              ],
+              account: address,
+              value: built.configureValue,
+              gas: built.gasConfigure,
+            });
+          } catch (simErr: unknown) {
+            const raw =
+              simErr instanceof Error ? simErr.message : String(simErr);
+            throw new Error(
+              explainSovereignRevert(raw) +
+                " (harness deployed — re-try step 2 only if configure failed)"
+            );
+          }
+        }
+
+        const cfgHash = await walletClient.writeContract({
+          chain: ritualChain,
+          account: address,
+          address: built.harness,
+          abi: sovereignHarnessAbi,
+          functionName: "configureFundAndStart",
+          args: [
+            built.params as never,
+            built.schedule as never,
+            built.rolling as never,
+            built.schedulerLockDuration,
+          ],
+          value: built.configureValue,
+          gas: built.gasConfigure,
+          maxFeePerGas: BigInt(20_000_000_000),
+          maxPriorityFeePerGas: BigInt(1_000_000_000),
+        });
+
+        setMsg(`Step 2/2 sent ${cfgHash.slice(0, 12)}… waiting…`);
+        if (publicClient) {
+          const r2 = await publicClient.waitForTransactionReceipt({
+            hash: cfgHash,
+            timeout: 180_000,
+          });
+          if (r2.status !== "success") {
+            throw new Error(
+              "configureFundAndStart reverted on-chain. Harness exists but is not armed — check funding and try again with a new name if stuck."
+            );
           }
         }
 
@@ -176,21 +268,19 @@ export function OfficialAgentTab({ mode }: Props) {
           owner: address,
           childAddress: built.harness,
           userSalt: built.userSalt,
-          createTx: hash,
+          createTx: cfgHash,
           createdAt: Date.now(),
           prompt: prompt.trim(),
-          model:
-            model.trim() ||
-            (useRitualLlm ? "zai-org/GLM-4.7-FP8" : "custom"),
+          model: built.model,
           executor: built.executor.teeAddress,
-          status: "launched · Phase 2 via harness callback",
+          status: "armed · scheduler will call 0x080C",
         });
         toast.success(
           "Official Sovereign launched",
           `Harness ${built.harness.slice(0, 10)}…`
         );
         setMsg(
-          `Sovereign harness deployed · ${built.harness}\nTx ${hash}\nScheduler will invoke 0x080C (Phase 1+2). Open My Agents → Ritual AI.`
+          `Sovereign ready · harness ${built.harness}\nDeploy tx ${deployHash}\nConfigure tx ${cfgHash}\nScheduler will invoke official 0x080C. Open My Agents → Ritual AI.`
         );
       } else {
         const built = await buildPersistentCompressedLaunch({
@@ -219,8 +309,8 @@ export function OfficialAgentTab({ mode }: Props) {
           args: built.args as never,
           value: built.value,
           gas: built.gasLimit,
-          maxFeePerGas: BigInt(2_000_000_000),
-          maxPriorityFeePerGas: BigInt(100_000_000),
+          maxFeePerGas: BigInt(20_000_000_000),
+          maxPriorityFeePerGas: BigInt(1_000_000_000),
         });
 
         setMsg(`Launch sent ${hash.slice(0, 12)}… waiting for confirmation`);
@@ -230,7 +320,9 @@ export function OfficialAgentTab({ mode }: Props) {
             timeout: 180_000,
           });
           if (receipt.status !== "success") {
-            throw new Error("Launch transaction reverted on-chain");
+            throw new Error(
+              "Persistent launch reverted on-chain. Check LLM key, HF repo, and DKMS funding."
+            );
           }
         }
 
@@ -257,6 +349,8 @@ export function OfficialAgentTab({ mode }: Props) {
 
       refreshList();
     } catch (e: unknown) {
+      const raw = e instanceof Error ? e.message : String(e);
+      const friendly = explainSovereignRevert(raw);
       const report = buildErrorReport(e, {
         where:
           kind === "sovereign"
@@ -264,7 +358,10 @@ export function OfficialAgentTab({ mode }: Props) {
             : "official.persistent.launch",
         chainId,
         wallet: address,
+        userMessage: friendly,
       });
+      // Prefer explained detail for support
+      report.detail = (report.detail + " | " + raw).slice(0, 600);
       rememberErrorReport(report);
       if (
         isUserRejection(report.detail) ||
@@ -518,17 +615,19 @@ export function OfficialAgentTab({ mode }: Props) {
 
           <div className="rounded-xl border border-violet-400/25 bg-black/30 p-3 text-sm">
             <div className="flex justify-between text-white/70">
-              <span>Total from wallet (factory msg.value)</span>
+              <span>
+                {kind === "sovereign"
+                  ? "Configure funding (step 2)"
+                  : "Total factory value"}
+              </span>
               <span className="font-semibold text-violet-200">
                 {totalFundingLabel} RIT
               </span>
             </div>
             <p className="mt-1 text-[10px] text-white/35">
-              Plus gas. Factories:{" "}
               {kind === "sovereign"
-                ? SOVEREIGN_FACTORY.slice(0, 10)
-                : PERSISTENT_FACTORY.slice(0, 10)}
-              …
+                ? "Sovereign uses 2 wallet confirms: deploy harness, then fund+arm. Plus gas."
+                : "Plus gas. Factory: " + PERSISTENT_FACTORY.slice(0, 10) + "…"}
             </p>
           </div>
 
@@ -540,7 +639,7 @@ export function OfficialAgentTab({ mode }: Props) {
           >
             {busy
               ? "Launching…"
-              : `Launch official ${kind === "sovereign" ? "Sovereign" : "Persistent"} · ${totalFundingLabel} RIT`}
+              : `Launch official ${kind === "sovereign" ? "Sovereign (2 steps)" : "Persistent"} · ${totalFundingLabel} RIT + gas`}
           </button>
         </div>
       )}
