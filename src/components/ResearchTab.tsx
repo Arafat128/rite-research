@@ -364,12 +364,23 @@ export function ResearchTab() {
         researcher: opts.researcher,
         resultHash: opts.resultHash,
         sealedReport: opts.sealedReport,
+        prompt: opts.prompt.slice(0, 500),
         ...sig,
       }),
     });
-    const data = (await res.json()) as { error?: string; report?: string };
+    const data = (await res.json()) as {
+      error?: string;
+      report?: string;
+      telegram?: { sent?: boolean; reason?: string; parts?: number };
+    };
     if (!res.ok || !data.report) {
       throw new Error(data.error || "Could not reveal report after settle");
+    }
+    if (data.telegram?.sent) {
+      toast.success(
+        "Telegram DM sent",
+        "Research report delivered to your linked chat"
+      );
     }
     return data.report;
   }

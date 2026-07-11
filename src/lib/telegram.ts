@@ -166,13 +166,14 @@ export function formatTickTelegramMessage(p: TickNotifyPayload): string {
     .join(" · ");
 
   const lines: string[] = [
-    `<b>Rite agent tick</b>`,
+    `<b>Rite · Agent tick</b>`,
+    `<i>Type: Data agent · scheduled stream snapshot (not a research report)</i>`,
     ``,
     `Agent <b>#${escapeHtml(String(p.agentId))}</b>${
       p.agentName ? ` · ${escapeHtml(p.agentName)}` : ""
     }`,
   ];
-  if (stream) lines.push(`Stream: ${escapeHtml(stream)}`);
+  if (stream) lines.push(`Data stream: <b>${escapeHtml(stream)}</b>`);
   lines.push(
     `Tick <b>#${escapeHtml(String(p.runCount))}</b>${
       p.died ? " · <b>DIED</b> (sovereign complete)" : ""
@@ -257,6 +258,195 @@ export async function notifyAgentTick(
     return { sent: true };
   } catch (e) {
     console.warn("[telegram] send failed", e);
+    return {
+      sent: false,
+      reason: e instanceof Error ? e.message.slice(0, 120) : "send_failed",
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Research report DMs (after settle + reveal)
+// ---------------------------------------------------------------------------
+
+export type ResearchNotifyPayload = {
+  owner: string;
+  researchId: string;
+  /** User prompt (optional, truncated in DM) */
+  prompt?: string;
+  report: string;
+  resultHash?: string;
+};
+
+/** Avoid double-DM if reveal is called twice for the same id (warm instance). */
+const gTg = globalThis as typeof globalThis & {
+  __riteTgResearchSent?: Map<string, number>;
+};
+
+function researchAlreadySent(researchId: string): boolean {
+  if (!gTg.__riteTgResearchSent) gTg.__riteTgResearchSent = new Map();
+  const at = gTg.__riteTgResearchSent.get(researchId);
+  if (at && Date.now() - at < 24 * 60 * 60 * 1000) return true;
+  return false;
+}
+
+function markResearchSent(researchId: string): void {
+  if (!gTg.__riteTgResearchSent) gTg.__riteTgResearchSent = new Map();
+  gTg.__riteTgResearchSent.set(researchId, Date.now());
+  // prune old
+  if (gTg.__riteTgResearchSent.size > 500) {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    Array.from(gTg.__riteTgResearchSent.entries()).forEach(([k, v]) => {
+      if (v < cutoff) gTg.__riteTgResearchSent!.delete(k);
+    });
+  }
+}
+
+/** Light markdown → Telegram HTML (safe subset). */
+function mdLineToTelegramHtml(line: string): string {
+  const t = line.trimEnd();
+  if (!t.trim()) return "";
+  // skip pure table separators
+  if (/^\s*\|?[\s|:\-]+\|?\s*$/.test(t) && t.includes("-")) return "";
+
+  const heading = t.match(/^#{1,4}\s+(.+)$/);
+  if (heading) {
+    return `<b>${escapeHtml(heading[1].trim())}</b>`;
+  }
+
+  // strip leading list markers for cleaner DM
+  const body = t.replace(/^[-*+]\s+/, "• ").replace(/^\d+\.\s+/, (m) => m);
+
+  // [label](url)
+  const withLinks: string[] = [];
+  const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  let m: RegExpExecArray | null;
+  let last = 0;
+  while ((m = re.exec(body)) !== null) {
+    withLinks.push(formatMdInline(body.slice(last, m.index)));
+    withLinks.push(tgLink(m[2], m[1]));
+    last = m.index + m[0].length;
+  }
+  withLinks.push(formatMdInline(body.slice(last)));
+  return withLinks.join("");
+}
+
+function formatMdInline(s: string): string {
+  // **bold**
+  const parts = s.split(/(\*\*[^*]+\*\*)/g);
+  return parts
+    .map((p) => {
+      const bm = p.match(/^\*\*(.+)\*\*$/);
+      if (bm) return `<b>${escapeHtml(bm[1])}</b>`;
+      return escapeHtml(p);
+    })
+    .join("");
+}
+
+/**
+ * Split report into Telegram-sized HTML chunks (≤ ~3500 body chars each).
+ */
+export function formatResearchTelegramMessages(
+  p: ResearchNotifyPayload
+): string[] {
+  const header = [
+    `<b>Rite · Research report</b>`,
+    `<i>Type: Pay-per-prompt research · full report (not an agent tick)</i>`,
+    ``,
+    `Research <b>#${escapeHtml(String(p.researchId))}</b>`,
+  ];
+  if (p.prompt?.trim()) {
+    header.push(
+      `Prompt: <i>${escapeHtml(p.prompt.trim().slice(0, 180))}${
+        p.prompt.trim().length > 180 ? "…" : ""
+      }</i>`
+    );
+  }
+  header.push(``, `<b>—— Report ——</b>`, ``);
+
+  const headerText = header.join("\n");
+  const raw = String(p.report || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/^\uFEFF/, "")
+    .trim();
+  // unwrap whole-doc fence if present
+  const fence = raw.match(/^```(?:markdown|md|gfm)?\s*\n([\s\S]*?)\n```\s*$/i);
+  const bodyMd = fence ? fence[1].trim() : raw;
+
+  const bodyLines = bodyMd.split("\n").map(mdLineToTelegramHtml);
+  const body = bodyLines.filter((l, idx, arr) => {
+    // collapse runs of empty lines
+    if (l === "" && arr[idx - 1] === "") return false;
+    return true;
+  });
+
+  const chunks: string[] = [];
+  const maxBody = 3200;
+  let part = 0;
+  let buf: string[] = [];
+  let bufLen = 0;
+
+  const flush = () => {
+    if (!buf.length) return;
+    part += 1;
+    const prefix =
+      part === 1
+        ? headerText
+        : `<b>Rite · Research report</b> <i>(continued ${part})</i>\n` +
+          `Research <b>#${escapeHtml(String(p.researchId))}</b>\n\n`;
+    let msg = prefix + buf.join("\n");
+    if (msg.length > TG_MAX - 20) {
+      msg = msg.slice(0, TG_MAX - 40) + "\n…";
+    }
+    chunks.push(msg);
+    buf = [];
+    bufLen = 0;
+  };
+
+  for (const line of body) {
+    const add = (line.length || 1) + 1;
+    if (bufLen + add > maxBody && buf.length) flush();
+    buf.push(line);
+    bufLen += add;
+  }
+  flush();
+
+  if (chunks.length === 0) {
+    chunks.push(headerText + "<i>(empty report)</i>");
+  }
+  return chunks;
+}
+
+/**
+ * DM full research report after settle+reveal when Telegram is linked.
+ * Never throws to callers.
+ */
+export async function notifyResearchReport(
+  p: ResearchNotifyPayload
+): Promise<{ sent: boolean; reason?: string; parts?: number }> {
+  if (!telegramConfigured()) {
+    return { sent: false, reason: "telegram_not_configured" };
+  }
+  if (researchAlreadySent(p.researchId)) {
+    return { sent: false, reason: "already_sent" };
+  }
+  const pref = await resolveTelegramPref(p.owner);
+  if (!pref) return { sent: false, reason: "not_linked" };
+  if (!pref.enabled) return { sent: false, reason: "disabled" };
+
+  try {
+    const parts = formatResearchTelegramMessages(p);
+    for (const text of parts) {
+      await sendTelegramMessage(pref.chatId, text);
+      // small gap so Telegram order stays stable
+      if (parts.length > 1) {
+        await new Promise((r) => setTimeout(r, 350));
+      }
+    }
+    markResearchSent(p.researchId);
+    return { sent: true, parts: parts.length };
+  } catch (e) {
+    console.warn("[telegram] research send failed", e);
     return {
       sent: false,
       reason: e instanceof Error ? e.message.slice(0, 120) : "send_failed",

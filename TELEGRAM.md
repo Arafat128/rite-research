@@ -1,8 +1,13 @@
 # Telegram agent alerts — setup guide
 
-When an agent seals a tick (manual **Wake** or server **keeper**), Rite can **DM** you a short summary on Telegram.
+When Telegram is **linked** (Connect Telegram in the app), Rite DMs you:
 
-Flows (pay / settle / runTick) are unchanged. Messaging is **after** a successful seal only.
+| Type | When | Label in chat |
+|------|------|----------------|
+| **Agent tick** | After a sealed data-agent tick (Wake / auto-wake / keeper) | `Rite · Agent tick` · stream snapshot |
+| **Research report** | After research **settle + reveal** unlocks the report | `Rite · Research report` · full report |
+
+Flows (pay / settle / runTick) are unchanged. Messaging is **after** unlock/seal only.
 
 ---
 

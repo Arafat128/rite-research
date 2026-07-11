@@ -19,6 +19,7 @@ import {
   getCachedReport,
   unsealReport,
 } from "@/lib/researchSeal";
+import { notifyResearchReport } from "@/lib/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,6 +40,8 @@ type Body = {
   signature?: Hex;
   nonce?: string;
   expiry?: number;
+  /** Optional original prompt — used only for Telegram DM labeling */
+  prompt?: string;
 };
 
 type RecordTuple = {
@@ -156,17 +159,29 @@ export async function POST(req: NextRequest) {
     }
 
     // Prefer cache; else unseal client blob
+    let report: string | null = null;
     const cached = getCachedReport(id.toString());
     if (cached && cached.resultHash === body.resultHash.toLowerCase()) {
-      return NextResponse.json({
-        ok: true,
-        researchId: id.toString(),
-        report: cached.report,
-        resultHash: body.resultHash,
-      });
-    }
-
-    if (!body.sealedReport || typeof body.sealedReport !== "string") {
+      report = cached.report;
+    } else if (body.sealedReport && typeof body.sealedReport === "string") {
+      try {
+        report = unsealReport(id.toString(), body.sealedReport);
+        // Integrity: hash must match sealed result
+        const { keccak256, stringToBytes } = await import("viem");
+        const h = keccak256(stringToBytes(report));
+        if (h.toLowerCase() !== body.resultHash.toLowerCase()) {
+          return NextResponse.json(
+            { error: "Sealed report does not match resultHash" },
+            { status: 400 }
+          );
+        }
+      } catch {
+        return NextResponse.json(
+          { error: "Could not decrypt sealed report" },
+          { status: 400 }
+        );
+      }
+    } else {
       return NextResponse.json(
         {
           error:
@@ -176,29 +191,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    try {
-      const report = unsealReport(id.toString(), body.sealedReport);
-      // Integrity: hash must match sealed result
-      const { keccak256, stringToBytes } = await import("viem");
-      const h = keccak256(stringToBytes(report));
-      if (h.toLowerCase() !== body.resultHash.toLowerCase()) {
-        return NextResponse.json(
-          { error: "Sealed report does not match resultHash" },
-          { status: 400 }
-        );
-      }
-      return NextResponse.json({
-        ok: true,
-        researchId: id.toString(),
-        report,
-        resultHash: body.resultHash,
-      });
-    } catch {
-      return NextResponse.json(
-        { error: "Could not decrypt sealed report" },
-        { status: 400 }
-      );
-    }
+    // After unlock: DM research report if Telegram linked (same bot as agent ticks)
+    const telegram = await notifyResearchReport({
+      owner: body.researcher,
+      researchId: id.toString(),
+      prompt:
+        typeof body.prompt === "string" ? body.prompt.slice(0, 500) : undefined,
+      report,
+      resultHash: body.resultHash,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      researchId: id.toString(),
+      report,
+      resultHash: body.resultHash,
+      telegram,
+    });
   } catch (e: unknown) {
     console.error("[api/research/reveal]", e);
     return NextResponse.json(

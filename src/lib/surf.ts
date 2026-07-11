@@ -92,11 +92,19 @@ export async function runSurfResearch(prompt: string): Promise<SurfResearchResul
   const model = modelId();
   const url = `${baseUrl()}/responses`;
 
-  const system =
-    "Senior crypto research analyst. Clean GitHub-Flavored Markdown only. " +
-    "No code fences around the whole report. Use ## headings, **bold**, GFM tables " +
-    "(| col | with | --- | separator). Sections: Overview, Tokenomics, Catalysts, " +
-    "Risks (Risk | Severity | Why It Matters), Conclusion, Sources. Be concise and factual.";
+  // Adaptive outline — do NOT force Overview/Tokenomics/Catalysts/Risks/Conclusion
+  // for every prompt; many queries need a different structure.
+  const system = [
+    "You are a senior crypto research analyst.",
+    "Write clean GitHub-Flavored Markdown only. Do not wrap the entire report in a code fence.",
+    "Use ## headings, **bold**, lists, and GFM tables (| col | with | --- | separator rows) when tables help.",
+    "Structure the report to fit THIS user question — invent clear section headings that match the topic.",
+    "Do NOT force a fixed template (Overview / Tokenomics / Catalysts / Risks / Conclusion) on every report.",
+    "Include those classic sections only when they genuinely help; skip anything irrelevant.",
+    "Examples of alternate outlines: protocol design, competitive map, on-chain metrics, timeline,",
+    "regulatory notes, how-to / mechanics, narrative analysis, or a short Q&A — whatever answers the prompt best.",
+    "Be concise, factual, and specific. Prefer evidence over hype. End with Sources or Key references when you cite claims.",
+  ].join(" ");
 
   // Keep body minimal — extra fields can 400 on some Surf gateways
   const body: Record<string, unknown> = {
