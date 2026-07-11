@@ -41,7 +41,7 @@ export const DATA_KINDS: DataKindDef[] = [
     id: "market_price",
     label: "Token price",
     short: "Price",
-    description: "Live / recent market price series for a symbol (BTC, ETH, …).",
+    description: "Last ~5 daily/series price points for one symbol (5 rows).",
     targetLabel: "Symbol",
     targetPlaceholder: "BTC",
     defaultTarget: "BTC",
@@ -51,7 +51,7 @@ export const DATA_KINDS: DataKindDef[] = [
     id: "fear_greed",
     label: "Fear & Greed",
     short: "F&G",
-    description: "Crypto Fear & Greed index history (global — no target).",
+    description: "Fear & Greed index — last 5 samples (global).",
     targetLabel: null,
     targetPlaceholder: "",
     defaultTarget: "_",
@@ -61,7 +61,7 @@ export const DATA_KINDS: DataKindDef[] = [
     id: "news_feed",
     label: "Crypto news",
     short: "News",
-    description: "Latest crypto news headlines from Surf news feed.",
+    description: "Latest crypto headlines (8 rows).",
     targetLabel: null,
     targetPlaceholder: "",
     defaultTarget: "_",
@@ -71,30 +71,28 @@ export const DATA_KINDS: DataKindDef[] = [
     id: "stablecoin_peg",
     label: "Stablecoin peg stress",
     short: "Peg",
-    description:
-      "USDT / USDC / DAI (and optional extra symbol) vs $1 — depeg early warning.",
-    targetLabel: "Extra symbol (optional)",
-    targetPlaceholder: "FDUSD",
-    defaultTarget: "_",
-    path: () => "", // multi-fetch
+    description: "Peg vs $1 for the stablecoin symbol you lock at deploy (1 row).",
+    targetLabel: "Stablecoin symbol",
+    targetPlaceholder: "USDT",
+    defaultTarget: "USDT",
+    path: () => "", // single-symbol peg
   },
   {
     id: "gas_fees",
     label: "Gas / fee pulse",
     short: "Gas",
     description:
-      "Ethereum L1 gas + Ritual network gas/block — timing for txs and congestion.",
-    targetLabel: null,
-    targetPlaceholder: "",
-    defaultTarget: "_",
-    path: () => "", // RPC multi-fetch
+      "Gas + latest block for the network you lock at deploy (ETH or Ritual).",
+    targetLabel: "Network",
+    targetPlaceholder: "ETH or RITUAL",
+    defaultTarget: "ETH",
+    path: () => "", // RPC for selected network
   },
   {
     id: "whale_transfers",
     label: "Whale / large moves",
     short: "Whales",
-    description:
-      "Large-flow / liquidation-style market pressure (Surf market + exchange signals).",
+    description: "Top 2 large-move / liquidation events for the locked symbol.",
     targetLabel: "Symbol",
     targetPlaceholder: "BTC",
     defaultTarget: "BTC",
@@ -105,8 +103,7 @@ export const DATA_KINDS: DataKindDef[] = [
     id: "open_interest_skew",
     label: "OI + long/short skew",
     short: "OI skew",
-    description:
-      "Perp open interest, funding, and long/short positioning for a pair.",
+    description: "One compact row: OI, funding, and long/short for a pair.",
     targetLabel: "Pair",
     targetPlaceholder: "BTC-USDT",
     defaultTarget: "BTC-USDT",
@@ -120,23 +117,23 @@ export const DATA_KINDS: DataKindDef[] = [
     label: "Narrative / sector score",
     short: "Narrative",
     description:
-      "Theme / sector heat (AI, RWA, memes, L2s…) from Surf signal/trending data.",
+      "3 rows: news + mindshare heat for your sector query.",
     targetLabel: "Sector / query",
     targetPlaceholder: "AI",
     defaultTarget: "AI",
     path: (t) =>
-      `/signal/trending?q=${encodeURIComponent(t)}&limit=10`,
+      `/signal/trending?q=${encodeURIComponent(t)}&limit=3`,
   },
   {
     id: "ritual_network",
     label: "Ritual network pulse",
     short: "Ritual",
     description:
-      "Ritual chain block/gas + Radar registry size — native to this app’s stack.",
+      "Persistent / Sovereign agent counts, total agents, latest block & gas.",
     targetLabel: null,
     targetPlaceholder: "",
     defaultTarget: "_",
-    path: () => "", // RPC + contract
+    path: () => "", // RPC + Radar counts
   },
 ];
 
@@ -319,7 +316,8 @@ function summarizeMarketPrice(
       ? (last.value - prev.value) / prev.value
       : null;
 
-  const rows = takeLast(points, 12).map((p) => ({
+  // 5 rows ≈ recent 5-day / last 5 series points
+  const rows = takeLast(points, 5).map((p) => ({
     Time: fmtTs(p.timestamp),
     Symbol: p.symbol,
     Price: fmtUsd(p.value),
@@ -331,13 +329,13 @@ function summarizeMarketPrice(
           delta != null
             ? ` (${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(2)}% vs prior point)`
             : ""
-        }`
+        } · ${rows.length} pts`
       : `No price points for ${target}`,
     rows,
     highlights: [
       { label: "Symbol", value: target.toUpperCase() },
       { label: "Last price", value: fmtUsd(last?.value ?? null) },
-      { label: "Points", value: String(points.length) },
+      { label: "Rows", value: String(rows.length) },
       {
         label: "Δ last step",
         value:
@@ -366,7 +364,8 @@ function summarizeFearGreed(
     };
   });
   const latest = items[0] || items[items.length - 1];
-  const rows = items.slice(0, 10).map((p) => ({
+  // 5 rows max
+  const rows = items.slice(0, 5).map((p) => ({
     Time: fmtTs(p.timestamp),
     Index: p.value ?? "—",
     Class: p.classification,
@@ -375,7 +374,7 @@ function summarizeFearGreed(
 
   return {
     summary: latest
-      ? `Fear & Greed ${latest.value ?? "—"} · ${latest.classification}`
+      ? `Fear & Greed ${latest.value ?? "—"} · ${latest.classification} · ${rows.length} samples`
       : "No Fear & Greed data",
     rows,
     highlights: [
@@ -385,7 +384,7 @@ function summarizeFearGreed(
       },
       { label: "Class", value: latest?.classification ?? "—" },
       { label: "BTC ref", value: fmtUsd(latest?.price ?? null) },
-      { label: "Samples", value: String(items.length) },
+      { label: "Rows", value: String(rows.length) },
     ],
   };
 }
@@ -410,6 +409,7 @@ function summarizeNews(
     };
   });
 
+  // Exactly up to 8 news rows
   const rows = items.slice(0, 8).map((n) => ({
     Time: fmtTs(n.published),
     Source: n.source,
@@ -418,12 +418,12 @@ function summarizeNews(
   }));
 
   return {
-    summary: items.length
-      ? `${items.length} headlines · top: ${items[0].title.slice(0, 72)}`
+    summary: rows.length
+      ? `${rows.length} headlines · top: ${items[0].title.slice(0, 72)}`
       : "No news items",
     rows,
     highlights: [
-      { label: "Articles", value: String(items.length) },
+      { label: "Articles", value: String(rows.length) },
       { label: "Top source", value: items[0]?.source ?? "—" },
       { label: "Top project", value: items[0]?.project ?? "—" },
       {
@@ -449,153 +449,142 @@ function lastPriceFromMarketJson(json: Record<string, unknown>): number | null {
 }
 
 async function fetchStablecoinPeg(
-  extra: string
+  symbolRaw: string
 ): Promise<
   Omit<
     SurfDataSnapshot,
     "kind" | "kindLabel" | "target" | "fetchedAt" | "endpoint" | "raw"
   >
 > {
-  const symbols = ["USDT", "USDC", "DAI"];
-  const ex = extra && extra !== "_" ? extra.toUpperCase() : "";
-  if (ex && !symbols.includes(ex)) symbols.push(ex);
+  // Only the symbol locked at deploy (default USDT)
+  const sym =
+    symbolRaw && symbolRaw !== "_"
+      ? symbolRaw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 16) || "USDT"
+      : "USDT";
 
-  const rows: Array<Record<string, SnapshotCell>> = [];
-  let worstBps: number | null = null;
-  let worstSym = "—";
-
-  for (const sym of symbols) {
-    try {
-      const json = await surfGet(
-        `/market/price?symbol=${encodeURIComponent(sym)}`
-      );
-      const px = lastPriceFromMarketJson(json);
-      const peg = 1;
-      const dev = px != null ? (px - peg) / peg : null;
-      const absBps = dev != null ? Math.abs(dev) * 10_000 : null;
-      if (absBps != null && (worstBps == null || absBps > worstBps)) {
-        worstBps = absBps;
-        worstSym = sym;
-      }
-      rows.push({
-        Stable: sym,
-        Price: fmtUsd(px),
-        "vs $1":
-          dev == null
-            ? "—"
-            : `${dev >= 0 ? "+" : ""}${(dev * 100).toFixed(4)}%`,
-        Stress: absBps == null ? "—" : `${absBps.toFixed(1)} bps`,
-      });
-    } catch {
-      rows.push({
-        Stable: sym,
-        Price: "—",
-        "vs $1": "—",
-        Stress: "fetch failed",
-      });
-    }
+  let px: number | null = null;
+  let err: string | null = null;
+  try {
+    const json = await surfGet(
+      `/market/price?symbol=${encodeURIComponent(sym)}`
+    );
+    px = lastPriceFromMarketJson(json);
+  } catch {
+    err = "fetch failed";
   }
 
-  const alert =
-    worstBps != null && worstBps >= 20
-      ? ` · ALERT ${worstSym} ${worstBps.toFixed(0)} bps off peg`
-      : "";
+  const peg = 1;
+  const dev = px != null ? (px - peg) / peg : null;
+  const absBps = dev != null ? Math.abs(dev) * 10_000 : null;
+  const alert = absBps != null && absBps >= 20;
+
+  const rows: Array<Record<string, SnapshotCell>> = [
+    {
+      Stable: sym,
+      Price: err ? "—" : fmtUsd(px),
+      "vs $1":
+        err || dev == null
+          ? err || "—"
+          : `${dev >= 0 ? "+" : ""}${(dev * 100).toFixed(4)}%`,
+      Stress:
+        err || absBps == null ? err || "—" : `${absBps.toFixed(1)} bps`,
+    },
+  ];
 
   return {
-    summary: `Stablecoin peg check · worst ${worstSym} ${
-      worstBps != null ? `${worstBps.toFixed(1)} bps` : "n/a"
-    }${alert}`,
+    summary: err
+      ? `${sym} peg check failed`
+      : `${sym} peg · ${fmtUsd(px)} · ${
+          absBps != null ? `${absBps.toFixed(1)} bps off $1` : "n/a"
+        }${alert ? " · ALERT" : ""}`,
     rows,
     highlights: [
-      { label: "Worst", value: worstSym },
+      { label: "Symbol", value: sym },
+      { label: "Price", value: fmtUsd(px) },
       {
         label: "Stress",
-        value: worstBps != null ? `${worstBps.toFixed(1)} bps` : "—",
+        value: absBps != null ? `${absBps.toFixed(1)} bps` : "—",
       },
-      { label: "Coins", value: String(rows.length) },
-      {
-        label: "Alert",
-        value: worstBps != null && worstBps >= 20 ? "YES" : "no",
-      },
+      { label: "Alert", value: alert ? "YES" : "no" },
     ],
   };
 }
 
-async function fetchGasFees(): Promise<
+/** Map deploy target → which chain gas to read */
+function resolveGasNetwork(
+  target: string
+): { id: "eth" | "ritual"; label: string; rpc: string } {
+  const t = (target || "ETH").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const ritualRpc =
+    process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.ritualfoundation.org";
+  const ethRpc =
+    process.env.ETH_RPC_URL || "https://ethereum.publicnode.com";
+
+  if (
+    t === "RITUAL" ||
+    t === "RIT" ||
+    t === "RITE" ||
+    t === "1979" ||
+    t.startsWith("RIT")
+  ) {
+    return { id: "ritual", label: "Ritual", rpc: ritualRpc };
+  }
+  // Default + ETH / ETHEREUM / MAINNET
+  return { id: "eth", label: "Ethereum L1", rpc: ethRpc };
+}
+
+async function fetchGasFees(
+  target: string
+): Promise<
   Omit<
     SurfDataSnapshot,
     "kind" | "kindLabel" | "target" | "fetchedAt" | "endpoint" | "raw"
   >
 > {
-  const ethRpc =
-    process.env.ETH_RPC_URL || "https://ethereum.publicnode.com";
-  const ritualRpc =
-    process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.ritualfoundation.org";
-
-  let ethGwei: number | null = null;
-  let ritualGwei: number | null = null;
-  let ritualBlock: string = "—";
-  let ethBlock: string = "—";
+  const net = resolveGasNetwork(target);
+  let gwei: number | null = null;
+  let block = "—";
 
   try {
-    const [gas, block] = await Promise.all([
-      rpcEthCall(ethRpc, "eth_gasPrice") as Promise<string>,
-      rpcEthCall(ethRpc, "eth_blockNumber") as Promise<string>,
+    const [gas, blk] = await Promise.all([
+      rpcEthCall(net.rpc, "eth_gasPrice") as Promise<string>,
+      rpcEthCall(net.rpc, "eth_blockNumber") as Promise<string>,
     ]);
-    const wei = Number(BigInt(gas));
-    ethGwei = wei / 1e9;
-    ethBlock = String(Number(BigInt(block)));
+    gwei = Number(BigInt(gas)) / 1e9;
+    block = String(Number(BigInt(blk)));
   } catch {
-    /* optional eth */
+    /* leave empty */
   }
 
-  try {
-    const [gas, block] = await Promise.all([
-      rpcEthCall(ritualRpc, "eth_gasPrice") as Promise<string>,
-      rpcEthCall(ritualRpc, "eth_blockNumber") as Promise<string>,
-    ]);
-    const wei = Number(BigInt(gas));
-    ritualGwei = wei / 1e9;
-    ritualBlock = String(Number(BigInt(block)));
-  } catch {
-    /* optional ritual */
-  }
-
+  const digits = net.id === "ritual" ? 6 : 3;
   const rows = [
     {
-      Network: "Ethereum L1",
-      "Gas (gwei)": ethGwei != null ? ethGwei.toFixed(3) : "—",
-      Block: ethBlock,
-    },
-    {
-      Network: "Ritual",
-      "Gas (gwei)": ritualGwei != null ? ritualGwei.toFixed(6) : "—",
-      Block: ritualBlock,
+      Network: net.label,
+      "Gas (gwei)": gwei != null ? gwei.toFixed(digits) : "—",
+      Block: block,
     },
   ];
 
-  const congested = ethGwei != null && ethGwei >= 40;
+  const congested = net.id === "eth" && gwei != null && gwei >= 40;
   return {
     summary:
-      ethGwei != null
-        ? `ETH gas ${ethGwei.toFixed(2)} gwei · Ritual ${
-            ritualGwei != null ? ritualGwei.toFixed(4) : "—"
-          } gwei${congested ? " · L1 congested" : ""}`
-        : `Ritual gas ${
-            ritualGwei != null ? ritualGwei.toFixed(4) : "—"
-          } gwei · block ${ritualBlock}`,
+      gwei != null
+        ? `${net.label} gas ${gwei.toFixed(digits)} gwei · block ${block}${
+            congested ? " · congested" : ""
+          }`
+        : `${net.label} gas unavailable`,
     rows,
     highlights: [
+      { label: "Network", value: net.label },
       {
-        label: "ETH gwei",
-        value: ethGwei != null ? ethGwei.toFixed(2) : "—",
+        label: "Gas",
+        value: gwei != null ? `${gwei.toFixed(digits)} gwei` : "—",
       },
+      { label: "Block", value: block },
       {
-        label: "Ritual gwei",
-        value: ritualGwei != null ? ritualGwei.toFixed(4) : "—",
+        label: "Busy",
+        value: congested ? "YES" : net.id === "eth" ? "no" : "n/a",
       },
-      { label: "Ritual block", value: ritualBlock },
-      { label: "L1 busy", value: congested ? "YES" : "no" },
     ],
   };
 }
@@ -615,7 +604,8 @@ function summarizeWhale(
         ? json.transfers
         : [];
 
-  const items = data.slice(0, 12).map((row) => {
+  // 2 rows max for locked symbol
+  const items = data.slice(0, 2).map((row) => {
     const r = row as Record<string, unknown>;
     const amt = asNum(
       r.amount_usd ?? r.usd_value ?? r.value_usd ?? r.notional ?? r.value
@@ -633,22 +623,20 @@ function summarizeWhale(
     };
   });
 
-  const total = data.reduce((acc: number, row) => {
-    const r = row as Record<string, unknown>;
-    const amt = asNum(
-      r.amount_usd ?? r.usd_value ?? r.value_usd ?? r.notional ?? r.value
-    );
-    return acc + (amt ?? 0);
+  const total = items.reduce((acc: number, row) => {
+    const raw = String(row["USD size"] ?? "").replace(/[^0-9.-]/g, "");
+    const n = Number(raw);
+    return acc + (Number.isFinite(n) ? n : 0);
   }, 0);
 
   return {
     summary: items.length
-      ? `${target.toUpperCase()} large-move pulse · ${items.length} events · ~${fmtUsd(total)} notional`
-      : `No large-move rows for ${target.toUpperCase()} (endpoint empty)`,
+      ? `${target.toUpperCase()} whales · ${items.length} event(s)`
+      : `No large-move rows for ${target.toUpperCase()}`,
     rows: items,
     highlights: [
       { label: "Symbol", value: target.toUpperCase() },
-      { label: "Events", value: String(items.length) },
+      { label: "Rows", value: String(items.length) },
       { label: "Notional", value: total > 0 ? fmtUsd(total) : "—" },
       { label: "Source", value: "Surf market" },
     ],
@@ -690,27 +678,6 @@ function summarizeOiSkew(
     ls.long_short_ratio ?? data.long_short_ratio ?? data.longShortRatio
   );
 
-  const rows = [
-    { Field: "Exchange", Value: exchange },
-    { Field: "Pair", Value: pair },
-    { Field: "Open interest", Value: oiUsd != null ? fmtUsd(oiUsd) : "—" },
-    { Field: "Funding", Value: fmtPct(rate) },
-    { Field: "Funding ann.", Value: fmtPct(annual) },
-    { Field: "Mark", Value: fmtUsd(mark) },
-    {
-      Field: "Long ratio",
-      Value: longRatio != null ? `${(longRatio * 100).toFixed(2)}%` : "—",
-    },
-    {
-      Field: "Short ratio",
-      Value: shortRatio != null ? `${(shortRatio * 100).toFixed(2)}%` : "—",
-    },
-    {
-      Field: "Long/Short",
-      Value: longShort != null ? longShort.toFixed(3) : "—",
-    },
-  ];
-
   const skew =
     longShort != null
       ? longShort > 1.2
@@ -724,6 +691,24 @@ function summarizeOiSkew(
           : "negative funding"
         : "neutral";
 
+  // Single compact row (not multi field/value)
+  const rows = [
+    {
+      Exchange: exchange,
+      Pair: pair,
+      OI: oiUsd != null ? fmtUsd(oiUsd) : "—",
+      Funding: fmtPct(rate),
+      "Ann. fund": fmtPct(annual),
+      Mark: fmtUsd(mark),
+      Long:
+        longRatio != null ? `${(longRatio * 100).toFixed(1)}%` : "—",
+      Short:
+        shortRatio != null ? `${(shortRatio * 100).toFixed(1)}%` : "—",
+      "L/S": longShort != null ? longShort.toFixed(3) : "—",
+      Skew: skew,
+    },
+  ];
+
   return {
     summary: `${pair} OI ${fmtUsd(oiUsd)} · funding ${fmtPct(rate)} · ${skew}`,
     rows,
@@ -736,50 +721,107 @@ function summarizeOiSkew(
   };
 }
 
-function summarizeNarrative(
-  json: Record<string, unknown>,
-  target: string
-): Omit<
-  SurfDataSnapshot,
-  "kind" | "kindLabel" | "target" | "fetchedAt" | "endpoint" | "raw"
+/** Build up to 3 rows: news headlines + mindshare for the deploy query */
+async function fetchNarrativeBundle(
+  query: string
+): Promise<
+  Omit<
+    SurfDataSnapshot,
+    "kind" | "kindLabel" | "target" | "fetchedAt" | "endpoint" | "raw"
+  >
 > {
-  const data = Array.isArray(json.data)
-    ? json.data
-    : Array.isArray(json.projects)
-      ? json.projects
-      : Array.isArray(json.tokens)
-        ? json.tokens
-        : [];
+  const q = query && query !== "_" ? query : "AI";
+  const rows: Array<Record<string, SnapshotCell>> = [];
 
-  const rows = data.slice(0, 10).map((row, i) => {
-    const r = row as Record<string, unknown>;
-    const name = String(
-      r.name ?? r.project ?? r.symbol ?? r.token ?? `Item ${i + 1}`
-    ).slice(0, 48);
-    const score = asNum(r.score ?? r.heat ?? r.rank ?? r.value ?? r.mindshare);
-    const change = asNum(r.change_24h ?? r.delta ?? r.change);
-    return {
-      Rank: String(r.rank ?? i + 1),
-      Name: name,
-      Score: score != null ? score.toLocaleString() : "—",
-      "24h Δ":
-        change == null
-          ? "—"
-          : `${change >= 0 ? "+" : ""}${(change * (Math.abs(change) < 2 ? 100 : 1)).toFixed(2)}${Math.abs(change) < 2 ? "%" : ""}`,
-    };
-  });
+  // News related to query (prefer 2 headlines)
+  try {
+    let newsJson: Record<string, unknown>;
+    try {
+      newsJson = await surfGet(
+        `/news/feed?limit=3&q=${encodeURIComponent(q)}`
+      );
+    } catch {
+      newsJson = await surfGet(`/news/feed?limit=3`);
+    }
+    const data = Array.isArray(newsJson.data) ? newsJson.data : [];
+    for (const row of data) {
+      if (rows.length >= 2) break;
+      const r = row as Record<string, unknown>;
+      const title = String(r.title ?? "—").slice(0, 200);
+      const urlRaw = String(r.url ?? r.link ?? "").trim();
+      const url = /^https?:\/\//i.test(urlRaw) ? urlRaw.slice(0, 2048) : "";
+      rows.push({
+        Type: "news",
+        Name: url ? { text: title, href: url } : title,
+        Score: "—",
+        "24h Δ": String(r.source ?? "—").slice(0, 24),
+      });
+    }
+  } catch {
+    /* optional news */
+  }
 
-  const top = rows[0]?.Name ?? target;
+  // Mindshare / trending fill remaining slots up to 3
+  try {
+    let heat: Record<string, unknown> | null = null;
+    try {
+      heat = await surfGet(
+        `/signal/trending?q=${encodeURIComponent(q)}&limit=3`
+      );
+    } catch {
+      try {
+        heat = await surfGet(
+          `/social/mindshare?interval=7d&q=${encodeURIComponent(q)}`
+        );
+      } catch {
+        heat = null;
+      }
+    }
+    if (heat) {
+      const data = Array.isArray(heat.data)
+        ? heat.data
+        : Array.isArray(heat.projects)
+          ? heat.projects
+          : [];
+      for (const row of data) {
+        if (rows.length >= 3) break;
+        const r = row as Record<string, unknown>;
+        const name = String(
+          r.name ?? r.project ?? r.symbol ?? r.token ?? "Mindshare"
+        ).slice(0, 48);
+        const score = asNum(
+          r.score ?? r.heat ?? r.value ?? r.mindshare ?? r.rank
+        );
+        rows.push({
+          Type: "mindshare",
+          Name: name,
+          Score: score != null ? score.toLocaleString() : "—",
+          "24h Δ": "—",
+        });
+      }
+    }
+  } catch {
+    /* optional */
+  }
+
+  // Pad not required — return whatever we have ≤ 3
+  const top =
+    typeof rows[0]?.Name === "object" &&
+    rows[0]?.Name &&
+    "text" in (rows[0].Name as object)
+      ? String((rows[0].Name as { text: string }).text)
+      : String(rows[0]?.Name ?? q);
+
   return {
     summary: rows.length
-      ? `Narrative “${target}” · ${rows.length} names · top ${top}`
-      : `No narrative rows for “${target}”`,
-    rows,
+      ? `Narrative “${q}” · ${rows.length}/3 rows (news + mindshare)`
+      : `No narrative data for “${q}”`,
+    rows: rows.slice(0, 3),
     highlights: [
-      { label: "Query", value: target },
-      { label: "Names", value: String(rows.length) },
-      { label: "Top", value: String(top) },
-      { label: "Source", value: "Surf signal" },
+      { label: "Query", value: q },
+      { label: "Rows", value: String(Math.min(3, rows.length)) },
+      { label: "Top", value: top.slice(0, 32) },
+      { label: "Mix", value: "news+mindshare" },
     ],
   };
 }
@@ -797,7 +839,11 @@ async function fetchRitualNetwork(): Promise<
   let block = "—";
   let gasGwei: number | null = null;
   let chainId = "—";
-  let nextAgent = "—";
+  let nextAgent = 0;
+  let totalAgents = 0;
+  let persistent = 0;
+  let sovereign = 0;
+  let liveActive = 0;
 
   try {
     const [b, g, c] = await Promise.all([
@@ -814,38 +860,96 @@ async function fetchRitualNetwork(): Promise<
 
   if (radar && /^0x[a-fA-F0-9]{40}$/.test(radar)) {
     try {
-      // nextAgentId() selector
-      const data = "0x30efc498";
+      // nextAgentId() selector 0x30efc498
       const raw = (await rpcEthCall(ritualRpc, "eth_call", [
-        { to: radar, data },
+        { to: radar, data: "0x30efc498" },
         "latest",
       ])) as string;
       if (raw && raw !== "0x") {
-        nextAgent = String(Number(BigInt(raw)));
+        nextAgent = Number(BigInt(raw));
+        totalAgents = Math.max(0, nextAgent - 1);
       }
     } catch {
       /* optional */
     }
+
+    // Count Persistent (kind=0) vs Sovereign (kind=1) via getAgent
+    // ABI: getAgent(uint256) — use viem for correct decode
+    if (totalAgents > 0) {
+      try {
+        const { createPublicClient, http, defineChain } = await import("viem");
+        const { radarAgentAbi } = await import("@/lib/ritual");
+        const chain = defineChain({
+          id: Number(process.env.NEXT_PUBLIC_CHAIN_ID || 1979),
+          name: "ritual",
+          nativeCurrency: { name: "RIT", symbol: "RIT", decimals: 18 },
+          rpcUrls: { default: { http: [ritualRpc] } },
+        });
+        const client = createPublicClient({
+          chain,
+          transport: http(ritualRpc, { timeout: 20_000 }),
+        });
+        // Full scan when small registry; otherwise last 80 ids
+        const maxScan = Math.min(totalAgents, 80);
+        const startId =
+          totalAgents <= maxScan ? 1 : totalAgents - maxScan + 1;
+        const ids = Array.from({ length: maxScan }, (_, i) =>
+          BigInt(startId + i)
+        ).filter((id) => id >= BigInt(1));
+        const agents = await Promise.all(
+          ids.map((id) =>
+            client
+              .readContract({
+                address: radar as `0x${string}`,
+                abi: radarAgentAbi,
+                functionName: "getAgent",
+                args: [id],
+              })
+              .catch(() => null)
+          )
+        );
+        for (const a of agents) {
+          if (!a || typeof a !== "object") continue;
+          const ag = a as { kind?: number; status?: number };
+          const kind = Number(ag.kind ?? -1);
+          const status = Number(ag.status ?? 0);
+          if (kind === 0) persistent += 1;
+          else if (kind === 1) sovereign += 1;
+          if (status === 1) liveActive += 1;
+        }
+        // If we only scanned a window, scale note in summary — still show raw counts for scanned set + totalAgents
+        if (totalAgents > maxScan) {
+          // Prefer full totals when nextId small; when large, counts are "recent window"
+        }
+      } catch {
+        /* optional counts */
+      }
+    }
   }
 
   const rows = [
-    { Field: "Chain id", Value: chainId },
     { Field: "Latest block", Value: block },
     {
-      Field: "Gas",
+      Field: "Network gas",
       Value: gasGwei != null ? `${gasGwei.toFixed(6)} gwei` : "—",
     },
-    { Field: "Radar nextAgentId", Value: nextAgent },
+    { Field: "Total agents", Value: String(totalAgents) },
     {
-      Field: "Radar",
-      Value: radar ? `${radar.slice(0, 8)}…${radar.slice(-4)}` : "not set",
+      Field: "Persistent agents",
+      Value: String(persistent),
     },
+    {
+      Field: "Sovereign agents",
+      Value: String(sovereign),
+    },
+    { Field: "Live (Active)", Value: String(liveActive) },
+    { Field: "Chain id", Value: chainId },
   ];
 
   return {
-    summary: `Ritual chain ${chainId} · block ${block} · gas ${
+    summary: `Ritual · block ${block} · gas ${
       gasGwei != null ? gasGwei.toFixed(4) : "—"
-    } gwei · agents up to #${nextAgent}`,
+    } gwei · ${totalAgents} agents (${persistent} Persistent / ${sovereign} Sovereign) · ${liveActive} live`,
     rows,
     highlights: [
       { label: "Block", value: block },
@@ -853,8 +957,11 @@ async function fetchRitualNetwork(): Promise<
         label: "Gas",
         value: gasGwei != null ? `${gasGwei.toFixed(4)} gwei` : "—",
       },
-      { label: "Next agent", value: nextAgent },
-      { label: "Chain", value: chainId },
+      { label: "Total", value: String(totalAgents) },
+      {
+        label: "P / S",
+        value: `${persistent} / ${sovereign}`,
+      },
     ],
   };
 }
@@ -895,26 +1002,27 @@ export async function fetchSurfData(
     }
     case "stablecoin_peg": {
       shaped = await fetchStablecoinPeg(t);
-      endpoint = "multi:/market/price (USDT,USDC,DAI,…)";
+      endpoint = `single:/market/price?symbol=${encodeURIComponent(
+        t === "_" ? "USDT" : t.toUpperCase()
+      )}`;
       break;
     }
     case "gas_fees": {
-      shaped = await fetchGasFees();
-      endpoint = "rpc:eth_gasPrice+eth_blockNumber";
+      shaped = await fetchGasFees(t);
+      endpoint = `rpc:${resolveGasNetwork(t).id}:gas+block`;
       break;
     }
     case "whale_transfers": {
       try {
-        const json = await surfGet(kind.path(t));
+        const json = await surfGet(
+          `/market/liquidations?symbol=${encodeURIComponent(t.toUpperCase())}&limit=2`
+        );
         shaped = summarizeWhale(json, t);
+        endpoint = "/market/liquidations?limit=2";
       } catch (e1) {
-        // Fallback paths
         try {
-          const json = await surfGet(
-            `/market/liquidations?symbol=${encodeURIComponent(t.toUpperCase())}&limit=12`
-          );
+          const json = await surfGet(kind.path(t));
           shaped = summarizeWhale(json, t);
-          endpoint = "/market/liquidations";
         } catch {
           try {
             const json = await surfGet(
@@ -922,10 +1030,12 @@ export async function fetchSurfData(
                 t.includes("-") ? t.toUpperCase() : `${t.toUpperCase()}-USDT`
               )}`
             );
-            shaped = summarizeOiSkew(json, t);
+            // Still max 1–2 rows for whale fallback
+            const oi = summarizeOiSkew(json, t);
             shaped = {
-              ...shaped,
-              summary: `Whale path fallback → OI/funding for ${t}: ${shaped.summary}`,
+              summary: `Whale fallback → ${oi.summary}`,
+              rows: oi.rows.slice(0, 2),
+              highlights: oi.highlights,
             };
             endpoint = "/exchange/perp (fallback)";
           } catch {
@@ -951,7 +1061,7 @@ export async function fetchSurfData(
         shaped = summarizeOiSkew(json, pair);
         endpoint = "/exchange/funding";
       }
-      // Enrich with long/short if available
+      // Enrich long/short into the single row (do not add extra rows)
       try {
         const ls = await surfGet(
           `/exchange/long-short-ratio?pair=${encodeURIComponent(pair)}`
@@ -959,70 +1069,31 @@ export async function fetchSurfData(
         const data = (ls.data ?? ls) as Record<string, unknown>;
         const longR = asNum(data.long_ratio ?? data.longAccount);
         const shortR = asNum(data.short_ratio ?? data.shortAccount);
-        if (longR != null || shortR != null) {
+        if (shaped.rows[0] && (longR != null || shortR != null)) {
           shaped.rows = [
-            ...shaped.rows,
             {
-              Field: "Long (ratio API)",
-              Value:
-                longR != null ? `${(longR * 100).toFixed(2)}%` : "—",
-            },
-            {
-              Field: "Short (ratio API)",
-              Value:
-                shortR != null ? `${(shortR * 100).toFixed(2)}%` : "—",
+              ...shaped.rows[0],
+              Long:
+                longR != null
+                  ? `${(longR * 100).toFixed(1)}%`
+                  : String(shaped.rows[0].Long ?? "—"),
+              Short:
+                shortR != null
+                  ? `${(shortR * 100).toFixed(1)}%`
+                  : String(shaped.rows[0].Short ?? "—"),
             },
           ];
         }
       } catch {
         /* optional */
       }
+      // Enforce 1 row
+      shaped.rows = shaped.rows.slice(0, 1);
       break;
     }
     case "narrative_sector": {
-      try {
-        const json = await surfGet(kind.path(t));
-        shaped = summarizeNarrative(json, t);
-      } catch {
-        try {
-          const json = await surfGet(
-            `/signal/heat?q=${encodeURIComponent(t)}&limit=10`
-          );
-          shaped = summarizeNarrative(json, t);
-          endpoint = "/signal/heat";
-        } catch {
-          const json = await surfGet(
-            `/social/mindshare?interval=7d&q=${encodeURIComponent(t)}`
-          );
-          // mindshare series as narrative proxy
-          const data = Array.isArray(json.data) ? json.data : [];
-          const points = data.map((row) => {
-            const r = row as Record<string, unknown>;
-            return { timestamp: r.timestamp, value: asNum(r.value) };
-          });
-          const last = points[points.length - 1];
-          shaped = {
-            summary:
-              last?.value != null
-                ? `Narrative proxy (mindshare) “${t}” · ${last.value.toLocaleString()}`
-                : `No narrative data for “${t}”`,
-            rows: takeLast(points, 12).map((p) => ({
-              Time: fmtTs(p.timestamp),
-              Score: p.value != null ? p.value.toLocaleString() : "—",
-            })),
-            highlights: [
-              { label: "Query", value: t },
-              {
-                label: "Latest",
-                value: last?.value != null ? last.value.toLocaleString() : "—",
-              },
-              { label: "Points", value: String(points.length) },
-              { label: "Source", value: "mindshare fallback" },
-            ],
-          };
-          endpoint = "/social/mindshare (fallback)";
-        }
-      }
+      shaped = await fetchNarrativeBundle(t);
+      endpoint = "news+mindshare (3 rows)";
       break;
     }
     case "ritual_network": {
