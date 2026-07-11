@@ -8,7 +8,13 @@ import {
   useSwitchChain,
   useWalletClient,
 } from "wagmi";
-import { formatEther, parseEther, type Address, type Hex } from "viem";
+import {
+  encodeFunctionData,
+  formatEther,
+  parseEther,
+  type Address,
+  type Hex,
+} from "viem";
 import {
   addressUrl,
   ritualChain,
@@ -16,6 +22,7 @@ import {
 } from "@/lib/ritual";
 import {
   buildPersistentCompressedLaunch,
+  buildSovereignRollingCompressedLaunch,
   buildSovereignTwoStepLaunch,
   explainSovereignRevert,
   PERSISTENT_FACTORY,
@@ -138,159 +145,234 @@ export function OfficialAgentTab({ mode }: Props) {
       );
 
       if (kind === "sovereign") {
-        // Two-step: deployHarness → configureFundAndStart (avoids compressed DKMS reverts)
-        const built = await buildSovereignTwoStepLaunch({
-          owner: address,
-          name: name.trim(),
-          prompt: prompt.trim(),
-          model: model.trim() || undefined,
-          useRitualLlm: useRitualLlm && !anthropicKey.trim(),
-          anthropicKey: anthropicKey.trim() || undefined,
-          schedulerFundingRit: schedulerFunding,
-          dkmsFundingRit: dkmsFunding,
-        });
+        /**
+         * Path A (preferred): two-step deployHarness + configureFundAndStart
+         * Path B (fallback): launchSovereignCompressedRolling (live factory has this;
+         *   NOT launchSovereignCompressed which is missing on-chain → always reverts)
+         */
+        const useOneShot = false; // set true to try rolling one-shot
 
-        if (publicClient) {
-          const bal = await publicClient.getBalance({ address });
-          // funding + small gas buffer (Ritual gas is cheap; 0.02 RIT is plenty)
-          const need = built.configureValue + parseEther("0.02");
-          if (bal < need) {
-            throw new Error(
-              `Need ~${formatEther(need)} RIT (funding ${formatEther(built.configureValue)} + gas). Wallet has ${formatEther(bal)} RIT.`
-            );
-          }
-        }
-
-        setMsg(
-          `Step 1/2 · Confirm deployHarness · child ${built.harness.slice(0, 10)}…`
-        );
-
-        // Preflight deploy (no value)
-        if (publicClient) {
-          try {
-            await publicClient.simulateContract({
-              address: SOVEREIGN_FACTORY,
-              abi: sovereignFactoryAbi,
-              functionName: "deployHarness",
-              args: [built.userSalt],
-              account: address,
-              gas: built.gasDeploy,
-            });
-          } catch (simErr: unknown) {
-            const raw =
-              simErr instanceof Error ? simErr.message : String(simErr);
-            throw new Error(explainSovereignRevert(raw));
-          }
-        }
-
-        const deployHash = await walletClient.writeContract({
-          chain: ritualChain,
-          account: address,
-          address: SOVEREIGN_FACTORY,
-          abi: sovereignFactoryAbi,
-          functionName: "deployHarness",
-          args: [built.userSalt],
-          gas: built.gasDeploy,
-          maxFeePerGas: fees.maxFeePerGas,
-          maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
-          type: "eip1559",
-        });
-
-        setMsg(`Step 1/2 sent ${deployHash.slice(0, 12)}… waiting…`);
-        if (publicClient) {
-          const r1 = await publicClient.waitForTransactionReceipt({
-            hash: deployHash,
-            timeout: 180_000,
+        if (useOneShot) {
+          const built = await buildSovereignRollingCompressedLaunch({
+            owner: address,
+            name: name.trim(),
+            prompt: prompt.trim(),
+            model: model.trim() || undefined,
+            useRitualLlm: useRitualLlm && !anthropicKey.trim(),
+            anthropicKey: anthropicKey.trim() || undefined,
+            schedulerFundingRit: schedulerFunding,
+            dkmsFundingRit: dkmsFunding,
           });
-          if (r1.status !== "success") {
-            throw new Error(
-              `deployHarness failed (gas used ${r1.gasUsed.toString()}/${built.gasDeploy.toString()}). Try a new agent name.`
-            );
+          setMsg(
+            `Confirm one-shot rolling launch · ${formatEther(built.value)} RIT`
+          );
+          const data = encodeFunctionData({
+            abi: sovereignFactoryAbi,
+            functionName: "launchSovereignCompressedRolling",
+            args: built.args as never,
+          });
+          const hash = await walletClient.sendTransaction({
+            chain: ritualChain,
+            account: address,
+            to: SOVEREIGN_FACTORY,
+            data,
+            value: built.value,
+            gas: built.gasLimit,
+            maxFeePerGas: fees.maxFeePerGas,
+            maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+            type: "eip1559",
+          });
+          if (publicClient) {
+            const r = await publicClient.waitForTransactionReceipt({
+              hash,
+              timeout: 180_000,
+            });
+            if (r.status !== "success") {
+              throw new Error(
+                `One-shot rolling launch failed (gas ${r.gasUsed}/${built.gasLimit}). Try two-step or a new name.`
+              );
+            }
           }
-        }
+          registerOfficialAgent({
+            kind: "sovereign",
+            name: name.trim(),
+            owner: address,
+            childAddress: built.harness,
+            userSalt: built.userSalt,
+            createTx: hash,
+            createdAt: Date.now(),
+            prompt: prompt.trim(),
+            model: built.model,
+            executor: built.executor.teeAddress,
+            status: "armed via compressed rolling",
+          });
+          toast.success("Official Sovereign launched", built.harness.slice(0, 12));
+          setMsg(`Sovereign ready · ${built.harness}\nTx ${hash}`);
+        } else {
+          // Two-step: deployHarness → configureFundAndStart
+          const built = await buildSovereignTwoStepLaunch({
+            owner: address,
+            name: name.trim(),
+            prompt: prompt.trim(),
+            model: model.trim() || undefined,
+            useRitualLlm: useRitualLlm && !anthropicKey.trim(),
+            anthropicKey: anthropicKey.trim() || undefined,
+            schedulerFundingRit: schedulerFunding,
+            dkmsFundingRit: dkmsFunding,
+          });
 
-        setMsg(
-          `Step 2/2 · Confirm configure + fund ${formatEther(built.configureValue)} RIT · accept MetaMask network fee (Ritual is cheap)`
-        );
+          if (publicClient) {
+            const bal = await publicClient.getBalance({ address });
+            const need = built.configureValue + parseEther("0.02");
+            if (bal < need) {
+              throw new Error(
+                `Need ~${formatEther(need)} RIT (funding ${formatEther(built.configureValue)} + gas). Wallet has ${formatEther(bal)} RIT.`
+              );
+            }
+          }
 
-        if (publicClient) {
-          try {
-            await publicClient.simulateContract({
+          setMsg(
+            `Step 1/2 · Deploy harness ${built.harness.slice(0, 10)}… (v3 two-step)`
+          );
+
+          if (publicClient) {
+            try {
+              await publicClient.simulateContract({
+                address: SOVEREIGN_FACTORY,
+                abi: sovereignFactoryAbi,
+                functionName: "deployHarness",
+                args: [built.userSalt],
+                account: address,
+              });
+            } catch (simErr: unknown) {
+              const raw =
+                simErr instanceof Error ? simErr.message : String(simErr);
+              throw new Error(explainSovereignRevert(raw));
+            }
+          }
+
+          const deployData = encodeFunctionData({
+            abi: sovereignFactoryAbi,
+            functionName: "deployHarness",
+            args: [built.userSalt],
+          });
+          const deployHash = await walletClient.sendTransaction({
+            chain: ritualChain,
+            account: address,
+            to: SOVEREIGN_FACTORY,
+            data: deployData,
+            gas: built.gasDeploy,
+            maxFeePerGas: fees.maxFeePerGas,
+            maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+            type: "eip1559",
+          });
+
+          setMsg(`Step 1/2 sent ${deployHash.slice(0, 12)}… waiting…`);
+          if (publicClient) {
+            const r1 = await publicClient.waitForTransactionReceipt({
+              hash: deployHash,
+              timeout: 180_000,
+            });
+            if (r1.status !== "success") {
+              throw new Error(
+                `Step 1 deployHarness failed (gas ${r1.gasUsed}/${built.gasDeploy}). Use a new agent name.`
+              );
+            }
+            const code = await publicClient.getBytecode({
               address: built.harness,
-              abi: sovereignHarnessAbi,
-              functionName: "configureFundAndStart",
-              args: [
-                built.params as never,
-                built.schedule as never,
-                built.rolling as never,
-                built.schedulerLockDuration,
-              ],
-              account: address,
-              value: built.configureValue,
-              gas: built.gasConfigure,
             });
-          } catch (simErr: unknown) {
-            const raw =
-              simErr instanceof Error ? simErr.message : String(simErr);
-            throw new Error(
-              explainSovereignRevert(raw) +
-                " (harness deployed — try a new agent name to restart cleanly)"
-            );
+            if (!code || code === "0x") {
+              throw new Error(
+                "Harness address has no code after deploy — salt mismatch. Hard-refresh and retry with a new name."
+              );
+            }
           }
-        }
 
-        const cfgHash = await walletClient.writeContract({
-          chain: ritualChain,
-          account: address,
-          address: built.harness,
-          abi: sovereignHarnessAbi,
-          functionName: "configureFundAndStart",
-          args: [
-            built.params as never,
-            built.schedule as never,
-            built.rolling as never,
-            built.schedulerLockDuration,
-          ],
-          value: built.configureValue,
-          gas: built.gasConfigure,
-          maxFeePerGas: fees.maxFeePerGas,
-          maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
-          type: "eip1559",
-        });
+          setMsg(
+            `Step 2/2 · Fund + arm ${formatEther(built.configureValue)} RIT (cheap Ritual fee)`
+          );
 
-        setMsg(`Step 2/2 sent ${cfgHash.slice(0, 12)}… waiting…`);
-        if (publicClient) {
-          const r2 = await publicClient.waitForTransactionReceipt({
-            hash: cfgHash,
-            timeout: 180_000,
+          if (publicClient) {
+            try {
+              await publicClient.simulateContract({
+                address: built.harness,
+                abi: sovereignHarnessAbi,
+                functionName: "configureFundAndStart",
+                args: [
+                  built.params as never,
+                  built.schedule as never,
+                  built.rolling as never,
+                  built.schedulerLockDuration,
+                ],
+                account: address,
+                value: built.configureValue,
+              });
+            } catch (simErr: unknown) {
+              const raw =
+                simErr instanceof Error ? simErr.message : String(simErr);
+              throw new Error(
+                explainSovereignRevert(raw) +
+                  " (step 1 ok — use a new agent name to restart)"
+              );
+            }
+          }
+
+          const cfgData = encodeFunctionData({
+            abi: sovereignHarnessAbi,
+            functionName: "configureFundAndStart",
+            args: [
+              built.params as never,
+              built.schedule as never,
+              built.rolling as never,
+              built.schedulerLockDuration,
+            ],
           });
-          if (r2.status !== "success") {
-            throw new Error(
-              `configureFundAndStart failed (gas used ${r2.gasUsed.toString()}/${built.gasConfigure.toString()}). Check funding amount and try a new agent name.`
-            );
-          }
-        }
+          const cfgHash = await walletClient.sendTransaction({
+            chain: ritualChain,
+            account: address,
+            to: built.harness,
+            data: cfgData,
+            value: built.configureValue,
+            gas: built.gasConfigure,
+            maxFeePerGas: fees.maxFeePerGas,
+            maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+            type: "eip1559",
+          });
 
-        registerOfficialAgent({
-          kind: "sovereign",
-          name: name.trim(),
-          owner: address,
-          childAddress: built.harness,
-          userSalt: built.userSalt,
-          createTx: cfgHash,
-          createdAt: Date.now(),
-          prompt: prompt.trim(),
-          model: built.model,
-          executor: built.executor.teeAddress,
-          status: "armed · scheduler will call 0x080C",
-        });
-        toast.success(
-          "Official Sovereign launched",
-          `Harness ${built.harness.slice(0, 10)}…`
-        );
-        setMsg(
-          `Sovereign ready · harness ${built.harness}\nDeploy tx ${deployHash}\nConfigure tx ${cfgHash}\nScheduler will invoke official 0x080C. Open My Agents → Ritual AI.`
-        );
+          setMsg(`Step 2/2 sent ${cfgHash.slice(0, 12)}… waiting…`);
+          if (publicClient) {
+            const r2 = await publicClient.waitForTransactionReceipt({
+              hash: cfgHash,
+              timeout: 180_000,
+            });
+            if (r2.status !== "success") {
+              throw new Error(
+                `Step 2 configureFundAndStart failed (gas ${r2.gasUsed}/${built.gasConfigure}). Funding or schedule rejected — try new name + ≥2 RIT.`
+              );
+            }
+          }
+
+          registerOfficialAgent({
+            kind: "sovereign",
+            name: name.trim(),
+            owner: address,
+            childAddress: built.harness,
+            userSalt: built.userSalt,
+            createTx: cfgHash,
+            createdAt: Date.now(),
+            prompt: prompt.trim(),
+            model: built.model,
+            executor: built.executor.teeAddress,
+            status: "armed · scheduler will call 0x080C",
+          });
+          toast.success(
+            "Official Sovereign launched",
+            `Harness ${built.harness.slice(0, 10)}…`
+          );
+          setMsg(
+            `Sovereign ready · harness ${built.harness}\nDeploy tx ${deployHash}\nConfigure tx ${cfgHash}\nOpen My Agents → Ritual AI.`
+          );
+        }
       } else {
         const built = await buildPersistentCompressedLaunch({
           owner: address,
@@ -445,7 +527,7 @@ export function OfficialAgentTab({ mode }: Props) {
             : "My Ritual AI agents"}
         </h2>
         <span className="rounded-full border border-violet-400/40 bg-violet-500/15 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-violet-200">
-          Official TEE · 0x080C / 0x0820
+          Official TEE · v3 two-step
         </span>
       </div>
       <p className="mb-5 text-sm text-white/50">

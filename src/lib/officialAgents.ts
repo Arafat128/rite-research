@@ -179,8 +179,13 @@ export const sovereignFactoryAbi = [
     inputs: [{ name: "userSalt", type: "bytes32" }],
     outputs: [{ name: "harness", type: "address" }],
   },
+  /**
+   * Live Ritual factory (0x9dC4…) does NOT implement launchSovereignCompressed
+   * (selector 0x2ea5a636 missing). It implements launchSovereignCompressedRolling
+   * (0x7c041adf) instead — verified against on-chain bytecode.
+   */
   {
-    name: "launchSovereignCompressed",
+    name: "launchSovereignCompressedRolling",
     type: "function",
     stateMutability: "payable",
     inputs: [
@@ -198,9 +203,13 @@ export const sovereignFactoryAbi = [
         type: "tuple",
         components: [...sovereignScheduleComponents],
       },
+      {
+        name: "rolling",
+        type: "tuple",
+        components: [...sovereignRollingComponents],
+      },
       { name: "schedulerLockDuration", type: "uint256" },
       { name: "schedulerFunding", type: "uint256" },
-      { name: "windowNumCalls", type: "uint32" },
     ],
     outputs: [
       { name: "harness", type: "address" },
@@ -623,26 +632,52 @@ export async function buildSovereignTwoStepLaunch(
     schedule,
     rolling,
     schedulerLockDuration: BigInt(100_000),
-    gasDeploy: BigInt(1_000_000),
-    gasConfigure: BigInt(4_000_000),
+    gasDeploy: BigInt(1_200_000),
+    gasConfigure: BigInt(5_000_000),
   };
 }
 
-/** @deprecated prefer buildSovereignTwoStepLaunch — kept for tests */
-export async function buildSovereignCompressedLaunch(
+/**
+ * One-shot path using the function that actually exists on live factory:
+ * launchSovereignCompressedRolling (NOT launchSovereignCompressed).
+ * deliveryTarget must use predictCompressedHarness.
+ */
+export async function buildSovereignRollingCompressedLaunch(
   p: SovereignLaunchParams,
   client?: PublicClient
 ) {
   const two = await buildSovereignTwoStepLaunch(p, client);
+  const c = client || getRitualReadClient();
+  // Compressed path uses different predict (factory intermediate salt)
+  const compressedHarness = await predictSovereignCompressedHarness(
+    p.owner,
+    two.userSalt,
+    c
+  );
+  const params = {
+    ...two.params,
+    deliveryTarget: compressedHarness,
+  };
+  const dkmsFunding = parseEther(p.dkmsFundingRit || "0");
   return {
     userSalt: two.userSalt,
-    harness: two.harness,
+    harness: compressedHarness,
     executor: two.executor,
-    value: two.configureValue,
-    gasLimit: two.gasConfigure,
+    value: dkmsFunding + two.configureValue,
+    gasLimit: BigInt(6_000_000),
     factory: SOVEREIGN_FACTORY,
-    args: [] as unknown[],
-    twoStep: two,
+    model: two.model,
+    args: [
+      two.userSalt,
+      two.executor.teeAddress,
+      BigInt(300),
+      dkmsFunding,
+      params,
+      two.schedule,
+      two.rolling,
+      two.schedulerLockDuration,
+      two.configureValue,
+    ] as const,
   };
 }
 
