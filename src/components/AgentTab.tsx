@@ -659,8 +659,7 @@ export function AgentTab({
         if (!res.ok) {
           if (!cancelled) {
             setAutoWakeNote(
-              data.error ||
-                `Auto-wake unavailable (${res.status}). Check KEEPER_PRIVATE_KEY on server.`
+              data.error || "Auto-wake temporarily unavailable. Try again shortly."
             );
           }
           return;
@@ -843,10 +842,10 @@ export function AgentTab({
               setAutoWakeNote("Auto-wake on · no live agents to tick");
             } else if (data.keeperOnChain === false) {
               setAutoWakeNote(
-                "Keeper wallet not setKeeper(true) on Radar — admin must allowlist it"
+                "Auto-wake is paused — use Wake on this tab, or try again later"
               );
             } else {
-              setAutoWakeNote(`Auto-wake on · watching schedule (${reason})`);
+              setAutoWakeNote("Auto-wake on · watching schedule");
             }
           }
         }
@@ -1293,14 +1292,13 @@ export function AgentTab({
       if (hasKill) {
         const ok = window.confirm(
           `Kill agent #${selectedId.toString()} (${live.name})?\n\n` +
-            `Permanent on-chain DEAD. Full balance (${refundLabel} RIT) is refunded to your wallet.\n` +
-            `Radar: ${RADAR_CONTRACT?.slice(0, 10)}…\n` +
-            `Gas is paid from your wallet (not the agent).`
+            `This permanently stops the agent. Remaining balance (${refundLabel} RIT) is refunded to your wallet.\n` +
+            `Gas is paid from your wallet.`
         );
         if (!ok) return;
 
         try {
-          setMsg(`Confirm killAgent #${selectedId} (refund ${refundLabel} RIT)…`);
+          setMsg(`Confirm kill #${selectedId} (refund ${refundLabel} RIT)…`);
           const hash = await radarWrite({
             functionName: "killAgent",
             args: [selectedId],
@@ -1345,12 +1343,10 @@ export function AgentTab({
         }
       }
 
-      // --- Soft close: only when Radar has no killAgent (legacy 0x5ed8…) ---
+      // --- Soft close: only when Radar has no killAgent ---
       const ok = window.confirm(
         `Close agent #${selectedId.toString()} (${live.name})?\n\n` +
-          `This Radar (${RADAR_CONTRACT?.slice(0, 10)}…) has no killAgent.\n` +
-          `We will withdraw balance and pause (not on-chain DEAD).\n\n` +
-          `To get real kill: set NEXT_PUBLIC_RADAR_CONTRACT to 0x50a3… and deploy new agents there.`
+          `This withdraws remaining balance and stops the agent.`
       );
       if (!ok) return;
 
@@ -1400,15 +1396,16 @@ export function AgentTab({
         },
       }));
       setMsg(
-        `Agent #${selectedId} soft-closed` +
+        `Agent #${selectedId} closed` +
           (withdrew > BigInt(0)
             ? ` · withdrew ${formatEther(withdrew)} RIT`
-            : "") +
-          ` · paused (legacy Radar — not on-chain DEAD)`
+            : "")
       );
-      toast.info(
-        `Agent #${selectedId} soft-closed`,
-        "Legacy Radar has no killAgent — use Radar 0x50a3… for real kill"
+      toast.success(
+        `Agent #${selectedId} closed`,
+        withdrew > BigInt(0)
+          ? `${formatEther(withdrew)} RIT returned`
+          : "Agent stopped"
       );
       panelLoadGenRef.current += 1;
       selectedIdRef.current = null;
@@ -1518,7 +1515,7 @@ export function AgentTab({
       const digest = keccak256(stringToBytes(digestPayload));
 
       setMsg(
-        "Confirm runTick in wallet to charge fee and unlock data. Rejecting cancels this wake — no data shown."
+        "Confirm in wallet to charge the fee and unlock data. Rejecting cancels this wake — no data shown."
       );
       const hash = await radarWrite({
         functionName: "runTick",
@@ -1540,7 +1537,7 @@ export function AgentTab({
           onChainRuns = live.runCount;
         } else if (!receiptOk) {
           throw new Error(
-            `runTick reverted (tx ${hash.slice(0, 12)}…). Wait for schedule or fund/activate, then Wake again.`
+            `Wake failed (tx ${hash.slice(0, 12)}…). Wait for the schedule or fund/activate, then try Wake again.`
           );
         }
       } catch (e) {
@@ -1700,7 +1697,7 @@ export function AgentTab({
       const m = errMsg(e);
       setErr(
         m +
-          " — Data is only shown after you confirm runTick. Try Wake again and approve the transaction."
+          " — Data is only shown after you confirm the wake in your wallet. Try Wake again."
       );
       setMsg("");
       if (!/reject|denied/i.test(m)) toast.error("Wake / tick failed", m);
@@ -1712,8 +1709,7 @@ export function AgentTab({
   if (!RADAR_CONTRACT) {
     return (
       <div className="glass mx-auto max-w-2xl rounded-2xl p-8 text-center text-sm text-amber-200">
-        Radar agent contract not configured. Set{" "}
-        <code>NEXT_PUBLIC_RADAR_CONTRACT</code>.
+        Agents are temporarily unavailable. Please try again later.
       </div>
     );
   }
@@ -1767,33 +1763,6 @@ export function AgentTab({
         <Stat label="Your live" value={String(liveAgentIds.length)} />
         <Stat label="Your dead" value={String(deadAgentIds.length)} />
       </div>
-
-      {/* Make Radar env mismatch obvious (localhost vs Vercel often differ) */}
-      {RADAR_CONTRACT && (
-        <p className="mb-4 text-[11px] text-white/40">
-          On-chain registry:{" "}
-          <code className="text-white/60">
-            {RADAR_CONTRACT.slice(0, 10)}…{RADAR_CONTRACT.slice(-6)}
-          </code>
-          {RADAR_CONTRACT.toLowerCase() ===
-          "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30" ? (
-            <span className="text-amber-200/90">
-              {" "}
-              — LEGACY Radar. Agents here are NOT the same as kill-capable{" "}
-              <code className="text-white/50">0x50a3…</code>. Set Vercel{" "}
-              <code className="text-[#c8ff4a]/80">NEXT_PUBLIC_RADAR_CONTRACT</code>{" "}
-              to{" "}
-              <code className="text-white/50">
-                0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f
-              </code>{" "}
-              and redeploy to match local.
-            </span>
-          ) : RADAR_CONTRACT.toLowerCase() ===
-            "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f" ? (
-            <span className="text-white/35"> — kill-capable Radar</span>
-          ) : null}
-        </p>
-      )}
 
       <div className="mb-6 flex flex-wrap gap-2">
         {flowSteps.map((f) => (
@@ -2295,26 +2264,18 @@ export function AgentTab({
                       Wake schedule
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      Saved on-chain as block interval (1 min ≈{" "}
-                      {scheduleToBlocks({ value: 1, unit: "minutes" }).toString()}{" "}
-                      blocks).{" "}
-                      <b className="text-white/55">Unattended</b> ticks need
-                      GitHub Actions / cron-job.org →{" "}
-                      <code className="text-white/45">/api/agent/cron</code>{" "}
-                      (see UNATTENDED_KEEPER.md). This tab also polls as a
-                      backup while open. Use{" "}
-                      <b className="text-[#c8ff4a]">Persistent</b> agents for
-                      long unattended runs — Sovereign dies after{" "}
-                      {SOVEREIGN_MAX_RUNS} ticks.
+                      How often this agent may wake. While this tab is open,
+                      auto-wake can fire when due. Use{" "}
+                      <b className="text-[#c8ff4a]">Persistent</b> for long-running
+                      agents — Sovereign stops after {SOVEREIGN_MAX_RUNS} ticks.
                     </p>
                     {agent.kind === AGENT_KIND.Sovereign &&
                       agent.status === 1 && (
                         <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
-                          This is <b>Sovereign</b> (
-                          {agent.runCount.toString()}/{SOVEREIGN_MAX_RUNS}{" "}
-                          ticks). After {SOVEREIGN_MAX_RUNS} seals it dies and
-                          unattended cron will skip it. Deploy{" "}
-                          <b>Persistent</b> for ongoing 1m auto-wake.
+                          <b>Sovereign</b> · {agent.runCount.toString()}/
+                          {SOVEREIGN_MAX_RUNS} ticks. After{" "}
+                          {SOVEREIGN_MAX_RUNS} seals it finishes. Deploy{" "}
+                          <b>Persistent</b> for ongoing auto-wake.
                         </p>
                       )}
                     {autoWakeNote && mode === "manage" && (
@@ -2480,9 +2441,8 @@ export function AgentTab({
                   </div>
                   {ticking && (
                     <p className="mt-3 text-center text-[11px] text-amber-200/80">
-                      Data is prepared off-chain but <b>not shown</b> until you
-                      approve <code className="text-[#c8ff4a]">runTick</code> in
-                      your wallet. Reject = no new data, no fee.
+                      Data is prepared but <b>not shown</b> until you approve
+                      the wake in your wallet. Reject = no new data, no fee.
                     </p>
                   )}
 
@@ -2494,8 +2454,8 @@ export function AgentTab({
                     </div>
                     <p className="mb-2 text-[11px] text-white/45">
                       {canKillOnChain === false
-                        ? "This Radar contract has no killAgent function. Close withdraws all balance and pauses the agent (1–2 wallet confirms)."
-                        : "Permanent on-chain stop. Remaining balance is refunded. Panel collapses to a small DEAD card after."}
+                        ? "Withdraws remaining balance and stops the agent (wallet confirm)."
+                        : "Permanently stops the agent and refunds remaining balance."}
                     </p>
                     <button
                       type="button"
@@ -2517,11 +2477,11 @@ export function AgentTab({
           {ticking && agent && !agentFinished && (
             <div className="glass rounded-2xl p-6 text-center">
               <p className="text-sm font-semibold text-[#c8ff4a]">
-                Waiting for runTick confirmation…
+                Waiting for wallet confirmation…
               </p>
               <p className="mt-2 text-xs text-white/50">
                 Approve the transaction to unlock this wake&apos;s data. Closing
-                or rejecting the wallet keeps previous results only.
+                or rejecting keeps previous results only.
               </p>
             </div>
           )}
@@ -2675,30 +2635,18 @@ export function AgentTab({
           </>
           )}
 
-          <p className="text-center text-[10px] text-white/30">
-            Radar{" "}
-            {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
-            {RADAR_CONTRACT?.toLowerCase() ===
-            "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f"
-              ? " · kill-capable"
-              : RADAR_CONTRACT?.toLowerCase() ===
-                  "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30"
-                ? " · LEGACY (no kill)"
-                : ""}
-            {canKillOnChain === true
-              ? " · killAgent available"
-              : canKillOnChain === false
-                ? " · legacy (soft-close only)"
-                : ""}{" "}
-            <a
-              href={addressUrl(RADAR_CONTRACT)}
-              target="_blank"
-              rel="noreferrer"
-              className="underline"
-            >
-              explorer ↗
-            </a>
-          </p>
+          {RADAR_CONTRACT && (
+            <p className="text-center text-[10px] text-white/30">
+              <a
+                href={addressUrl(RADAR_CONTRACT)}
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                View on explorer ↗
+              </a>
+            </p>
+          )}
         </div>
       )}
 

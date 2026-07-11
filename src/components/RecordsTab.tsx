@@ -108,7 +108,7 @@ export function RecordsTab() {
   if (!RESEARCH_CONTRACT) {
     return (
       <div className="glass mx-auto max-w-2xl rounded-2xl p-8 text-center text-sm text-amber-200/90">
-        Research contract not configured. Set NEXT_PUBLIC_RESEARCH_CONTRACT after deploy.
+        Research records are temporarily unavailable. Please try again later.
       </div>
     );
   }

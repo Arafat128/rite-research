@@ -121,14 +121,14 @@ const ERROR_HINTS: Record<string, string> = {
     "Connected wallet is not the agent owner. Switch to the wallet that created this agent.",
   AgentIsDead:
     "Agent is already dead on-chain. Kill only works once — any balance was refunded in the kill transaction. Deploy a new agent if you need another.",
-  /** Legacy Radar (0x5ed8…) reverts withdraw when status=Dead — residual can be stuck */
+  /** Legacy Radar reverts withdraw when status=Dead — residual can be stuck */
   AgentIsDeadWithdraw:
-    "This Radar contract blocks withdraw after an agent dies, so residual RIT cannot be recovered. Use a kill-capable Radar for new agents, or withdraw balance before the last sovereign tick.",
+    "Remaining balance cannot be withdrawn after this agent finished. For new agents, withdraw before the final tick if needed.",
   InsufficientBalance:
-    "Nothing left to withdraw: agent on-chain balance is zero (already withdrawn or refunded on kill). Click Refresh.",
-  UnknownAgent: "Agent not found on this Radar contract.",
+    "Nothing left to withdraw — agent balance is zero (already withdrawn or refunded). Click Refresh.",
+  UnknownAgent: "Agent not found. Click Refresh and try again.",
   TransferFailed:
-    "Contract could not send RITUAL to your wallet. Use a normal MetaMask account (EOA), not a smart-contract wallet without receive().",
+    "Could not send RITUAL to your wallet. Use a normal MetaMask account (not a smart-contract wallet).",
   ZeroAmount: "Amount must be greater than zero.",
   BadStatus: "Agent status does not allow this action (activate / pause first).",
   EmptyWatchlist: "Set a data stream (watchlist) before waking.",
@@ -138,7 +138,7 @@ const ERROR_HINTS: Record<string, string> = {
   TooEarly:
     "Schedule not due yet (on-chain block interval). Wait for the countdown, then Wake again.",
   NotAuthorized:
-    "Wallet is not allowed to run this tick. Use the owner wallet (or a setKeeper allowlisted key).",
+    "Wallet is not allowed to run this tick. Use the agent owner wallet.",
   ZeroDigest: "Invalid tick digest — try Wake again.",
 };
 

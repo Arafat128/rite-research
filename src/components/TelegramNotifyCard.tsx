@@ -79,7 +79,6 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
   const [st, setSt] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [manualChat, setManualChat] = useState("");
   const [localLink, setLocalLink] = useState<LocalLink | null>(null);
   const [deepLink, setDeepLink] = useState<string | null>(null);
 
@@ -322,39 +321,18 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         )}
       </div>
       <p className="mb-3 text-[11px] leading-relaxed text-white/45">
-        DMs after a sealed tick. Use <b className="text-white/70">Connect Telegram</b>{" "}
-        from this app (not a bare <code className="text-white/50">/start</code>).
-        Link is per environment — re-connect once on Vercel if you linked only on localhost.
+        Get a Telegram DM when an agent seals a tick. Tap{" "}
+        <b className="text-white/70">Connect Telegram</b> to link your wallet.
       </p>
 
       {!st.configured && (
         <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
-          Missing <code className="text-[#c8ff4a]">TELEGRAM_BOT_TOKEN</code> on
-          the server. Add env vars and redeploy.
+          Telegram alerts are temporarily unavailable. Try again later.
         </p>
       )}
 
-      {st.configured && !showLinked && (
-        <div className="mb-3 space-y-2 rounded-lg border border-amber-400/25 bg-amber-950/30 px-2.5 py-2 text-[11px] text-amber-50/90">
-          <p className="font-semibold text-amber-100">If the bot stays silent:</p>
-          <ol className="list-decimal space-y-1 pl-4 text-white/70">
-            <li>
-              Production webhook must point at this site (not a local tunnel)
-            </li>
-            <li>
-              <code className="text-[#c8ff4a]">secret_token</code> ={" "}
-              <code className="text-[#c8ff4a]">TELEGRAM_WEBHOOK_SECRET</code>
-            </li>
-            <li>
-              Or: <code className="text-[#c8ff4a]">/link {owner}</code> then paste
-              chat id below
-            </li>
-          </ol>
-        </div>
-      )}
-
       {showLinked && (
-        <div className="mb-2 space-y-0.5 text-[11px] text-white/55">
+        <div className="mb-2 text-[11px] text-white/55">
           <p>
             {displayUser ? (
               <>
@@ -363,94 +341,34 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
             ) : (
               <>Linked to Telegram</>
             )}
-            {localLink?.chatId && (
-              <span className="text-white/35">
-                {" "}
-                · chat{" "}
-                <code className="text-white/50">{localLink.chatId}</code>
-              </span>
-            )}
           </p>
-          {st.linked && !st.username && localLink?.username && (
-            <p className="text-[10px] text-white/35">
-              Showing username from this browser (server had chat id only).
-            </p>
-          )}
-          {!st.linked && localLink?.chatId && (
-            <p className="text-[10px] text-amber-200/80">
-              Browser has chat id — rehydrating server… click Refresh if status
-              stays incomplete.
-            </p>
-          )}
-          <div
-            className={`mt-2 rounded-lg border px-2 py-2 text-[10px] leading-relaxed ${
-              st.multiUserReady
-                ? "border-emerald-400/25 bg-emerald-950/30 text-emerald-50/90"
-                : "border-amber-400/25 bg-amber-950/30 text-amber-50/90"
-            }`}
-          >
-            <p className="font-semibold">
-              {st.multiUserReady
-                ? "Multi-user unattended DMs: ON"
-                : "Multi-user unattended DMs: needs Redis (once)"}
-            </p>
-            {st.multiUserReady ? (
-              <p className="mt-1 text-white/60">
-                Each user only clicks <b>Connect Telegram</b> — no per-user env.
-                Keeper can DM them with the site closed.
-              </p>
-            ) : (
-              <p className="mt-1 text-white/60">
-                Without shared storage, Vercel forgets links between instances.
-                Admin (once): free{" "}
-                <a
-                  className="text-[#c8ff4a] underline"
-                  href="https://console.upstash.com"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Upstash Redis
-                </a>{" "}
-                → add{" "}
-                <code className="text-white/70">UPSTASH_REDIS_REST_URL</code> +{" "}
-                <code className="text-white/70">UPSTASH_REDIS_REST_TOKEN</code>{" "}
-                on Vercel → redeploy. Then every new user just links in the app.
-              </p>
-            )}
-          </div>
         </div>
       )}
 
       {deepLink && !showLinked && (
-        <div className="mb-3 space-y-2 rounded-lg border border-[#c8ff4a]/25 bg-black/40 px-2.5 py-2">
-          <p className="text-[11px] font-semibold text-[#c8ff4a]">
-            Your link (opens bot with wallet token)
-          </p>
-          <p className="break-all font-mono text-[10px] text-white/70">{deepLink}</p>
-          <div className="flex flex-wrap gap-2">
-            <a
-              href={deepLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-primary rounded-lg px-3 py-1.5 text-xs"
-            >
-              Open bot
-            </a>
-            <button
-              type="button"
-              className="rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs text-white"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(deepLink);
-                  toast.success("Copied", "Paste in browser or Telegram");
-                } catch {
-                  toast.info("Copy manually", deepLink.slice(0, 48) + "…");
-                }
-              }}
-            >
-              Copy link
-            </button>
-          </div>
+        <div className="mb-3 flex flex-wrap gap-2 rounded-lg border border-[#c8ff4a]/25 bg-black/40 px-2.5 py-2">
+          <a
+            href={deepLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-primary rounded-lg px-3 py-1.5 text-xs"
+          >
+            Open Telegram bot
+          </a>
+          <button
+            type="button"
+            className="rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs text-white"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(deepLink);
+                toast.success("Copied", "Open the link in Telegram");
+              } catch {
+                toast.info("Copy manually", deepLink.slice(0, 48) + "…");
+              }
+            }}
+          >
+            Copy link
+          </button>
         </div>
       )}
 
@@ -508,35 +426,6 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
           Refresh status
         </button>
       </div>
-
-      {!showLinked && st.configured && (
-        <div className="mt-3 border-t border-white/10 pt-3">
-          <p className="mb-1 text-[10px] uppercase tracking-wide text-white/35">
-            Backup: paste chat id from bot
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <input
-              value={manualChat}
-              onChange={(e) => setManualChat(e.target.value.replace(/\D/g, ""))}
-              placeholder="e.g. 123456789"
-              className="min-w-[10rem] flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-            />
-            <button
-              type="button"
-              disabled={busy || manualChat.length < 5}
-              onClick={() =>
-                void post("register_chat", { chatId: manualChat })
-              }
-              className="rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm text-white"
-            >
-              Save chat id
-            </button>
-          </div>
-          <p className="mt-1 text-[10px] text-white/35">
-            In the bot send <code className="text-white/50">/link {owner}</code>
-          </p>
-        </div>
-      )}
 
       {err && <p className="mt-2 text-[11px] text-red-300">{err}</p>}
     </div>

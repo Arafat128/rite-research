@@ -262,7 +262,7 @@ export function ResearchTab() {
       setPhase("idle");
       const injected = connectors.find((c) => c.id === "injected") || connectors[0];
       if (!injected) {
-        setStatus("No browser wallet found. Install MetaMask (recommended on localhost).");
+        setStatus("No browser wallet found. Install MetaMask or another web3 wallet.");
         setPhase("error");
         return;
       }
