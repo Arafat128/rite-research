@@ -879,7 +879,7 @@ export async function buildPersistentCompressedLaunch(
 export function encodeSovereignLaunchData(args: readonly unknown[]): Hex {
   return encodeFunctionData({
     abi: sovereignFactoryAbi,
-    functionName: "launchSovereignCompressed",
+    functionName: "launchSovereignCompressedRolling",
     args: args as never,
   });
 }
