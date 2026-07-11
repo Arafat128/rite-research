@@ -12,7 +12,7 @@ import {
   isHex,
 } from "viem";
 import { ritualChain, researchDeskAbi, RESEARCH_CONTRACT } from "@/lib/ritual";
-import { runSurfResearch } from "@/lib/surf";
+import { runSurfResearch, resolveSurfModel } from "@/lib/surf";
 import {
   clampPrompt,
   clientIp,
@@ -49,6 +49,8 @@ type Body = {
   signature?: Hex;
   nonce?: string;
   expiry?: number;
+  /** Optional Surf model: surf-1.5-instant | surf-1.5-thinking | surf-1.5 */
+  model?: string;
 };
 
 type RecordTuple = {
@@ -346,7 +348,13 @@ export async function POST(req: NextRequest) {
           model: "cached",
         };
       }
-      const result = await runSurfResearch(prompt);
+      // Optional body.model (deep tier later); default = SURF_MODEL / instant
+      const model = resolveSurfModel(body.model);
+      const result = await runSurfResearch({
+        prompt,
+        model,
+        depth: model === "surf-1.5-thinking" ? "deep" : "standard",
+      });
       const resultHash = keccak256(stringToBytes(result.content));
       cacheReport(researchId!, resultHash, result.content);
       return {
@@ -379,9 +387,22 @@ export async function POST(req: NextRequest) {
   } catch (e: unknown) {
     console.error("[api/research]", e);
     const message = publicErrorMessage(e, "Research failed");
-    const isTimeout = /timed out|timeout|504|AbortError/i.test(message);
+    const code =
+      e && typeof e === "object" && "code" in e
+        ? String((e as { code?: string }).code || "")
+        : "";
+    const isTimeout =
+      code === "SURF_TIMEOUT" ||
+      /timed out|timeout|504|AbortError|SURF_TIMEOUT/i.test(message);
     return NextResponse.json(
-      { error: message },
+      {
+        error: message,
+        code: isTimeout ? "SURF_TIMEOUT" : undefined,
+        /** UI: do not tell user to seal — there is no report yet */
+        claimHint: isTimeout
+          ? "Use Paid credits → Claim free report with the exact same prompt. No second fee."
+          : undefined,
+      },
       { status: isTimeout ? 504 : 500 }
     );
   }

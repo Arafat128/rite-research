@@ -79,6 +79,25 @@ function errText(e: unknown) {
   return String(e);
 }
 
+/** Timeout / Surf failure — do NOT append seal instructions. */
+function isSurfTimeoutMsg(m: string): boolean {
+  return /timed out|timeout|claim free report|no second fee|SURF_TIMEOUT|504/i.test(
+    m
+  );
+}
+
+function formatResearchError(m: string): string {
+  if (isSurfTimeoutMsg(m)) {
+    // Already includes claim hint — do not add seal confusion
+    return m;
+  }
+  if (/reject|denied/i.test(m)) return m;
+  return (
+    m +
+    " — If the fee was paid but the seal was rejected, use Claim free report and approve the seal tx to unlock."
+  );
+}
+
 export function ResearchTab() {
   const { address, isConnected, chainId } = useAccount();
   const publicClient = usePublicClient();
@@ -317,6 +336,8 @@ export function ResearchTab() {
     });
     let data: {
       error?: string;
+      code?: string;
+      claimHint?: string;
       report?: string;
       sealedReport?: string;
       researchId?: string;
@@ -330,18 +351,22 @@ export function ResearchTab() {
     } catch {
       if (res.status === 504 || res.status === 502 || res.status === 524) {
         throw new Error(
-          `Research timed out (HTTP ${res.status}). Your fee is already on-chain — open Paid credits and use “Claim free report” with the same prompt.`
+          `Research timed out (HTTP ${res.status}). Fee is on-chain — Paid credits → Claim free report with the exact same prompt (no second fee).`
         );
       }
       throw new Error(`Research API HTTP ${res.status}`);
     }
     if (!res.ok) {
-      throw new Error(
+      const base =
         data.error ||
-          (res.status === 504
-            ? "Research timed out. Use Claim free report — you already paid."
-            : `Research API failed (${res.status})`)
-      );
+        (res.status === 504
+          ? "Research timed out. Fee is on-chain — Claim free report with the exact same prompt."
+          : `Research API failed (${res.status})`);
+      const hint =
+        data.claimHint && !base.includes("Claim free")
+          ? ` ${data.claimHint}`
+          : "";
+      throw new Error(base + hint);
     }
     return data;
   }
@@ -523,11 +548,15 @@ export function ResearchTab() {
       setPhase("error");
       setReport("");
       const m = errText(e);
-      setStatus(
-        m +
-          " — Report is locked until you confirm the seal transaction. You already paid; try Claim again and approve seal."
-      );
-      if (!/reject|denied/i.test(m)) toast.error("Claim failed", m);
+      setStatus(formatResearchError(m));
+      if (isSurfTimeoutMsg(m)) {
+        toast.info(
+          "Still unpaid credit",
+          "Claim free report again when Surf is faster — no second fee"
+        );
+      } else if (!/reject|denied/i.test(m)) {
+        toast.error("Claim failed", m);
+      }
     } finally {
       setClaimingId(null);
     }
@@ -658,11 +687,13 @@ export function ResearchTab() {
       setPhase("error");
       setReport("");
       const msg = errText(e);
-      setStatus(
-        msg +
-          " — If fee was paid but seal was rejected, use Claim free report and confirm the seal tx to unlock the report."
-      );
-      if (!/reject|denied|already paid|Claim free/i.test(msg)) {
+      setStatus(formatResearchError(msg));
+      if (isSurfTimeoutMsg(msg)) {
+        toast.info(
+          "Payment recorded · report not ready",
+          "Use Paid credits → Claim free report (same prompt). No second fee."
+        );
+      } else if (!/reject|denied|already paid|Claim free/i.test(msg)) {
         toast.error("Research failed", msg);
       } else if (/paid|claim/i.test(msg)) {
         toast.info("Payment recorded", "Use Claim free report if needed");
@@ -738,7 +769,12 @@ export function ResearchTab() {
           <a className="text-[#c8ff4a] underline" href={addressUrl(FEE_RECIPIENT)} target="_blank" rel="noreferrer">
             treasury
           </a>
-          . Paid-but-failed Surf runs can be claimed free (same wallet + exact prompt).
+          . If Surf times out after you pay, use <b className="text-white/70">Claim free report</b>{" "}
+          (same wallet + exact prompt) — no second fee. Seal only runs after Surf returns a report.
+        </p>
+        <p className="mt-2 text-[11px] leading-snug text-white/40">
+          Tip: short, specific prompts finish more reliably. Heavy on-chain forensics
+          (full wallet history + deployers) often hits the ~4–5 min Surf limit — claim and retry, or narrow the question.
         </p>
       </div>
 
