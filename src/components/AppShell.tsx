@@ -31,8 +31,11 @@ const RecordsTab = dynamic(
     ),
   }
 );
-const AgentTab = dynamic(
-  () => import("./AgentTab").then((m) => ({ default: m.AgentTab })),
+const ProductAgentsShell = dynamic(
+  () =>
+    import("./ProductAgentsShell").then((m) => ({
+      default: m.ProductAgentsShell,
+    })),
   {
     ssr: false,
     loading: () => (
@@ -146,8 +149,8 @@ export function AppShell() {
 
         {tab === "research" && <ResearchTab />}
         {tab === "records" && <RecordsTab />}
-        {tab === "deploy" && <AgentTab mode="deploy" />}
-        {tab === "agents" && <AgentTab mode="manage" />}
+        {tab === "deploy" && <ProductAgentsShell mode="deploy" />}
+        {tab === "agents" && <ProductAgentsShell mode="manage" />}
 
         <footer className="mt-14 border-t border-white/10 pt-6 pb-2 text-center">
           <p className="text-sm text-white/50">
