@@ -61,7 +61,8 @@ export async function radarReadContract<T>(
     functionName: string;
     args?: readonly unknown[];
   },
-  attempts = 4
+  /** Fewer attempts = faster list loads; use 4 for critical single reads */
+  attempts = 3
 ): Promise<T> {
   const address = radarAddress();
   let lastErr: unknown;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import {
   useAccount,
   useConnect,
@@ -10,10 +11,39 @@ import {
 } from "wagmi";
 import { formatEther } from "viem";
 import { ritualChain } from "@/lib/ritual";
-import { ResearchTab } from "./ResearchTab";
-import { RecordsTab } from "./RecordsTab";
-import { AgentTab } from "./AgentTab";
-import { BountyBanner } from "./BountyBanner";
+
+/** Lazy-load heavy tabs so first paint stays fast */
+const ResearchTab = dynamic(
+  () => import("./ResearchTab").then((m) => ({ default: m.ResearchTab })),
+  {
+    ssr: false,
+    loading: () => (
+      <p className="py-12 text-center text-sm text-white/40">Loading research…</p>
+    ),
+  }
+);
+const RecordsTab = dynamic(
+  () => import("./RecordsTab").then((m) => ({ default: m.RecordsTab })),
+  {
+    ssr: false,
+    loading: () => (
+      <p className="py-12 text-center text-sm text-white/40">Loading records…</p>
+    ),
+  }
+);
+const AgentTab = dynamic(
+  () => import("./AgentTab").then((m) => ({ default: m.AgentTab })),
+  {
+    ssr: false,
+    loading: () => (
+      <p className="py-12 text-center text-sm text-white/40">Loading agents…</p>
+    ),
+  }
+);
+const BountyBanner = dynamic(
+  () => import("./BountyBanner").then((m) => ({ default: m.BountyBanner })),
+  { ssr: false }
+);
 
 type Tab = "research" | "records" | "deploy" | "agents";
 
@@ -97,7 +127,7 @@ export function AppShell() {
               <button
                 type="button"
                 disabled={isPending}
-                onClick={onConnect}
+                onClick={() => void onConnect()}
                 className="btn-primary rounded-full px-4 py-1.5 text-sm shadow-lg"
               >
                 {isPending ? "Connecting…" : "Connect wallet"}
@@ -107,10 +137,11 @@ export function AppShell() {
         </header>
 
         {connectError && (
-          <p className="mb-4 text-center text-sm text-red-300">{connectError.message}</p>
+          <p className="mb-4 text-center text-sm text-red-300">
+            {connectError.message}
+          </p>
         )}
 
-        {/* Auto bounty winner + live pool — always top of screen */}
         <BountyBanner />
 
         {tab === "research" && <ResearchTab />}

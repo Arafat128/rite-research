@@ -345,13 +345,14 @@ export function AgentTab({
       const total = nextId > BigInt(1) ? Number(nextId - BigInt(1)) : 0;
       setNetworkTotal(total);
 
-      let live = 0;
+      // Sample recent agents in parallel (was sequential — slow on Ritual RPC)
       const start = Math.max(1, total - 39);
-      for (let i = start; i <= total; i++) {
-        const a = await readAgentOnChain(BigInt(i));
-        if (a && a.status === 1) live += 1;
-      }
-      setNetworkLive(live);
+      const ids: bigint[] = [];
+      for (let i = start; i <= total; i++) ids.push(BigInt(i));
+      const rows = await Promise.all(
+        ids.map((id) => readAgentOnChain(id).catch(() => null))
+      );
+      setNetworkLive(rows.filter((a) => a && a.status === 1).length);
     } catch {
       /* ignore network scan errors — flaky RPC */
     }
@@ -385,35 +386,38 @@ export function AgentTab({
         setCanKillOnChain(radarHasKnownKill() ?? true);
       }
 
-      // Load meta for chips + prefer LIVE agents for default selection
+      // Load meta in parallel (big win when user owns many agents)
+      const metaRows = await Promise.all(
+        ids.map(async (id) => {
+          const row = await readAgentOnChain(id).catch(() => null);
+          return { id, row };
+        })
+      );
       const meta: Record<
         string,
         { status: number; kind: number; name: string; balance: string }
       > = {};
-      for (const id of ids) {
-        const row = await readAgentOnChain(id);
-        if (row) {
-          const idStr = id.toString();
-          // Active / OutOfFunds are always manageable — clear stale soft-close
-          // (common after switching Radar contracts; same numeric id is a different agent)
-          if (
-            (row.status === 1 || row.status === 3) &&
-            isAgentClosed(idStr, RADAR_CONTRACT)
-          ) {
-            unmarkAgentClosed(idStr, RADAR_CONTRACT);
-          }
-          const softClosed =
-            isAgentClosed(idStr, RADAR_CONTRACT) &&
-            row.status !== 1 &&
-            row.status !== 3;
-          const finished = row.status === 4 || softClosed;
-          meta[idStr] = {
-            status: finished ? 4 : row.status,
-            kind: row.kind,
-            name: row.name,
-            balance: row.balance.toString(),
-          };
+      for (const { id, row } of metaRows) {
+        if (!row) continue;
+        const idStr = id.toString();
+        // Active / OutOfFunds — clear stale soft-close (cross-Radar id pollution)
+        if (
+          (row.status === 1 || row.status === 3) &&
+          isAgentClosed(idStr, RADAR_CONTRACT)
+        ) {
+          unmarkAgentClosed(idStr, RADAR_CONTRACT);
         }
+        const softClosed =
+          isAgentClosed(idStr, RADAR_CONTRACT) &&
+          row.status !== 1 &&
+          row.status !== 3;
+        const finished = row.status === 4 || softClosed;
+        meta[idStr] = {
+          status: finished ? 4 : row.status,
+          kind: row.kind,
+          name: row.name,
+          balance: row.balance.toString(),
+        };
       }
       setAgentMeta(meta);
 
@@ -422,16 +426,21 @@ export function AgentTab({
         const m = meta[id.toString()];
         return !m || m.status !== 4;
       });
+      const deadIds = ids.filter((id) => meta[id.toString()]?.status === 4);
+      const selectedStillOwned =
+        selectedId != null && ids.some((id) => id === selectedId);
       const selectedStillLive =
-        selectedId != null &&
-        liveIds.some((id) => id === selectedId);
+        selectedId != null && liveIds.some((id) => id === selectedId);
 
-      // Prefer live agents only — never auto-open a dead agent panel
+      // Keep selection after Sovereign death so last tick stays visible
       let pick: bigint | null = null;
-      if (selectedStillLive) {
+      if (selectedStillLive || selectedStillOwned) {
         pick = selectedId;
       } else if (liveIds.length) {
         pick = liveIds[liveIds.length - 1];
+      } else if (deadIds.length) {
+        // No live agents — open most recent dead so last ticks remain accessible
+        pick = deadIds[deadIds.length - 1];
       } else {
         pick = null;
       }
@@ -452,9 +461,24 @@ export function AgentTab({
           }
         } else {
           setAgent(a);
-          setWatchlist(await readWatchlist(pick));
-          setTicksLeft(await readTicksRemaining(pick));
-          setTicks(await loadMergedTicks(pick.toString(), a));
+          const [wl, left, tks] = await Promise.all([
+            readWatchlist(pick),
+            readTicksRemaining(pick),
+            loadMergedTicks(pick.toString(), a),
+          ]);
+          setWatchlist(wl);
+          setTicksLeft(left);
+          setTicks(tks);
+          // Hydrate last snapshot from history (critical for dead Sovereigns)
+          const useful = tks.find(
+            (t) =>
+              String(t.agentId) === pick!.toString() && tickHasUsefulData(t)
+          );
+          if (useful?.snapshot) {
+            setLastSnapshot(useful.snapshot as SurfDataSnapshot);
+          } else if (a.status === 4 && !opts?.soft) {
+            // Don't wipe a just-sealed final tick on hard refresh without data
+          }
           setAgentMeta((prev) => ({
             ...prev,
             [pick!.toString()]: {
@@ -1441,9 +1465,20 @@ export function AgentTab({
       );
       if (died) {
         toast.success(
-          `Tick #${newCount} sealed · agent DIED`,
-          "Sovereign life complete"
+          `Tick #${newCount}/3 sealed · agent DIED`,
+          "Last tick stays on this panel — also under Dead chips"
         );
+        setAgentMeta((prev) => ({
+          ...prev,
+          [selectedId.toString()]: {
+            status: 4,
+            kind: agent.kind,
+            name: agent.name,
+            balance: (
+              agent.balance >= fee ? agent.balance - fee : BigInt(0)
+            ).toString(),
+          },
+        }));
       } else {
         toast.success(
           `Tick #${newCount} sealed`,
@@ -1487,9 +1522,40 @@ export function AgentTab({
             rows: snapshot.rows,
             highlights: snapshot.highlights,
           }),
-        }).catch(() => undefined);
+        })
+          .then(async (r) => {
+            const j = (await r.json().catch(() => ({}))) as {
+              ok?: boolean;
+              sent?: boolean;
+            };
+            if (died && j.sent) {
+              setMsg(
+                (m) =>
+                  (typeof m === "string" ? m : "") + " · Telegram DM sent"
+              );
+            } else if (died && chatId && !j.sent) {
+              setMsg(
+                (m) =>
+                  (typeof m === "string" ? m : "") +
+                  " · Telegram linked but DM may have failed — check bot"
+              );
+            } else if (died && !chatId) {
+              setMsg(
+                (m) =>
+                  (typeof m === "string" ? m : "") +
+                  " · No Telegram link (Connect Telegram for DMs)"
+              );
+            }
+          })
+          .catch(() => undefined);
+      } else if (died) {
+        setMsg(
+          (m) =>
+            (typeof m === "string" ? m : "") + " · Connect wallet for Telegram"
+        );
       }
 
+      // Soft refresh — keep selection + lastSnapshot (do not wipe final tick)
       void refresh({ soft: true });
     } catch (e: unknown) {
       // Drop any pending data — user cancelled or tx failed
@@ -1843,7 +1909,7 @@ export function AgentTab({
           <>
           {address && <TelegramNotifyCard owner={address} />}
 
-          {/* Live agents only */}
+          {/* Live agent chips */}
           {liveAgentIds.length > 0 ? (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-white/45">Live:</span>
@@ -1860,6 +1926,7 @@ export function AgentTab({
                       setSelectedId(id);
                       setErr("");
                       setMsg("");
+                      setLastSnapshot(null);
                     }}
                     className={`rounded-full px-3 py-1 text-xs ${
                       selected
@@ -1888,24 +1955,125 @@ export function AgentTab({
               </button>
             </div>
           ) : (
-            <div className="glass rounded-2xl p-6 text-center text-sm text-white/50">
-              No live agents. Deploy one in the{" "}
-              <b className="text-white/70">Deploy</b> tab, then return here.
+            <div className="glass rounded-2xl p-4 text-center text-sm text-white/50">
+              No live agents.
+              {deadAgentIds.length > 0 ? (
+                <span className="block mt-1 text-[12px] text-white/40">
+                  Finished Sovereigns are under <b className="text-white/60">Dead</b> — tap one to see last ticks.
+                </span>
+              ) : (
+                <span className="block mt-1">
+                  Deploy one in the <b className="text-white/70">Deploy</b> tab.
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => refresh()}
-                className="mt-3 block w-full text-xs text-[#c8ff4a] underline"
+                className="mt-2 text-xs text-[#c8ff4a] underline"
               >
                 {loading ? "Refreshing…" : "Refresh"}
               </button>
             </div>
           )}
 
-          {/* Dead — minimal one-liner (no big cards, no spam) */}
+          {/* Dead — clickable chips (view last tick / history) */}
           {deadAgentIds.length > 0 && (
-            <p className="text-[11px] text-white/30">
-              Dead: {deadAgentIds.map((id) => `#${id.toString()}`).join(", ")}
-            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-white/40">Dead (tap for last ticks):</span>
+              {deadAgentIds
+                .slice()
+                .reverse()
+                .map((id) => {
+                  const key = id.toString();
+                  const meta = agentMeta[key];
+                  const selected = selectedId === id;
+                  return (
+                    <button
+                      key={`dead-${key}`}
+                      type="button"
+                      onClick={() => {
+                        setSelectedId(id);
+                        setErr("");
+                        setMsg("");
+                        setLastSnapshot(null);
+                        void refresh({ soft: true });
+                      }}
+                      className={`rounded-full px-2.5 py-1 text-[11px] ${
+                        selected
+                          ? "border border-red-400/50 bg-red-500/20 font-semibold text-red-100"
+                          : "border border-white/10 bg-black/25 text-white/45 hover:border-white/25"
+                      }`}
+                    >
+                      #{key}
+                      {meta?.name ? ` · ${meta.name.slice(0, 14)}` : ""}
+                      {meta?.kind === AGENT_KIND.Sovereign ? " · 3/3" : ""}
+                    </button>
+                  );
+                })}
+            </div>
+          )}
+
+          {/* DEAD / finished agent — read-only last life + ticks */}
+          {agent && selectedId != null && agentFinished && (
+            <div className="glass rounded-2xl border border-red-400/25 p-5">
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-lg font-semibold text-white">
+                    {agent.name}
+                  </div>
+                  <div className="text-xs text-white/45">
+                    #{selectedId.toString()} ·{" "}
+                    <span className="text-red-300/90">
+                      {AGENT_KIND_LABELS[agent.kind] || "Agent"} · DIED
+                    </span>
+                    {track && (
+                      <>
+                        {" "}
+                        ·{" "}
+                        {DATA_KINDS.find((k) => k.id === track.kind)?.label ||
+                          track.kind}
+                        {track.target && track.target !== "_"
+                          ? ` · ${track.target}`
+                          : ""}
+                      </>
+                    )}
+                  </div>
+                </div>
+                <span className="rounded-full border border-red-400/40 bg-red-500/15 px-3 py-1 text-[11px] font-semibold text-red-200">
+                  {agent.kind === AGENT_KIND.Sovereign
+                    ? `Finished · ${agent.runCount.toString()}/3 ticks`
+                    : `Dead · ${agent.runCount.toString()} ticks`}
+                </span>
+              </div>
+              <p className="mb-3 text-[12px] leading-relaxed text-white/50">
+                Sovereign agents stop after <b className="text-white/70">3</b>{" "}
+                sealed ticks. The agent leaves the Live list by design — last
+                tick data stays below. Deploy a new agent (or use{" "}
+                <b className="text-white/70">Persistent</b>) to continue.
+              </p>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <Stat label="Runs" value={agent.runCount.toString()} />
+                <Stat
+                  label="Balance left"
+                  value={`${Number(formatEther(agent.balance)).toFixed(4)} RIT`}
+                />
+                <Stat
+                  label="Last topic"
+                  value={(agent.lastTopic || "—").slice(0, 28)}
+                />
+                <Stat label="Status" value="Dead" />
+              </div>
+              {agent.balance > BigInt(0) && (
+                <button
+                  type="button"
+                  disabled={writing}
+                  onClick={() => void withdrawSelected(agent.balance)}
+                  className="mt-3 w-full rounded-xl border border-[#c8ff4a]/30 bg-[#c8ff4a]/10 py-2 text-sm text-[#c8ff4a]"
+                >
+                  Withdraw remaining {formatEther(agent.balance)} RIT
+                </button>
+              )}
+            </div>
           )}
 
           {/* LIVE / active agent — full controls */}
@@ -2231,7 +2399,6 @@ export function AgentTab({
 
           {!ticking &&
             agent &&
-            !agentFinished &&
             (lastSnapshot ||
               (ticks[0]?.snapshot &&
                 ((ticks[0].snapshot.rows?.length ?? 0) > 0 ||
@@ -2240,8 +2407,32 @@ export function AgentTab({
                   Boolean(ticks[0].snapshot.summary)))) && (
             <DataSnapshotCard
               snapshot={lastSnapshot || ticks[0].snapshot}
-              title="Latest tick data"
+              title={
+                agentFinished
+                  ? "Final tick data (agent finished)"
+                  : "Latest tick data"
+              }
             />
+          )}
+
+          {!ticking &&
+            ticks.length === 0 &&
+            agent &&
+            agentFinished && (
+            <div className="glass rounded-2xl p-5 text-sm text-white/55">
+              <h3 className="mb-2 text-sm font-semibold text-red-200/90">
+                No local tick table for this agent
+              </h3>
+              <p className="text-[12px] leading-relaxed">
+                On-chain run count is{" "}
+                <b className="text-white/80">{agent.runCount.toString()}</b>
+                {agent.kind === AGENT_KIND.Sovereign ? " / 3" : ""}. Full
+                headlines are stored in this browser when a wake completes here
+                (or auto-wake returns a snapshot). Telegram DMs need{" "}
+                <b className="text-white/70">Connect Telegram</b> on this
+                production site.
+              </p>
+            </div>
           )}
 
           {!ticking &&
@@ -2298,11 +2489,11 @@ export function AgentTab({
                   Number(b.runCount) - Number(a.runCount) || b.at - a.at
               )
               .slice(0, 5);
-            if (!history.length || !agent || agentFinished) return null;
+            if (!history.length || !agent) return null;
             return (
               <div className="glass rounded-2xl p-5">
                 <h3 className="mb-3 text-sm font-semibold text-[#c8ff4a]">
-                  Tick results
+                  {agentFinished ? "Life tick history" : "Tick results"}
                 </h3>
                 <div className="space-y-3">
                   {history.map((t) => (
