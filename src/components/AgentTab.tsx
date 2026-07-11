@@ -927,40 +927,6 @@ export function AgentTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  /** Agents are registry IDs on Radar (not their own contracts). Copy the selected agent's ID. */
-  const copySelectedAgentId = useCallback(async () => {
-    if (selectedId == null) {
-      toast.error("No agent selected", "Tap a Live or Dead chip first");
-      return;
-    }
-    const id = selectedId.toString();
-    try {
-      await navigator.clipboard.writeText(id);
-      toast.success(`Copied agent #${id}`, "Your deployed agent ID on Radar");
-    } catch {
-      toast.error("Copy failed", `Agent ID: ${id}`);
-    }
-  }, [selectedId, toast]);
-
-  const copySelectedDeployTx = useCallback(async () => {
-    if (selectedId == null) return;
-    const reg = getAppAgent(selectedId.toString());
-    const tx = reg?.createTx;
-    if (!tx) {
-      toast.error(
-        "No deploy tx in this browser",
-        "Only stored if you deployed from this device"
-      );
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(tx);
-      toast.success("Copied deploy tx", tx.slice(0, 12) + "…");
-    } catch {
-      toast.error("Copy failed", tx.slice(0, 18) + "…");
-    }
-  }, [selectedId, toast]);
-
   async function ensureWallet() {
     if (!isConnected) {
       const injected =
@@ -2201,24 +2167,6 @@ export function AgentTab({
                       </>
                     )}
                   </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void copySelectedAgentId()}
-                      className="rounded-full border border-red-400/40 bg-red-500/15 px-2.5 py-0.5 text-[11px] font-medium text-red-100 hover:bg-red-500/25"
-                    >
-                      Copy agent ID
-                    </button>
-                    {getAppAgent(selectedId.toString())?.createTx && (
-                      <button
-                        type="button"
-                        onClick={() => void copySelectedDeployTx()}
-                        className="rounded-full border border-white/15 bg-black/30 px-2.5 py-0.5 text-[11px] text-white/55 hover:text-white/80"
-                      >
-                        Copy deploy tx
-                      </button>
-                    )}
-                  </div>
                 </div>
                 <span className="rounded-full border border-red-400/40 bg-red-500/15 px-3 py-1 text-[11px] font-semibold text-red-200">
                   {agent.kind === AGENT_KIND.Sovereign
@@ -2280,24 +2228,6 @@ export function AgentTab({
                           ? ` · ${track.target}`
                           : ""}
                       </>
-                    )}
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void copySelectedAgentId()}
-                      className="rounded-full border border-[#c8ff4a]/40 bg-[#c8ff4a]/10 px-2.5 py-0.5 text-[11px] font-medium text-[#c8ff4a] hover:bg-[#c8ff4a]/20"
-                    >
-                      Copy agent ID
-                    </button>
-                    {getAppAgent(selectedId.toString())?.createTx && (
-                      <button
-                        type="button"
-                        onClick={() => void copySelectedDeployTx()}
-                        className="rounded-full border border-white/15 bg-black/30 px-2.5 py-0.5 text-[11px] text-white/55 hover:text-white/80"
-                      >
-                        Copy deploy tx
-                      </button>
                     )}
                   </div>
                 </div>
@@ -2745,31 +2675,21 @@ export function AgentTab({
           </>
           )}
 
-          <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center text-[10px] text-white/30">
-            <span>
-              Radar {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
-              {RADAR_CONTRACT?.toLowerCase() ===
-              "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f"
-                ? " · kill-capable"
-                : RADAR_CONTRACT?.toLowerCase() ===
-                    "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30"
-                  ? " · LEGACY (no kill)"
-                  : ""}
-              {canKillOnChain === true
-                ? " · killAgent available"
-                : canKillOnChain === false
-                  ? " · legacy (soft-close only)"
-                  : ""}
-            </span>
-            {selectedId != null && (
-              <button
-                type="button"
-                onClick={() => void copySelectedAgentId()}
-                className="text-[#c8ff4a]/80 underline hover:text-[#c8ff4a]"
-              >
-                copy agent #{selectedId.toString()}
-              </button>
-            )}
+          <p className="text-center text-[10px] text-white/30">
+            Radar{" "}
+            {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
+            {RADAR_CONTRACT?.toLowerCase() ===
+            "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f"
+              ? " · kill-capable"
+              : RADAR_CONTRACT?.toLowerCase() ===
+                  "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30"
+                ? " · LEGACY (no kill)"
+                : ""}
+            {canKillOnChain === true
+              ? " · killAgent available"
+              : canKillOnChain === false
+                ? " · legacy (soft-close only)"
+                : ""}{" "}
             <a
               href={addressUrl(RADAR_CONTRACT)}
               target="_blank"
