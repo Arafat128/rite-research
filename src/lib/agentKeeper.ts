@@ -143,7 +143,7 @@ async function sendKeeperRunTick(opts: {
       const block = await opts.client.getBlock({ blockTag: "latest" });
       const base = block.baseFeePerGas ?? BigInt(1);
       // tip + 2× base — stays cheap on Ritual (do NOT force 1 gwei)
-      let maxPriorityFeePerGas = BigInt(1_000_000); // 0.001 gwei
+      const maxPriorityFeePerGas = BigInt(1_000_000); // 0.001 gwei
       let maxFeePerGas = base * BigInt(2) + maxPriorityFeePerGas;
       // Safety floor so zero-fee txs aren't dropped if RPC returns 0 baseFee
       if (maxFeePerGas < BigInt(10_000_000)) {
