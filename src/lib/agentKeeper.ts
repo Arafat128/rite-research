@@ -113,10 +113,13 @@ function isRpcFlake(e: unknown): boolean {
 }
 
 /**
- * Server runTick without eth_estimateGas / simulateContract.
- * Ritual public RPC often fails those with "Transaction creation failed"
- * even when the call is valid — manual Wake worked because the browser
- * path fell back to a gas floor; auto-wake must never depend on estimate.
+ * Server runTick — never eth_estimateGas / simulateContract.
+ *
+ * Ritual facts (verified against public RPC):
+ * - Legacy type-0 txs are rejected: "transaction type not supported"
+ * - EIP-1559 (type 2) is accepted
+ * - baseFee is tiny (~wei); forcing 1+ gwei drains the keeper wallet
+ * - Manual Wake uses the user wallet for gas; auto-wake uses KEEPER_PRIVATE_KEY
  */
 async function sendKeeperRunTick(opts: {
   wallet: WalletClient;
@@ -131,37 +134,65 @@ async function sendKeeperRunTick(opts: {
     args: [opts.agentId, opts.digest],
   });
 
+  // ~117k observed for runTick; keep headroom without over-reserving gas*price
+  const gas = BigInt(220_000);
+
   let lastErr: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      let gasPrice: bigint;
-      try {
-        gasPrice = await opts.client.getGasPrice();
-      } catch {
-        gasPrice = BigInt(1_500_000_000);
+      const block = await opts.client.getBlock({ blockTag: "latest" });
+      const base = block.baseFeePerGas ?? BigInt(1);
+      // tip + 2× base — stays cheap on Ritual (do NOT force 1 gwei)
+      let maxPriorityFeePerGas = BigInt(1_000_000); // 0.001 gwei
+      let maxFeePerGas = base * BigInt(2) + maxPriorityFeePerGas;
+      // Safety floor so zero-fee txs aren't dropped if RPC returns 0 baseFee
+      if (maxFeePerGas < BigInt(10_000_000)) {
+        maxFeePerGas = BigInt(10_000_000); // 0.01 gwei
       }
-      if (gasPrice < BigInt(1_000_000_000)) gasPrice = BigInt(1_000_000_000);
-      gasPrice = (gasPrice * BigInt(130)) / BigInt(100);
+      // Cap so a flaky high gasPrice RPC cannot drain the keeper
+      const cap = BigInt(50_000_000_000); // 50 gwei
+      if (maxFeePerGas > cap) maxFeePerGas = cap;
+
+      const bal = await opts.client.getBalance({
+        address: opts.account.address,
+      });
+      const need = gas * maxFeePerGas;
+      if (bal < need) {
+        throw new Error(
+          `Keeper wallet low on RIT for gas (have ${bal.toString()} wei, need ~${need.toString()} wei). ` +
+            `Send a little RIT to ${opts.account.address} — agent balance cannot pay gas.`
+        );
+      }
 
       const nonce = await opts.client.getTransactionCount({
         address: opts.account.address,
         blockTag: "pending",
       });
 
-      // Fully specified legacy tx — viem must not call eth_estimateGas
+      // Fully specified EIP-1559 — Ritual rejects legacy type-0
       const hash = await opts.wallet.sendTransaction({
         account: opts.account,
         to: RADAR_CONTRACT as Address,
         data,
-        gas: BigInt(320_000),
-        gasPrice,
+        gas,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
         nonce,
         chain: ritualChain,
-        type: "legacy",
+        type: "eip1559",
       });
       return hash;
     } catch (e) {
       lastErr = e;
+      const blob = errBlob(e);
+      // Don't spin on insufficient funds / auth / too-early
+      if (
+        /insufficient funds|notauthorized|tooearly|notowner|agentisdead|badstatus|emptywatchlist|zerodigest|low on rit for gas/i.test(
+          blob
+        )
+      ) {
+        break;
+      }
       if (!isRpcFlake(e) || attempt === 4) break;
       await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
     }
@@ -486,6 +517,12 @@ export async function runDueAgentTicks(opts?: {
           "NotAuthorized: keeper wallet is not setKeeper(true) on this Radar — admin must allowlist KEEPER_PRIVATE_KEY address";
       } else if (/TooEarly/i.test(msg)) {
         error = "TooEarly: on-chain block interval not elapsed";
+      } else if (/low on rit for gas|insufficient funds for gas/i.test(msg)) {
+        error =
+          "Keeper wallet needs more RIT for gas (agent balance cannot pay gas). Fund the keeper address shown in /api/agent/cron?health=1.";
+      } else if (/transaction type not supported/i.test(msg)) {
+        error =
+          "Ritual rejected tx type — auto-wake must use EIP-1559 (deploy update if you still see this).";
       } else if (isRpcFlake(e)) {
         error =
           "Ritual RPC flake during auto-wake send — retrying on next poll (~20s).";
