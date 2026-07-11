@@ -927,6 +927,16 @@ export function AgentTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
+  const copyRadarAddress = useCallback(async () => {
+    if (!RADAR_CONTRACT) return;
+    try {
+      await navigator.clipboard.writeText(RADAR_CONTRACT);
+      toast.success("Copied", "Radar agent contract address");
+    } catch {
+      toast.error("Copy failed", "Select and copy the address manually");
+    }
+  }, [toast]);
+
   async function ensureWallet() {
     if (!isConnected) {
       const injected =
@@ -1770,26 +1780,46 @@ export function AgentTab({
 
       {/* Make Radar env mismatch obvious (localhost vs Vercel often differ) */}
       {RADAR_CONTRACT && (
-        <p className="mb-4 text-[11px] text-white/40">
-          On-chain registry:{" "}
-          <code className="text-white/60">
-            {RADAR_CONTRACT.slice(0, 10)}…{RADAR_CONTRACT.slice(-6)}
-          </code>
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-[11px] text-white/40">
+          <span>
+            {mode === "manage" ? "Agent contract:" : "On-chain registry:"}{" "}
+            <code className="text-white/60">
+              {RADAR_CONTRACT.slice(0, 10)}…{RADAR_CONTRACT.slice(-6)}
+            </code>
+          </span>
+          <button
+            type="button"
+            onClick={() => void copyRadarAddress()}
+            className="rounded-full border border-[#c8ff4a]/35 bg-[#c8ff4a]/10 px-2.5 py-0.5 text-[11px] font-medium text-[#c8ff4a] hover:bg-[#c8ff4a]/20"
+            title={RADAR_CONTRACT}
+          >
+            Copy address
+          </button>
+          <a
+            href={addressUrl(RADAR_CONTRACT)}
+            target="_blank"
+            rel="noreferrer"
+            className="text-white/45 underline hover:text-white/70"
+          >
+            explorer ↗
+          </a>
           {RADAR_CONTRACT.toLowerCase() ===
           "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30" ? (
-            <span className="text-amber-200/90">
-              {" "}
-              — LEGACY Radar. Agents here are NOT the same as kill-capable{" "}
+            <span className="w-full text-amber-200/90">
+              LEGACY Radar. Agents here are NOT the same as kill-capable{" "}
               <code className="text-white/50">0x50a3…</code>. Set Vercel{" "}
               <code className="text-[#c8ff4a]/80">NEXT_PUBLIC_RADAR_CONTRACT</code>{" "}
-              to <code className="text-white/50">0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f</code>{" "}
+              to{" "}
+              <code className="text-white/50">
+                0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f
+              </code>{" "}
               and redeploy to match local.
             </span>
           ) : RADAR_CONTRACT.toLowerCase() ===
             "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f" ? (
-            <span className="text-white/35"> — kill-capable Radar</span>
+            <span className="text-white/35">— kill-capable Radar</span>
           ) : null}
-        </p>
+        </div>
       )}
 
       <div className="mb-6 flex flex-wrap gap-2">
@@ -2672,21 +2702,29 @@ export function AgentTab({
           </>
           )}
 
-          <p className="text-center text-[10px] text-white/30">
-            Radar{" "}
-            {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
-            {RADAR_CONTRACT?.toLowerCase() ===
-            "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f"
-              ? " · kill-capable"
-              : RADAR_CONTRACT?.toLowerCase() ===
-                  "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30"
-                ? " · LEGACY (no kill)"
-                : ""}
-            {canKillOnChain === true
-              ? " · killAgent available"
-              : canKillOnChain === false
-                ? " · legacy (soft-close only)"
-                : ""}{" "}
+          <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center text-[10px] text-white/30">
+            <span>
+              Radar {RADAR_CONTRACT?.slice(0, 6)}…{RADAR_CONTRACT?.slice(-4)}
+              {RADAR_CONTRACT?.toLowerCase() ===
+              "0x50a3fb54aa1289546a0be2d6b29d689bb2dd5f6f"
+                ? " · kill-capable"
+                : RADAR_CONTRACT?.toLowerCase() ===
+                    "0x5ed8c4179f5cd798126ea3d0fa75b43c4a9beb30"
+                  ? " · LEGACY (no kill)"
+                  : ""}
+              {canKillOnChain === true
+                ? " · killAgent available"
+                : canKillOnChain === false
+                  ? " · legacy (soft-close only)"
+                  : ""}
+            </span>
+            <button
+              type="button"
+              onClick={() => void copyRadarAddress()}
+              className="text-[#c8ff4a]/80 underline hover:text-[#c8ff4a]"
+            >
+              copy contract
+            </button>
             <a
               href={addressUrl(RADAR_CONTRACT)}
               target="_blank"
