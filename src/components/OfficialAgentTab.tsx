@@ -256,12 +256,29 @@ export function OfficialAgentTab({ mode }: Props) {
             functionName: "deployHarness",
             args: [built.userSalt],
           });
+          // Estimate + 40% headroom (CREATE3 can be heavier than docs ~400k)
+          let deployGas = built.gasDeploy;
+          if (publicClient) {
+            try {
+              const est = await publicClient.estimateGas({
+                account: address,
+                to: SOVEREIGN_FACTORY,
+                data: deployData,
+              });
+              const withBuffer = (est * BigInt(140)) / BigInt(100);
+              if (withBuffer > deployGas) deployGas = withBuffer;
+              // Floor high enough for observed ~1.13M usage
+              if (deployGas < BigInt(2_500_000)) deployGas = BigInt(2_500_000);
+            } catch {
+              deployGas = BigInt(3_500_000);
+            }
+          }
           const deployHash = await walletClient.sendTransaction({
             chain: ritualChain,
             account: address,
             to: SOVEREIGN_FACTORY,
             data: deployData,
-            gas: built.gasDeploy,
+            gas: deployGas,
             maxFeePerGas: fees.maxFeePerGas,
             maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
             type: "eip1559",
@@ -274,8 +291,16 @@ export function OfficialAgentTab({ mode }: Props) {
               timeout: 180_000,
             });
             if (r1.status !== "success") {
+              const used = r1.gasUsed;
+              const limit = deployGas;
+              // Near full consumption ⇒ out-of-gas, not "bad name"
+              if (used * BigInt(100) >= limit * BigInt(90)) {
+                throw new Error(
+                  `Step 1 ran out of gas (used ${used.toString()} / limit ${limit.toString()}). Retry — limit will be higher on next deploy.`
+                );
+              }
               throw new Error(
-                `Step 1 deployHarness failed (gas ${r1.gasUsed}/${built.gasDeploy}). Use a new agent name.`
+                `Step 1 deployHarness reverted (gas ${used.toString()}/${limit.toString()}). Try a new agent name if the salt is taken.`
               );
             }
             const code = await publicClient.getBytecode({
@@ -346,8 +371,15 @@ export function OfficialAgentTab({ mode }: Props) {
               timeout: 180_000,
             });
             if (r2.status !== "success") {
+              const used = r2.gasUsed;
+              const limit = built.gasConfigure;
+              if (used * BigInt(100) >= limit * BigInt(90)) {
+                throw new Error(
+                  `Step 2 ran out of gas (used ${used.toString()} / limit ${limit.toString()}). Retry with higher limit.`
+                );
+              }
               throw new Error(
-                `Step 2 configureFundAndStart failed (gas ${r2.gasUsed}/${built.gasConfigure}). Funding or schedule rejected — try new name + ≥2 RIT.`
+                `Step 2 configureFundAndStart reverted (gas ${used.toString()}/${limit.toString()}). Check ≥2 RIT funding or try a new agent name.`
               );
             }
           }
@@ -527,7 +559,7 @@ export function OfficialAgentTab({ mode }: Props) {
             : "My Ritual AI agents"}
         </h2>
         <span className="rounded-full border border-violet-400/40 bg-violet-500/15 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-violet-200">
-          Official TEE · v3 two-step
+          Official TEE · v4 (higher gas)
         </span>
       </div>
       <p className="mb-5 text-sm text-white/50">

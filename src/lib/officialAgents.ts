@@ -632,8 +632,9 @@ export async function buildSovereignTwoStepLaunch(
     schedule,
     rolling,
     schedulerLockDuration: BigInt(100_000),
-    gasDeploy: BigInt(1_200_000),
-    gasConfigure: BigInt(5_000_000),
+    // Live CREATE3 deploy used ~1.13M gas in the wild — 1.2M OOG'd. Give headroom.
+    gasDeploy: BigInt(3_500_000),
+    gasConfigure: BigInt(6_000_000),
   };
 }
 
