@@ -135,6 +135,11 @@ const ERROR_HINTS: Record<string, string> = {
   InsufficientPayment: "Not enough RITUAL attached to cover the deploy fee.",
   BadName: "Invalid name or watchlist entry.",
   BadKind: "Invalid agent class.",
+  TooEarly:
+    "Schedule not due yet (on-chain block interval). Wait for the countdown, then Wake again.",
+  NotAuthorized:
+    "Wallet is not allowed to run this tick. Use the owner wallet (or a setKeeper allowlisted key).",
+  ZeroDigest: "Invalid tick digest — try Wake again.",
 };
 
 /** Known custom-error selectors (first 4 bytes) → name */
@@ -259,8 +264,14 @@ export function decodeRadarRevert(
     if (/user rejected|denied|rejected the request/i.test(raw)) {
       return "Transaction rejected in wallet.";
     }
+    if (
+      /transaction creation failed|opcodenotfound/i.test(raw) &&
+      /estimate|gas|rpc/i.test(raw)
+    ) {
+      return "Ritual RPC failed gas estimation (network flake). Retry Wake in a few seconds.";
+    }
     if (/gas|fee|estimate/i.test(raw) && /unavail|fail|intrinsic|underpriced/i.test(raw)) {
-      return "MetaMask could not estimate gas on Ritual. Retry — the app now sets gas price explicitly. If it persists, switch network off/on Ritual Testnet (1979).";
+      return "MetaMask could not estimate gas on Ritual. Retry — the app sets gas price explicitly. If it persists, switch network off/on Ritual Testnet (1979).";
     }
     // Context-aware fallback when RPC only says "execution reverted"
     if (/execution reverted/i.test(raw)) {
@@ -294,9 +305,54 @@ export type RadarFeeOverrides = {
   gasPrice: bigint;
 };
 
+/** Ritual RPC often returns this for eth_call / eth_estimateGas under load. */
+function isRitualRpcFlake(e: unknown): boolean {
+  const parts: string[] = [];
+  for (const node of walkError(e)) {
+    if (!node) continue;
+    if (node instanceof Error) parts.push(node.message);
+    if (node && typeof node === "object") {
+      const o = node as {
+        shortMessage?: string;
+        details?: string;
+        message?: string;
+      };
+      if (o.shortMessage) parts.push(o.shortMessage);
+      if (o.details) parts.push(String(o.details));
+      if (o.message) parts.push(o.message);
+    }
+  }
+  const blob = parts.join(" ").toLowerCase();
+  // "Transaction creation failed" / OpcodeNotFound is Ritual's flaky estimateGas
+  if (
+    /transaction creation failed|opcodenotfound|http request failed|fetch failed|timeout|econnreset|socket|502|503|504|network error|internal error|rate limit/i.test(
+      blob
+    )
+  ) {
+    // Real contract reverts should not use the floor path
+    if (
+      /execution reverted|tooearly|notauthorized|notowner|agentisdead|badstatus|emptywatchlist|zerodigest|insufficientbalance|insufficient funds/i.test(
+        blob
+      )
+    ) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function sleepMs(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 /**
  * Simulate + estimate gas for a RadarAgent write.
  * Throws with a decoded message if the call would revert.
+ *
+ * Ritual public RPC frequently fails eth_estimateGas with
+ * "Transaction creation failed" even when runTick is valid — we retry,
+ * then fall back to a safe gas floor so Wake still opens the wallet.
  */
 export async function prepareRadarWrite(opts: {
   account: Address;
@@ -318,9 +374,9 @@ export async function prepareRadarWrite(opts: {
   if (!RADAR_CONTRACT) {
     throw new Error("NEXT_PUBLIC_RADAR_CONTRACT is not set");
   }
-  const client = getRitualReadClient(true);
   const address = RADAR_CONTRACT as Address;
   const args = (opts.args ?? []) as never[];
+  const floor = opts.gasFloor ?? BigInt(100_000);
 
   const base = {
     address,
@@ -331,34 +387,89 @@ export async function prepareRadarWrite(opts: {
     ...(opts.value != null ? { value: opts.value } : {}),
   } as const;
 
-  try {
-    await client.simulateContract({
-      ...base,
-      chain: ritualChain,
-    } as never);
-  } catch (e) {
-    throw new Error(decodeRadarRevert(e, opts.functionName));
+  // --- simulate (retries on flaky RPC) ---
+  let simulated = false;
+  let lastSimErr: unknown;
+  for (let i = 0; i < 3; i++) {
+    const client = getRitualReadClient(i > 0);
+    try {
+      await client.simulateContract({
+        ...base,
+        chain: ritualChain,
+      } as never);
+      simulated = true;
+      lastSimErr = undefined;
+      break;
+    } catch (e) {
+      lastSimErr = e;
+      if (isRitualRpcFlake(e) && i < 2) {
+        await sleepMs(350 * (i + 1));
+        continue;
+      }
+      if (!isRitualRpcFlake(e)) {
+        throw new Error(decodeRadarRevert(e, opts.functionName));
+      }
+    }
+  }
+  if (!simulated && lastSimErr && !isRitualRpcFlake(lastSimErr)) {
+    throw new Error(decodeRadarRevert(lastSimErr, opts.functionName));
   }
 
-  let gas: bigint;
-  try {
-    gas = await client.estimateContractGas(base as never);
-  } catch (e) {
-    throw new Error(
-      decodeRadarRevert(e, opts.functionName) ||
-        "Gas estimation failed. Ensure you are on Ritual Testnet and own this agent."
-    );
+  // --- estimate gas (retries → floor on RPC flake) ---
+  let gas: bigint | null = null;
+  let lastEstErr: unknown;
+  for (let i = 0; i < 3; i++) {
+    const client = getRitualReadClient(i > 0);
+    try {
+      gas = await client.estimateContractGas(base as never);
+      lastEstErr = undefined;
+      break;
+    } catch (e) {
+      lastEstErr = e;
+      if (isRitualRpcFlake(e) && i < 2) {
+        await sleepMs(350 * (i + 1));
+        continue;
+      }
+      if (!isRitualRpcFlake(e)) {
+        throw new Error(
+          decodeRadarRevert(e, opts.functionName) ||
+            "Gas estimation failed. Ensure you are on Ritual Testnet and own this agent."
+        );
+      }
+    }
   }
 
-  // Headroom for Ritual RPC variance + refunds (withdraw/kill send value out)
-  gas = (gas * BigInt(150)) / BigInt(100);
-  const floor = opts.gasFloor ?? BigInt(100_000);
+  if (gas == null) {
+    // Flaky eth_estimateGas only — use function-specific safe floor
+    const defaults: Partial<Record<string, bigint>> = {
+      runTick: BigInt(280_000),
+      createAgent: BigInt(350_000),
+      setWatchlist: BigInt(200_000),
+      killAgent: BigInt(200_000),
+      withdraw: BigInt(150_000),
+      setActive: BigInt(120_000),
+      setPaused: BigInt(120_000),
+      fundAgent: BigInt(120_000),
+      setWakeInterval: BigInt(120_000),
+    };
+    gas = defaults[opts.functionName] ?? floor;
+    if (lastEstErr && !isRitualRpcFlake(lastEstErr)) {
+      throw new Error(
+        decodeRadarRevert(lastEstErr, opts.functionName) ||
+          "Gas estimation failed."
+      );
+    }
+  } else {
+    // Headroom for Ritual RPC variance + refunds (withdraw/kill send value out)
+    gas = (gas * BigInt(150)) / BigInt(100);
+  }
+
   if (gas < floor) gas = floor;
   if (gas > BigInt(800_000)) gas = BigInt(800_000);
 
   let gasPrice: bigint;
   try {
-    gasPrice = await client.getGasPrice();
+    gasPrice = await getRitualReadClient(true).getGasPrice();
   } catch {
     gasPrice = BigInt(1_500_000_000); // 1.5 gwei fallback
   }

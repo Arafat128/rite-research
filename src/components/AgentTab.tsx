@@ -1387,7 +1387,8 @@ export function AgentTab({
       const hash = await radarWrite({
         functionName: "runTick",
         args: [selectedId, digest],
-        gasFloor: BigInt(200_000),
+        // Ritual estimateGas often flakes; floor covers typical ~180k runTick
+        gasFloor: BigInt(280_000),
       });
       const receipt = await waitTx(hash);
       if (receipt.status !== "success") {
