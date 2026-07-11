@@ -129,7 +129,7 @@ export const DATA_KINDS: DataKindDef[] = [
     label: "Ritual network pulse",
     short: "Ritual",
     description:
-      "Persistent / Sovereign agent counts, total agents, latest block & gas.",
+      "Ritual testnet pulse: network agent totals (AgentHeartbeat), Persistent count, block & gas — not your Rite deploys.",
     targetLabel: null,
     targetPlaceholder: "",
     defaultTarget: "_",
@@ -826,6 +826,13 @@ async function fetchNarrativeBundle(
   };
 }
 
+/**
+ * Ritual system AgentHeartbeat — network-wide persistent agent registry
+ * (not the Rite app RadarAgent). See docs: 0xEF50…3aCa
+ */
+const RITUAL_AGENT_HEARTBEAT =
+  "0xEF505E801f1Db392B5289690E2ffc20e840A3aCa";
+
 async function fetchRitualNetwork(): Promise<
   Omit<
     SurfDataSnapshot,
@@ -834,16 +841,15 @@ async function fetchRitualNetwork(): Promise<
 > {
   const ritualRpc =
     process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.ritualfoundation.org";
-  const radar = (process.env.NEXT_PUBLIC_RADAR_CONTRACT || "").trim();
 
   let block = "—";
   let gasGwei: number | null = null;
   let chainId = "—";
-  let nextAgent = 0;
-  let totalAgents = 0;
-  let persistent = 0;
-  let sovereign = 0;
-  let liveActive = 0;
+  /** Network-wide totals from Ritual AgentHeartbeat (testnet registry) */
+  let networkTotal = 0;
+  let networkPersistent = 0;
+  let networkSovereign = 0;
+  let networkCountsOk = false;
 
   try {
     const [b, g, c] = await Promise.all([
@@ -858,73 +864,58 @@ async function fetchRitualNetwork(): Promise<
     /* ignore */
   }
 
-  if (radar && /^0x[a-fA-F0-9]{40}$/.test(radar)) {
-    try {
-      // nextAgentId() selector 0x30efc498
-      const raw = (await rpcEthCall(ritualRpc, "eth_call", [
-        { to: radar, data: "0x30efc498" },
-        "latest",
-      ])) as string;
-      if (raw && raw !== "0x") {
-        nextAgent = Number(BigInt(raw));
-        totalAgents = Math.max(0, nextAgent - 1);
+  // Ritual testnet agent registry (AgentHeartbeat.agentCount) — NOT Rite Radar
+  try {
+    const { createPublicClient, http, defineChain, parseAbi } = await import(
+      "viem"
+    );
+    const chain = defineChain({
+      id: Number(process.env.NEXT_PUBLIC_CHAIN_ID || 1979),
+      name: "ritual",
+      nativeCurrency: { name: "RIT", symbol: "RIT", decimals: 18 },
+      rpcUrls: { default: { http: [ritualRpc] } },
+    });
+    const client = createPublicClient({
+      chain,
+      transport: http(ritualRpc, { timeout: 20_000 }),
+    });
+
+    // agentCount() — total agents registered for network heartbeat / lifecycle
+    const count = (await client.readContract({
+      address: RITUAL_AGENT_HEARTBEAT as `0x${string}`,
+      abi: parseAbi(["function agentCount() view returns (uint256)"]),
+      functionName: "agentCount",
+    })) as bigint;
+    networkTotal = Number(count);
+    networkCountsOk = true;
+
+    // Heartbeat registry tracks Persistent-style network agents.
+    // Prefer explicit counters if the contract exposes them later.
+    for (const [fn, assign] of [
+      ["persistentCount", (n: number) => (networkPersistent = n)],
+      ["persistentAgentCount", (n: number) => (networkPersistent = n)],
+      ["sovereignCount", (n: number) => (networkSovereign = n)],
+      ["sovereignAgentCount", (n: number) => (networkSovereign = n)],
+    ] as const) {
+      try {
+        const n = (await client.readContract({
+          address: RITUAL_AGENT_HEARTBEAT as `0x${string}`,
+          abi: parseAbi([`function ${fn}() view returns (uint256)`]),
+          functionName: fn,
+        })) as bigint;
+        assign(Number(n));
+      } catch {
+        /* optional */
       }
-    } catch {
-      /* optional */
     }
 
-    // Count Persistent (kind=0) vs Sovereign (kind=1) via getAgent
-    // ABI: getAgent(uint256) — use viem for correct decode
-    if (totalAgents > 0) {
-      try {
-        const { createPublicClient, http, defineChain } = await import("viem");
-        const { radarAgentAbi } = await import("@/lib/ritual");
-        const chain = defineChain({
-          id: Number(process.env.NEXT_PUBLIC_CHAIN_ID || 1979),
-          name: "ritual",
-          nativeCurrency: { name: "RIT", symbol: "RIT", decimals: 18 },
-          rpcUrls: { default: { http: [ritualRpc] } },
-        });
-        const client = createPublicClient({
-          chain,
-          transport: http(ritualRpc, { timeout: 20_000 }),
-        });
-        // Full scan when small registry; otherwise last 80 ids
-        const maxScan = Math.min(totalAgents, 80);
-        const startId =
-          totalAgents <= maxScan ? 1 : totalAgents - maxScan + 1;
-        const ids = Array.from({ length: maxScan }, (_, i) =>
-          BigInt(startId + i)
-        ).filter((id) => id >= BigInt(1));
-        const agents = await Promise.all(
-          ids.map((id) =>
-            client
-              .readContract({
-                address: radar as `0x${string}`,
-                abi: radarAgentAbi,
-                functionName: "getAgent",
-                args: [id],
-              })
-              .catch(() => null)
-          )
-        );
-        for (const a of agents) {
-          if (!a || typeof a !== "object") continue;
-          const ag = a as { kind?: number; status?: number };
-          const kind = Number(ag.kind ?? -1);
-          const status = Number(ag.status ?? 0);
-          if (kind === 0) persistent += 1;
-          else if (kind === 1) sovereign += 1;
-          if (status === 1) liveActive += 1;
-        }
-        // If we only scanned a window, scale note in summary — still show raw counts for scanned set + totalAgents
-        if (totalAgents > maxScan) {
-          // Prefer full totals when nextId small; when large, counts are "recent window"
-        }
-      } catch {
-        /* optional counts */
-      }
+    // Default: AgentHeartbeat is the Persistent agent registry on Ritual
+    if (networkPersistent === 0 && networkTotal > 0) {
+      networkPersistent = networkTotal;
     }
+    // Sovereign network agents are separate (0x080C / explorer); leave 0 if unknown
+  } catch {
+    networkCountsOk = false;
   }
 
   const rows = [
@@ -933,23 +924,42 @@ async function fetchRitualNetwork(): Promise<
       Field: "Network gas",
       Value: gasGwei != null ? `${gasGwei.toFixed(6)} gwei` : "—",
     },
-    { Field: "Total agents", Value: String(totalAgents) },
     {
-      Field: "Persistent agents",
-      Value: String(persistent),
+      Field: "Total agents (testnet)",
+      Value: networkCountsOk ? String(networkTotal) : "—",
     },
     {
-      Field: "Sovereign agents",
-      Value: String(sovereign),
+      Field: "Persistent agents (testnet)",
+      Value: networkCountsOk ? String(networkPersistent) : "—",
     },
-    { Field: "Live (Active)", Value: String(liveActive) },
+    {
+      Field: "Sovereign agents (testnet)",
+      Value: networkCountsOk
+        ? networkSovereign > 0
+          ? String(networkSovereign)
+          : "n/a*"
+        : "—",
+    },
     { Field: "Chain id", Value: chainId },
+    {
+      Field: "Source",
+      Value: "AgentHeartbeat 0xEF50…3aCa",
+    },
   ];
 
+  const sovNote =
+    networkSovereign > 0
+      ? `${networkSovereign} Sovereign`
+      : "Sovereign n/a (not in heartbeat registry)";
+
   return {
-    summary: `Ritual · block ${block} · gas ${
-      gasGwei != null ? gasGwei.toFixed(4) : "—"
-    } gwei · ${totalAgents} agents (${persistent} Persistent / ${sovereign} Sovereign) · ${liveActive} live`,
+    summary: networkCountsOk
+      ? `Ritual testnet · block ${block} · gas ${
+          gasGwei != null ? gasGwei.toFixed(4) : "—"
+        } gwei · ${networkTotal} network agents (${networkPersistent} Persistent · ${sovNote})`
+      : `Ritual · block ${block} · gas ${
+          gasGwei != null ? gasGwei.toFixed(4) : "—"
+        } gwei · agent registry unavailable`,
     rows,
     highlights: [
       { label: "Block", value: block },
@@ -957,10 +967,13 @@ async function fetchRitualNetwork(): Promise<
         label: "Gas",
         value: gasGwei != null ? `${gasGwei.toFixed(4)} gwei` : "—",
       },
-      { label: "Total", value: String(totalAgents) },
       {
-        label: "P / S",
-        value: `${persistent} / ${sovereign}`,
+        label: "Total",
+        value: networkCountsOk ? String(networkTotal) : "—",
+      },
+      {
+        label: "Persistent",
+        value: networkCountsOk ? String(networkPersistent) : "—",
       },
     ],
   };

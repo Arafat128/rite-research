@@ -32,7 +32,7 @@ Fees always split **50% treasury / 50% BountyPool**.
 | **Persistent** | **0.1** RIT | Never dies from tick count (best for schedules) |
 | **Sovereign** | **0.01** RIT | Dies after **3** ticks |
 
-**Streams (locked at deploy):** token price (5 rows) · fear & greed (5) · news (8) · stablecoin peg (1 symbol) · gas (1 network) · whales (2) · OI/long-short (1 row) · narrative (3 news+mindshare) · Ritual network (P/S counts, block, gas, total)  
+**Streams (locked at deploy):** token price (5 rows) · fear & greed (5) · news (8) · stablecoin peg (1 symbol) · gas (1 network) · whales (2) · OI/long-short (1 row) · narrative (3 news+mindshare) · Ritual network (testnet AgentHeartbeat totals + block/gas)  
 
 **Stack:** Next.js 14 · wagmi/viem · Surf API · Foundry · Vercel · Upstash (Telegram multi-user) · GitHub Actions / QStash (unattended ticks)
 
