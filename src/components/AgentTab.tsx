@@ -639,9 +639,37 @@ export function AgentTab({
             };
             saveTick(rec, RADAR_CONTRACT);
 
-            // Only browser-push if server did NOT already DM (avoids double Telegram)
-            const serverSent = hit.telegram?.sent === true;
-            if (chatId && address && !serverSent) {
+            // Telegram: server notifyAgentTick already sent for keeper wakes.
+            // Browser backup ONLY when server could not resolve link (not_linked).
+            // Never re-push when server sent, duplicate, filtered, or errored mid-send.
+            const tg = hit.telegram;
+            const runKey = `rite_tg_tick_sent:${hit.agentId}:${hit.runCount || rec.runCount}`;
+            let alreadyPushed = false;
+            try {
+              alreadyPushed = sessionStorage.getItem(runKey) === "1";
+            } catch {
+              /* ignore */
+            }
+            const serverSent = tg?.sent === true;
+            const serverDup = tg?.reason === "duplicate";
+            if (serverSent || serverDup) {
+              try {
+                sessionStorage.setItem(runKey, "1");
+              } catch {
+                /* ignore */
+              }
+            }
+            const needClientBackup =
+              Boolean(chatId && address && !serverSent && !serverDup && !alreadyPushed) &&
+              (!tg ||
+                tg.reason === "not_linked" ||
+                tg.reason === "telegram_not_configured");
+            if (needClientBackup) {
+              try {
+                sessionStorage.setItem(runKey, "1");
+              } catch {
+                /* ignore */
+              }
               void fetch("/api/notify/telegram/push", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -1502,8 +1530,7 @@ export function AgentTab({
         );
       }
 
-      // Telegram DM after successful seal (no flow change if unlinked)
-      // Include full rows so DM shows all headlines with clickable source links
+      // Telegram DM after successful seal (server dedupes by agent+runCount)
       if (address) {
         let chatId: string | undefined;
         try {
@@ -1520,6 +1547,15 @@ export function AgentTab({
         } catch {
           /* ignore */
         }
+        const runKey = `rite_tg_tick_sent:${selectedId.toString()}:${newCount.toString()}`;
+        let skipTg = false;
+        try {
+          skipTg = sessionStorage.getItem(runKey) === "1";
+          if (!skipTg) sessionStorage.setItem(runKey, "1");
+        } catch {
+          /* ignore */
+        }
+        if (!skipTg) {
         void fetch("/api/notify/telegram/push", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1564,6 +1600,7 @@ export function AgentTab({
             }
           })
           .catch(() => undefined);
+        }
       } else if (died) {
         setMsg(
           (m) =>

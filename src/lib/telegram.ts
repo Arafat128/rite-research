@@ -237,9 +237,49 @@ export function formatTickTelegramMessage(p: TickNotifyPayload): string {
   return out;
 }
 
+/** Dedupe keys: same agent+runCount must only DM once (even across races). */
+function tickDmPrimaryKey(p: TickNotifyPayload): string {
+  return `${p.owner.toLowerCase()}:${String(p.agentId)}:${String(p.runCount)}`;
+}
+
+function tickDmTxKey(p: TickNotifyPayload): string | null {
+  if (!p.txHash || p.txHash.length < 10) return null;
+  return `tx:${p.txHash.toLowerCase()}`;
+}
+
+const gTickDm = globalThis as typeof globalThis & {
+  __riteTgTickDmSent?: Map<string, number>;
+  __riteTgTickDmInflight?: Map<
+    string,
+    Promise<{ sent: boolean; reason?: string }>
+  >;
+};
+
+function memoryTickDmClaimed(key: string): boolean {
+  if (!gTickDm.__riteTgTickDmSent) gTickDm.__riteTgTickDmSent = new Map();
+  const at = gTickDm.__riteTgTickDmSent.get(key);
+  return Boolean(at && Date.now() - at < 15 * 60 * 1000);
+}
+
+function memoryTickDmMark(key: string): void {
+  if (!gTickDm.__riteTgTickDmSent) gTickDm.__riteTgTickDmSent = new Map();
+  gTickDm.__riteTgTickDmSent.set(key, Date.now());
+  if (gTickDm.__riteTgTickDmSent.size > 400) {
+    const cutoff = Date.now() - 15 * 60 * 1000;
+    Array.from(gTickDm.__riteTgTickDmSent.entries()).forEach(([k, v]) => {
+      if (v < cutoff) gTickDm.__riteTgTickDmSent!.delete(k);
+    });
+  }
+}
+
+function memoryTickDmRelease(key: string): void {
+  gTickDm.__riteTgTickDmSent?.delete(key);
+}
+
 /**
  * Notify owner if Telegram is linked and agent matches filter.
- * Never throws to callers (log only).
+ * Dedupes by owner+agentId+runCount (and txHash) so concurrent auto-wake/cron
+ * cannot send the same tick twice. Never throws to callers (log only).
  */
 export async function notifyAgentTick(
   p: TickNotifyPayload
@@ -247,21 +287,78 @@ export async function notifyAgentTick(
   if (!telegramConfigured()) {
     return { sent: false, reason: "telegram_not_configured" };
   }
-  // Resolve across instances (Upstash) — do not rely on in-memory only
-  const pref = await resolveTelegramPref(p.owner);
-  if (!pref) return { sent: false, reason: "not_linked" };
-  if (!shouldNotifyAgent(pref, p.agentId)) {
-    return { sent: false, reason: "filtered" };
+
+  const primary = tickDmPrimaryKey(p);
+  const txKey = tickDmTxKey(p);
+
+  // Collapse concurrent identical notifies on this instance
+  if (!gTickDm.__riteTgTickDmInflight) {
+    gTickDm.__riteTgTickDmInflight = new Map();
   }
+  const inflight = gTickDm.__riteTgTickDmInflight.get(primary);
+  if (inflight) return inflight;
+
+  const work = (async (): Promise<{ sent: boolean; reason?: string }> => {
+    // Fast local dedupe
+    if (memoryTickDmClaimed(primary) || (txKey && memoryTickDmClaimed(txKey))) {
+      return { sent: false, reason: "duplicate" };
+    }
+
+    // Multi-instance dedupe (Upstash SET NX)
+    const { remoteClaimTickDm, remoteReleaseTickDm } = await import(
+      "@/lib/telegramStore"
+    );
+    let remoteClaimed: boolean | null = null;
+    try {
+      remoteClaimed = await remoteClaimTickDm(primary, 900);
+      if (remoteClaimed === false) {
+        memoryTickDmMark(primary);
+        if (txKey) memoryTickDmMark(txKey);
+        return { sent: false, reason: "duplicate" };
+      }
+      // remoteClaimed true | null (no upstash) — proceed with memory mark
+      memoryTickDmMark(primary);
+      if (txKey) memoryTickDmMark(txKey);
+    } catch {
+      memoryTickDmMark(primary);
+      if (txKey) memoryTickDmMark(txKey);
+    }
+
+    const pref = await resolveTelegramPref(p.owner);
+    if (!pref) {
+      if (remoteClaimed) await remoteReleaseTickDm(primary);
+      memoryTickDmRelease(primary);
+      if (txKey) memoryTickDmRelease(txKey);
+      return { sent: false, reason: "not_linked" };
+    }
+    if (!shouldNotifyAgent(pref, p.agentId)) {
+      if (remoteClaimed) await remoteReleaseTickDm(primary);
+      memoryTickDmRelease(primary);
+      if (txKey) memoryTickDmRelease(txKey);
+      return { sent: false, reason: "filtered" };
+    }
+
+    try {
+      await sendTelegramMessage(pref.chatId, formatTickTelegramMessage(p));
+      return { sent: true };
+    } catch (e) {
+      console.warn("[telegram] send failed", e);
+      // Allow retry on hard send failure
+      if (remoteClaimed) await remoteReleaseTickDm(primary);
+      memoryTickDmRelease(primary);
+      if (txKey) memoryTickDmRelease(txKey);
+      return {
+        sent: false,
+        reason: e instanceof Error ? e.message.slice(0, 120) : "send_failed",
+      };
+    }
+  })();
+
+  gTickDm.__riteTgTickDmInflight.set(primary, work);
   try {
-    await sendTelegramMessage(pref.chatId, formatTickTelegramMessage(p));
-    return { sent: true };
-  } catch (e) {
-    console.warn("[telegram] send failed", e);
-    return {
-      sent: false,
-      reason: e instanceof Error ? e.message.slice(0, 120) : "send_failed",
-    };
+    return await work;
+  } finally {
+    gTickDm.__riteTgTickDmInflight.delete(primary);
   }
 }
 

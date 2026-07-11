@@ -100,3 +100,41 @@ export async function remoteDeletePref(owner: string): Promise<boolean> {
     return false;
   }
 }
+
+const TICK_DM_PREFIX = "rite:tg:tickdm:";
+
+/**
+ * Claim exclusive right to send a tick DM (multi-instance safe when Upstash is on).
+ * @returns true if this caller should send; false if already claimed/sent
+ */
+export async function remoteClaimTickDm(
+  key: string,
+  ttlSec = 900
+): Promise<boolean | null> {
+  if (!upstashConfigured()) return null;
+  try {
+    // SET key 1 NX EX ttl — result "OK" if claimed, null if key exists
+    const result = await upstashFetch([
+      "set",
+      `${TICK_DM_PREFIX}${key}`,
+      "1",
+      "nx",
+      "ex",
+      String(Math.max(60, ttlSec)),
+    ]);
+    return result === "OK" || result === true;
+  } catch (e) {
+    console.warn("[telegramStore] claim tick dm failed", e);
+    return null;
+  }
+}
+
+/** Release claim so a failed send can be retried */
+export async function remoteReleaseTickDm(key: string): Promise<void> {
+  if (!upstashConfigured()) return;
+  try {
+    await upstashFetch(["del", `${TICK_DM_PREFIX}${key}`]);
+  } catch {
+    /* ignore */
+  }
+}
