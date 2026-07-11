@@ -9,11 +9,15 @@
 import {
   createPublicClient,
   createWalletClient,
+  encodeFunctionData,
   http,
   keccak256,
   stringToBytes,
+  type Account,
   type Hex,
   type Address,
+  type PublicClient,
+  type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -31,7 +35,6 @@ import { computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
 import { cacheKeeperTick } from "@/lib/keeperCache";
 import { notifyAgentTick } from "@/lib/telegram";
-import { prepareRadarWrite } from "@/lib/radarWrite";
 
 export type KeeperTickResult = {
   agentId: string;
@@ -70,6 +73,102 @@ function normalizePk(raw: string): Hex {
   const t = raw.trim();
   if (t.startsWith("0x")) return t as Hex;
   return `0x${t}` as Hex;
+}
+
+function errBlob(e: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let i = 0; i < 6; i++) {
+    if (!cur) break;
+    if (cur instanceof Error) parts.push(cur.message);
+    if (cur && typeof cur === "object") {
+      const o = cur as {
+        shortMessage?: string;
+        details?: string;
+        message?: string;
+        cause?: unknown;
+      };
+      if (o.shortMessage) parts.push(o.shortMessage);
+      if (o.details) parts.push(String(o.details));
+      if (o.message) parts.push(o.message);
+      cur = o.cause;
+    } else break;
+  }
+  return parts.join(" ");
+}
+
+function isRpcFlake(e: unknown): boolean {
+  const blob = errBlob(e).toLowerCase();
+  if (
+    /tooearly|notauthorized|notowner|agentisdead|badstatus|emptywatchlist|zerodigest|insufficientbalance|insufficient funds|execution reverted/i.test(
+      blob
+    ) &&
+    !/transaction creation failed|opcodenotfound/i.test(blob)
+  ) {
+    return false;
+  }
+  return /transaction creation failed|opcodenotfound|timeout|fetch failed|http request failed|econnreset|socket|502|503|504|network|internal error|rate limit/i.test(
+    blob
+  );
+}
+
+/**
+ * Server runTick without eth_estimateGas / simulateContract.
+ * Ritual public RPC often fails those with "Transaction creation failed"
+ * even when the call is valid — manual Wake worked because the browser
+ * path fell back to a gas floor; auto-wake must never depend on estimate.
+ */
+async function sendKeeperRunTick(opts: {
+  wallet: WalletClient;
+  client: PublicClient;
+  account: Account;
+  agentId: bigint;
+  digest: Hex;
+}): Promise<Hex> {
+  const data = encodeFunctionData({
+    abi: radarAgentAbi,
+    functionName: "runTick",
+    args: [opts.agentId, opts.digest],
+  });
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      let gasPrice: bigint;
+      try {
+        gasPrice = await opts.client.getGasPrice();
+      } catch {
+        gasPrice = BigInt(1_500_000_000);
+      }
+      if (gasPrice < BigInt(1_000_000_000)) gasPrice = BigInt(1_000_000_000);
+      gasPrice = (gasPrice * BigInt(130)) / BigInt(100);
+
+      const nonce = await opts.client.getTransactionCount({
+        address: opts.account.address,
+        blockTag: "pending",
+      });
+
+      // Fully specified legacy tx — viem must not call eth_estimateGas
+      const hash = await opts.wallet.sendTransaction({
+        account: opts.account,
+        to: RADAR_CONTRACT as Address,
+        data,
+        gas: BigInt(320_000),
+        gasPrice,
+        nonce,
+        chain: ritualChain,
+        type: "legacy",
+      });
+      return hash;
+    } catch (e) {
+      lastErr = e;
+      if (!isRpcFlake(e) || attempt === 4) break;
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(errBlob(lastErr).slice(0, 240) || "runTick send failed");
 }
 
 export function keeperConfigured(): boolean {
@@ -306,51 +405,17 @@ export async function runDueAgentTicks(opts?: {
       });
       const digest = keccak256(stringToBytes(digestPayload));
 
-      // Explicit gas — Ritual eth_estimateGas often fails with
-      // "Transaction creation failed" / OpcodeNotFound (same as manual Wake).
-      const fees = await prepareRadarWrite({
-        account: account.address,
-        functionName: "runTick",
-        args: [id, digest],
-        gasFloor: BigInt(280_000),
+      const hash = await sendKeeperRunTick({
+        wallet,
+        client,
+        account,
+        agentId: id,
+        digest,
       });
-
-      let hash: Hex | null = null;
-      let writeErr: unknown;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          hash = await wallet.writeContract({
-            address: RADAR_CONTRACT as Address,
-            abi: radarAgentAbi,
-            functionName: "runTick",
-            args: [id, digest],
-            chain: ritualChain,
-            account,
-            gas: fees.gas,
-            gasPrice: fees.gasPrice,
-          });
-          writeErr = undefined;
-          break;
-        } catch (e) {
-          writeErr = e;
-          const msg = e instanceof Error ? e.message : String(e);
-          // Retry only RPC/transport flakes; real reverts stop immediately
-          if (
-            !/transaction creation failed|opcodenotfound|timeout|fetch failed|http request failed|502|503|504|econnreset/i.test(
-              msg
-            ) ||
-            attempt === 2
-          ) {
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-        }
-      }
-      if (!hash) throw writeErr ?? new Error("runTick write failed");
 
       const receipt = await client.waitForTransactionReceipt({
         hash,
-        timeout: 60_000,
+        timeout: 90_000,
         confirmations: 1,
       });
       if (receipt.status !== "success") {
@@ -414,26 +479,18 @@ export async function runDueAgentTicks(opts?: {
         },
       });
     } catch (e: unknown) {
-      const raw =
-        e instanceof Error
-          ? e.message
-          : typeof e === "object" && e && "shortMessage" in e
-            ? String((e as { shortMessage?: string }).shortMessage)
-            : String(e);
-      const msg = raw.slice(0, 280);
-      // Map common reverts / RPC flakes to clear errors
+      const msg = errBlob(e).slice(0, 280);
       let error = msg;
       if (/NotAuthorized|0x82b42900/i.test(msg)) {
         error =
           "NotAuthorized: keeper wallet is not setKeeper(true) on this Radar — admin must allowlist KEEPER_PRIVATE_KEY address";
       } else if (/TooEarly/i.test(msg)) {
         error = "TooEarly: on-chain block interval not elapsed";
-      } else if (
-        /transaction creation failed|opcodenotfound/i.test(msg)
-      ) {
+      } else if (isRpcFlake(e)) {
         error =
-          "Ritual RPC gas flake on auto-wake — will retry next poll. Manual Wake still works.";
+          "Ritual RPC flake during auto-wake send — retrying on next poll (~20s).";
       }
+      console.error(`[agentKeeper] agent ${i} tick failed:`, msg.slice(0, 200));
       results.push({
         agentId: String(i),
         ok: false,
