@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useAccount,
   useConnect,
@@ -225,6 +225,10 @@ export function AgentTab({
   const [err, setErr] = useState("");
   const [agentIds, setAgentIds] = useState<bigint[]>([]);
   const [selectedId, setSelectedId] = useState<bigint | null>(null);
+  /** Always-current selection — written only by select/deploy/kill/auto-pick. */
+  const selectedIdRef = useRef<bigint | null>(null);
+  /** Bumps on every user select so in-flight refresh/load cannot paint the wrong agent. */
+  const panelLoadGenRef = useRef(0);
   const [agent, setAgent] = useState<AgentView | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [ticksLeft, setTicksLeft] = useState<bigint | null>(null);
@@ -358,9 +362,100 @@ export function AgentTab({
     }
   }, []);
 
+  const metaFromAgent = useCallback((id: bigint, row: AgentView) => {
+    const idStr = id.toString();
+    if (
+      (row.status === 1 || row.status === 3) &&
+      isAgentClosed(idStr, RADAR_CONTRACT)
+    ) {
+      unmarkAgentClosed(idStr, RADAR_CONTRACT);
+    }
+    const softClosed =
+      isAgentClosed(idStr, RADAR_CONTRACT) &&
+      row.status !== 1 &&
+      row.status !== 3;
+    const finished = row.status === 4 || softClosed;
+    return {
+      status: finished ? 4 : row.status,
+      kind: row.kind,
+      name: row.name,
+      balance: row.balance.toString(),
+    };
+  }, []);
+
+  /**
+   * Load panel for one agent. `gen` must match panelLoadGenRef when results
+   * apply — otherwise a slower older load paints over the chip the user picked.
+   */
+  const loadAgentPanel = useCallback(
+    async (id: bigint, opts?: { soft?: boolean; gen?: number }) => {
+      const gen = opts?.gen ?? panelLoadGenRef.current;
+      const a = await readAgentOnChain(id);
+      if (panelLoadGenRef.current !== gen || selectedIdRef.current !== id) {
+        return;
+      }
+      if (!a) {
+        if (!opts?.soft) {
+          setAgent(null);
+          setWatchlist([]);
+          setTicksLeft(null);
+          setErr(
+            `Agent #${id.toString()} temporarily unreadable (RPC). Click Refresh again — your agent is still on-chain.`
+          );
+        }
+        return;
+      }
+      setAgent(a);
+      const [wl, left, tks] = await Promise.all([
+        readWatchlist(id),
+        readTicksRemaining(id),
+        loadMergedTicks(id.toString(), a),
+      ]);
+      if (panelLoadGenRef.current !== gen || selectedIdRef.current !== id) {
+        return;
+      }
+      setWatchlist(wl);
+      setTicksLeft(left);
+      setTicks(tks);
+      const useful = tks.find(
+        (t) => String(t.agentId) === id.toString() && tickHasUsefulData(t)
+      );
+      if (useful?.snapshot) {
+        setLastSnapshot(useful.snapshot as SurfDataSnapshot);
+      }
+      setAgentMeta((prev) => ({
+        ...prev,
+        [id.toString()]: metaFromAgent(id, a),
+      }));
+    },
+    [metaFromAgent]
+  );
+
+  /** User chip click — wins over any in-flight soft/hard refresh. */
+  const selectAgent = useCallback(
+    (id: bigint) => {
+      const gen = ++panelLoadGenRef.current;
+      selectedIdRef.current = id;
+      setSelectedId(id);
+      setErr("");
+      setMsg("");
+      setLastSnapshot(null);
+      // Clear previous agent's panel immediately so Live/Dead UI can't flash wrong agent
+      setAgent(null);
+      setWatchlist([]);
+      setTicks([]);
+      setTicksLeft(null);
+      void loadAgentPanel(id, { gen });
+    },
+    [loadAgentPanel]
+  );
+
   const refresh = useCallback(async (opts?: { soft?: boolean }) => {
     if (!address || !RADAR_CONTRACT) return;
-    setLoading(true);
+    // Capture selection at start — never re-pick to a different agent mid-flight
+    const selectionAtStart = selectedIdRef.current;
+    // Soft: don't flash the whole list (auto-wake / background)
+    if (!opts?.soft) setLoading(true);
     if (!opts?.soft) setErr("");
     try {
       // Soft ping only — do not hard-fail the whole tab on one empty RPC response
@@ -393,102 +488,80 @@ export function AgentTab({
           return { id, row };
         })
       );
-      const meta: Record<
-        string,
-        { status: number; kind: number; name: string; balance: string }
-      > = {};
-      for (const { id, row } of metaRows) {
-        if (!row) continue;
-        const idStr = id.toString();
-        // Active / OutOfFunds — clear stale soft-close (cross-Radar id pollution)
-        if (
-          (row.status === 1 || row.status === 3) &&
-          isAgentClosed(idStr, RADAR_CONTRACT)
-        ) {
-          unmarkAgentClosed(idStr, RADAR_CONTRACT);
+
+      // Merge meta: keep prior row on RPC miss so dead chips don't jump to Live
+      setAgentMeta((prev) => {
+        const meta: Record<
+          string,
+          { status: number; kind: number; name: string; balance: string }
+        > = {};
+        for (const id of ids) {
+          const idStr = id.toString();
+          const row = metaRows.find((r) => r.id === id)?.row;
+          if (row) meta[idStr] = metaFromAgent(id, row);
+          else if (prev[idStr]) meta[idStr] = prev[idStr];
         }
-        const softClosed =
-          isAgentClosed(idStr, RADAR_CONTRACT) &&
-          row.status !== 1 &&
-          row.status !== 3;
-        const finished = row.status === 4 || softClosed;
-        meta[idStr] = {
-          status: finished ? 4 : row.status,
-          kind: row.kind,
-          name: row.name,
-          balance: row.balance.toString(),
-        };
-      }
-      setAgentMeta(meta);
-
-      // Missing meta ≠ dead (RPC flake); only status 4 is finished
-      const liveIds = ids.filter((id) => {
-        const m = meta[id.toString()];
-        return !m || m.status !== 4;
+        return meta;
       });
-      const deadIds = ids.filter((id) => meta[id.toString()]?.status === 4);
-      const selectedStillOwned =
-        selectedId != null && ids.some((id) => id === selectedId);
-      const selectedStillLive =
-        selectedId != null && liveIds.some((id) => id === selectedId);
 
-      // Keep selection after Sovereign death so last tick stays visible
-      let pick: bigint | null = null;
-      if (selectedStillLive || selectedStillOwned) {
-        pick = selectedId;
-      } else if (liveIds.length) {
-        pick = liveIds[liveIds.length - 1];
-      } else if (deadIds.length) {
-        // No live agents — open most recent dead so last ticks remain accessible
-        pick = deadIds[deadIds.length - 1];
-      } else {
-        pick = null;
+      // Build status map for auto-pick only (first load)
+      const metaForPick: Record<string, { status: number }> = {};
+      for (const { id, row } of metaRows) {
+        if (row) metaForPick[id.toString()] = metaFromAgent(id, row);
       }
 
-      setSelectedId(pick);
+      /**
+       * SELECTION RULES (fixes Dead ↔ #10 shutter):
+       * 1. Soft refresh: NEVER change selectedId or agent panel — list/meta only.
+       * 2. Hard refresh: keep current selection if still set (user intent wins).
+       * 3. Auto-pick only when nothing is selected (first connect / after kill).
+       * 4. If user changed chip while this refresh ran, abort panel load.
+       */
+      if (opts?.soft) {
+        // Background auto-wake / post-tx soft: chips stay put; no setAgent/setSelectedId
+        await refreshNetwork();
+        return;
+      }
+
+      // Hard refresh path
+      const currentNow = selectedIdRef.current;
+      let pick: bigint | null = currentNow;
+      if (pick == null) {
+        const liveIds = ids.filter((id) => {
+          const m = metaForPick[id.toString()];
+          return !m || m.status !== 4;
+        });
+        const deadIds = ids.filter(
+          (id) => metaForPick[id.toString()]?.status === 4
+        );
+        if (liveIds.length) pick = liveIds[liveIds.length - 1];
+        else if (deadIds.length) pick = deadIds[deadIds.length - 1];
+        else pick = null;
+
+        // Only write selection when user had none (never steal a chip click)
+        if (
+          selectedIdRef.current == null &&
+          pick != null &&
+          selectionAtStart == null
+        ) {
+          selectedIdRef.current = pick;
+          setSelectedId(pick);
+        } else {
+          pick = selectedIdRef.current;
+        }
+      }
+
+      // User clicked another agent while hard refresh was in flight
+      if (selectedIdRef.current !== selectionAtStart) {
+        await refreshNetwork();
+        return;
+      }
 
       if (pick != null) {
-        const a = await readAgentOnChain(pick);
-        if (!a) {
-          // Keep previous agent panel if soft refresh after a tick
-          if (!opts?.soft) {
-            setAgent(null);
-            setWatchlist([]);
-            setTicksLeft(null);
-            setErr(
-              `Agent #${pick.toString()} temporarily unreadable (RPC). Click Refresh again — your agent is still on-chain.`
-            );
-          }
-        } else {
-          setAgent(a);
-          const [wl, left, tks] = await Promise.all([
-            readWatchlist(pick),
-            readTicksRemaining(pick),
-            loadMergedTicks(pick.toString(), a),
-          ]);
-          setWatchlist(wl);
-          setTicksLeft(left);
-          setTicks(tks);
-          // Hydrate last snapshot from history (critical for dead Sovereigns)
-          const useful = tks.find(
-            (t) =>
-              String(t.agentId) === pick!.toString() && tickHasUsefulData(t)
-          );
-          if (useful?.snapshot) {
-            setLastSnapshot(useful.snapshot as SurfDataSnapshot);
-          } else if (a.status === 4 && !opts?.soft) {
-            // Don't wipe a just-sealed final tick on hard refresh without data
-          }
-          setAgentMeta((prev) => ({
-            ...prev,
-            [pick!.toString()]: {
-              status: a.status,
-              kind: a.kind,
-              name: a.name,
-              balance: a.balance.toString(),
-            },
-          }));
-        }
+        await loadAgentPanel(pick, {
+          soft: false,
+          gen: panelLoadGenRef.current,
+        });
       } else {
         setAgent(null);
         setWatchlist([]);
@@ -497,24 +570,28 @@ export function AgentTab({
       }
 
       await refreshNetwork();
-
     } catch (e: unknown) {
       // Soft mode: never overwrite a success message with RPC noise
       if (!opts?.soft) setErr(errMsg(e));
       else console.warn("[radar] soft refresh failed", e);
     } finally {
-      setLoading(false);
+      if (!opts?.soft) setLoading(false);
     }
-  }, [address, selectedId, refreshNetwork]);
+  }, [address, refreshNetwork, metaFromAgent, loadAgentPanel]);
 
   useEffect(() => {
     // One-time: remove global closed-id list that polluted new Radar deploys
     clearLegacyGlobalClosedAgents();
   }, []);
 
+  // Stable latest refresh — avoid re-running hard load when callback identity changes
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  // Connect / address only — NOT selectedId, NOT refresh identity (that caused re-picks)
   useEffect(() => {
-    if (isConnected && address) void refresh();
-  }, [isConnected, address, refresh]);
+    if (isConnected && address) void refreshRef.current();
+  }, [isConnected, address]);
 
   useEffect(() => {
     if (!isConnected) return;
@@ -692,14 +769,14 @@ export function AgentTab({
           }
 
           if (!cancelled) {
-            // Show data immediately for selected agent
+            // Only paint snapshot for the agent the user is viewing — never
+            // switch the panel to another auto-ticked agent (e.g. #10).
+            const curSel = selectedIdRef.current;
             const forSelected = hits.find(
-              (h) =>
-                selectedId != null && h.agentId === selectedId.toString()
+              (h) => curSel != null && h.agentId === curSel.toString()
             );
-            const show = forSelected || first;
-            if (show?.snapshot) {
-              const snap = show.snapshot as SurfDataSnapshot;
+            if (forSelected?.snapshot) {
+              const snap = forSelected.snapshot as SurfDataSnapshot;
               setLastSnapshot({
                 ...snap,
                 kind: (snap.kind || "market_price") as SurfDataSnapshot["kind"],
@@ -707,16 +784,14 @@ export function AgentTab({
                 target: snap.target || "_",
                 fetchedAt: snap.fetchedAt || new Date().toISOString(),
                 endpoint: snap.endpoint || "keeper",
-                summary: snap.summary || show.summary || "",
+                summary: snap.summary || forSelected.summary || "",
                 rows: Array.isArray(snap.rows) ? snap.rows : [],
                 highlights: Array.isArray(snap.highlights)
                   ? snap.highlights
                   : [],
                 raw: undefined,
               });
-              if (selectedId != null) {
-                setTicks(await loadMergedTicks(selectedId.toString()));
-              }
+              setTicks(await loadMergedTicks(curSel!.toString()));
             }
 
             const tgNote =
@@ -743,6 +818,7 @@ export function AgentTab({
                 (first?.txHash ? ` · ${first.txHash.slice(0, 10)}…` : "")
             );
           }
+          // Soft refresh updates meta/ticks only — must not re-pick selection
           await refresh({ soft: true });
         } else {
           const mine = (data.results || []).filter(
@@ -990,6 +1066,8 @@ export function AgentTab({
       // New deploy must never inherit soft-close for a recycled numeric id
       unmarkAgentClosed(newId.toString(), RADAR_CONTRACT);
 
+      panelLoadGenRef.current += 1;
+      selectedIdRef.current = newId;
       setSelectedId(newId);
       setMsg(
         `${AGENT_KIND_LABELS[agentKind]} agent #${newId} deployed · schedule ${formatInterval(wake)} · stream ${def.label}${
@@ -1250,7 +1328,10 @@ export function AgentTab({
             `Agent #${selectedId} killed`,
             `${refundLabel} RIT refunded · status DEAD`
           );
+          panelLoadGenRef.current += 1;
+          selectedIdRef.current = null;
           setSelectedId(null);
+          setAgent(null);
           setErr("");
           await refresh();
           return;
@@ -1329,7 +1410,10 @@ export function AgentTab({
         `Agent #${selectedId} soft-closed`,
         "Legacy Radar has no killAgent — use Radar 0x50a3… for real kill"
       );
+      panelLoadGenRef.current += 1;
+      selectedIdRef.current = null;
       setSelectedId(null);
+      setAgent(null);
       setErr("");
       await refresh();
     } catch (e: unknown) {
@@ -1975,12 +2059,7 @@ export function AgentTab({
                   <button
                     key={key}
                     type="button"
-                    onClick={() => {
-                      setSelectedId(id);
-                      setErr("");
-                      setMsg("");
-                      setLastSnapshot(null);
-                    }}
+                    onClick={() => selectAgent(id)}
                     className={`rounded-full px-3 py-1 text-xs ${
                       selected
                         ? "bg-[#c8ff4a] font-semibold text-black"
@@ -2044,13 +2123,7 @@ export function AgentTab({
                     <button
                       key={`dead-${key}`}
                       type="button"
-                      onClick={() => {
-                        setSelectedId(id);
-                        setErr("");
-                        setMsg("");
-                        setLastSnapshot(null);
-                        void refresh({ soft: true });
-                      }}
+                      onClick={() => selectAgent(id)}
                       className={`rounded-full px-2.5 py-1 text-[11px] ${
                         selected
                           ? "border border-red-400/50 bg-red-500/20 font-semibold text-red-100"
