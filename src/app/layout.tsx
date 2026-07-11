@@ -13,7 +13,32 @@ const display = Space_Grotesk({
 export const metadata: Metadata = {
   title: "Rite — Ritual Research Desk",
   description:
-    "Pay-per-prompt crypto project research on Ritual Chain. Powered by Surf AI. On-chain fee + records.",
+    "Pay-per-prompt crypto research and data agents on Ritual Chain. Powered by Surf AI.",
+  applicationName: "Rite",
+  keywords: [
+    "Ritual",
+    "Rite",
+    "crypto research",
+    "on-chain agents",
+    "Surf AI",
+  ],
+  robots: { index: true, follow: true },
+  openGraph: {
+    title: "Rite — Ritual Research Desk",
+    description:
+      "Pay-per-prompt crypto research and data agents on Ritual Chain.",
+    type: "website",
+    siteName: "Rite",
+  },
+  twitter: {
+    card: "summary",
+    title: "Rite — Ritual Research Desk",
+    description:
+      "Pay-per-prompt crypto research and data agents on Ritual Chain.",
+  },
+  other: {
+    "theme-color": "#04140c",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

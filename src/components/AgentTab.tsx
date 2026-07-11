@@ -89,6 +89,13 @@ import {
 } from "@/lib/radarWrite";
 import { useToast } from "@/components/ToastProvider";
 import { TelegramNotifyCard } from "@/components/TelegramNotifyCard";
+import { ErrorFeedback } from "@/components/ErrorFeedback";
+import {
+  buildErrorReport,
+  isUserRejection,
+  rememberErrorReport,
+  type ErrorReport,
+} from "@/lib/errorReport";
 
 /** Load chain/keeper ticks and merge with this browser's localStorage history. */
 async function loadMergedTicks(
@@ -186,17 +193,6 @@ function statusText(s: number) {
   return STATUS_LABELS[s] || "?";
 }
 
-function errMsg(e: unknown, context?: string) {
-  // Prefer decoded Radar reverts / gas hints over raw MetaMask noise
-  const decoded = decodeRadarRevert(e, context);
-  if (decoded && decoded !== "undefined") return decoded;
-  if (e instanceof Error && e.message) return e.message;
-  if (e && typeof e === "object" && "shortMessage" in e) {
-    return String((e as { shortMessage?: string }).shortMessage);
-  }
-  return String(e);
-}
-
 function fmtMaxUint(n: bigint): string {
   // ticksRemaining returns type(uint256).max for persistent
   if (n > BigInt(1_000_000)) return "∞";
@@ -223,6 +219,8 @@ export function AgentTab({
 
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  /** Last structured error for copy-to-support */
+  const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [agentIds, setAgentIds] = useState<bigint[]>([]);
   const [selectedId, setSelectedId] = useState<bigint | null>(null);
   /** Always-current selection — written only by select/deploy/kill/auto-pick. */
@@ -281,6 +279,47 @@ export function AgentTab({
         agent.status !== 3));
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
+
+  /** Record a user-facing failure with copyable support report. */
+  const reportFailure = useCallback(
+    (e: unknown, where: string, toastTitle: string) => {
+      const report = buildErrorReport(e, {
+        where,
+        chainId,
+        wallet: address,
+        agentId: selectedId != null ? selectedId.toString() : undefined,
+        decode: (err) => {
+          const d = decodeRadarRevert(err, where);
+          return d && d !== "undefined" ? d : null;
+        },
+      });
+      rememberErrorReport(report);
+      if (
+        isUserRejection(report.detail) ||
+        isUserRejection(report.userMessage)
+      ) {
+        setErrorReport(null);
+        setErr("");
+        setMsg("Cancelled in wallet");
+        return report;
+      }
+      setErrorReport(report);
+      setErr(report.userMessage);
+      toast.error(
+        toastTitle,
+        `Code ${report.code} — copy the report to send support`,
+        report
+      );
+      return report;
+    },
+    [address, chainId, selectedId, toast]
+  );
+
+  const clearError = useCallback(() => {
+    setErr("");
+    setErrorReport(null);
+  }, []);
+
   const dataDef = DATA_KINDS.find((k) => k.id === dataKind)!;
   const track = useMemo(() => decodeAgentTrack(watchlist), [watchlist]);
   const deployFee = deployFeeForKind(agentKind);
@@ -456,7 +495,10 @@ export function AgentTab({
     const selectionAtStart = selectedIdRef.current;
     // Soft: don't flash the whole list (auto-wake / background)
     if (!opts?.soft) setLoading(true);
-    if (!opts?.soft) setErr("");
+    if (!opts?.soft) {
+      setErr("");
+      setErrorReport(null);
+    }
     try {
       // Soft ping only — do not hard-fail the whole tab on one empty RPC response
       const ok = await pingRadar();
@@ -572,12 +614,24 @@ export function AgentTab({
       await refreshNetwork();
     } catch (e: unknown) {
       // Soft mode: never overwrite a success message with RPC noise
-      if (!opts?.soft) setErr(errMsg(e));
-      else console.warn("[radar] soft refresh failed", e);
+      if (!opts?.soft) {
+        const report = buildErrorReport(e, {
+          where: "agent.refresh",
+          chainId,
+          wallet: address,
+          decode: (err) => {
+            const d = decodeRadarRevert(err, "refresh");
+            return d && d !== "undefined" ? d : null;
+          },
+        });
+        rememberErrorReport(report);
+        setErrorReport(report);
+        setErr(report.userMessage);
+      } else console.warn("[radar] soft refresh failed", e);
     } finally {
       if (!opts?.soft) setLoading(false);
     }
-  }, [address, refreshNetwork, metaFromAgent, loadAgentPanel]);
+  }, [address, chainId, refreshNetwork, metaFromAgent, loadAgentPanel]);
 
   useEffect(() => {
     // One-time: remove global closed-id list that polluted new Radar deploys
@@ -1083,19 +1137,15 @@ export function AgentTab({
       );
       await refresh();
     } catch (e: unknown) {
-      const m = errMsg(e);
-      setErr(m);
       setMsg("");
-      if (!/reject|denied|connect wallet|switch wallet/i.test(m)) {
-        toast.error("Deploy failed", m);
-      }
+      reportFailure(e, "agent.deploy", "Deploy failed");
     }
   }
 
   async function saveSchedule() {
     if (selectedId == null) return;
     try {
-      setErr("");
+      clearError();
       await ensureWallet();
       if (agent?.status === 4) throw new Error("Agent is dead");
       const n = Number(editSchedValue);
@@ -1119,28 +1169,26 @@ export function AgentTab({
       setMsg(
         `Schedule saved on-chain: ${formatInterval(blocks)}. ` +
           (agent?.status === 1
-            ? "Use Wake when due — auto-wake only if keeper cron is configured."
+            ? "Use Wake when due — auto-wake runs while this tab is open."
             : "Activate → LIVE, fund if needed, then Wake.")
       );
       toast.success("Schedule saved", formatInterval(blocks));
       await refresh({ soft: true });
     } catch (e: unknown) {
-      const m = errMsg(e);
-      setErr(m);
       setMsg("");
-      if (!/reject|denied/i.test(m)) toast.error("Schedule save failed", m);
+      reportFailure(e, "agent.schedule", "Schedule save failed");
     }
   }
 
   async function fundSelected() {
     if (selectedId == null) return;
     try {
-      setErr("");
+      clearError();
       await ensureWallet();
       if (agent?.status === 4) throw new Error("Agent is dead — cannot fund");
       const value = parseEther(fundAmt || "0");
       if (value <= BigInt(0)) throw new Error("Enter fund amount > 0");
-      setMsg("Confirm fundAgent in wallet…");
+      setMsg("Confirm fund in wallet…");
       const hash = await radarWrite({
         functionName: "fundAgent",
         args: [selectedId],
@@ -1151,10 +1199,8 @@ export function AgentTab({
       toast.success("Agent funded", `+${fundAmt} RIT to agent balance`);
       await refresh();
     } catch (e: unknown) {
-      const m = errMsg(e);
-      setErr(m);
       setMsg("");
-      if (!/reject|denied/i.test(m)) toast.error("Fund failed", m);
+      reportFailure(e, "agent.fund", "Fund failed");
     }
   }
 
@@ -1222,10 +1268,8 @@ export function AgentTab({
       setWithdrawAmt("");
       await refresh();
     } catch (e: unknown) {
-      const m = errMsg(e, "withdraw");
-      setErr(m);
       setMsg("");
-      if (!/reject|denied/i.test(m)) toast.error("Withdraw failed", m);
+      reportFailure(e, "agent.withdraw", "Withdraw failed");
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
           if (!a) return;
@@ -1414,9 +1458,7 @@ export function AgentTab({
       setErr("");
       await refresh();
     } catch (e: unknown) {
-      const msg = errMsg(e, "killAgent");
-      setErr(msg);
-      if (!/reject|denied/i.test(msg)) toast.error("Kill failed", msg);
+      reportFailure(e, "agent.kill", "Kill failed");
       setMsg("");
       if (selectedId != null) {
         void readAgentOnChain(selectedId).then((a) => {
@@ -1458,10 +1500,8 @@ export function AgentTab({
       toast.success(active ? "Agent is LIVE" : "Agent paused");
       await refresh();
     } catch (e: unknown) {
-      const m = errMsg(e);
-      setErr(m);
       setMsg("");
-      if (!/reject|denied/i.test(m)) toast.error("Status update failed", m);
+      reportFailure(e, "agent.status", "Status update failed");
     }
   }
 
@@ -1694,13 +1734,16 @@ export function AgentTab({
     } catch (e: unknown) {
       // Drop any pending data — user cancelled or tx failed
       setLastSnapshot(null);
-      const m = errMsg(e);
-      setErr(
-        m +
-          " — Data is only shown after you confirm the wake in your wallet. Try Wake again."
-      );
       setMsg("");
-      if (!/reject|denied/i.test(m)) toast.error("Wake / tick failed", m);
+      const report = reportFailure(e, "agent.wake", "Wake failed");
+      if (
+        !isUserRejection(report.detail) &&
+        !isUserRejection(report.userMessage)
+      ) {
+        setErr(
+          `${report.userMessage} — Data is only shown after you confirm the wake in your wallet.`
+        );
+      }
     } finally {
       setTicking(false);
     }
@@ -2650,15 +2693,25 @@ export function AgentTab({
         </div>
       )}
 
-      {(msg || err) && (
-        <p
-          className={`mt-4 whitespace-pre-wrap text-center text-sm ${
-            err ? "text-red-300" : "text-white/70"
-          }`}
-        >
-          {err || msg}
+      {errorReport ? (
+        <div className="mt-4">
+          <ErrorFeedback
+            report={errorReport}
+            onDismiss={() => {
+              setErrorReport(null);
+              setErr("");
+            }}
+          />
+        </div>
+      ) : msg ? (
+        <p className="mt-4 whitespace-pre-wrap text-center text-sm text-white/70">
+          {msg}
         </p>
-      )}
+      ) : err ? (
+        <p className="mt-4 whitespace-pre-wrap text-center text-sm text-red-300">
+          {err}
+        </p>
+      ) : null}
     </div>
   );
 }

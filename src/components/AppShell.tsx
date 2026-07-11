@@ -173,6 +173,10 @@ export function AppShell() {
             </svg>
             @its_perseus_1
           </a>
+          <p className="mx-auto mt-3 max-w-sm text-[11px] leading-relaxed text-white/30">
+            Hit an error? Use <b className="text-white/45">Copy error report</b>{" "}
+            and DM the code — that helps fix issues faster.
+          </p>
         </footer>
       </div>
     </div>

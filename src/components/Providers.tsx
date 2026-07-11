@@ -41,6 +41,11 @@ export function Providers({ children }: { children: ReactNode }) {
       ) {
         event.preventDefault();
         console.warn("[ignored extension rejection]", msg);
+        return;
+      }
+      // Log unexpected rejections for production debugging (no UI spam)
+      if (process.env.NODE_ENV === "production") {
+        console.error("[unhandledrejection]", msg.slice(0, 300));
       }
     };
     window.addEventListener("error", onError, true);

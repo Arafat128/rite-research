@@ -3,6 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Address } from "viem";
 import { useToast } from "@/components/ToastProvider";
+import { ErrorFeedback } from "@/components/ErrorFeedback";
+import {
+  buildErrorReport,
+  rememberErrorReport,
+  type ErrorReport,
+} from "@/lib/errorReport";
 
 const LS_KEY = "rite_telegram_link_v2";
 const LS_KEY_LEGACY = "rite_telegram_chat_v1";
@@ -79,6 +85,7 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
   const [st, setSt] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [localLink, setLocalLink] = useState<LocalLink | null>(null);
   const [deepLink, setDeepLink] = useState<string | null>(null);
 
@@ -193,9 +200,17 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         window.history.replaceState({}, "", url.pathname + url.search);
         await load();
       } catch (e) {
+        const report = buildErrorReport(e, {
+          where: "telegram.confirm",
+          wallet: owner,
+          userMessage: "Could not confirm Telegram link. Try Connect again.",
+        });
+        rememberErrorReport(report);
+        setErrorReport(report);
         toast.error(
           "Telegram confirm failed",
-          e instanceof Error ? e.message : "try Connect again"
+          `Code ${report.code} — copy report for support`,
+          report
         );
       }
     })();
@@ -208,6 +223,7 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
   async function post(action: string, extra?: Record<string, unknown>) {
     setBusy(true);
     setErr("");
+    setErrorReport(null);
     try {
       const res = await fetch("/api/notify/telegram", {
         method: "POST",
@@ -277,9 +293,18 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
       }
       await load();
     } catch (e) {
-      const m = e instanceof Error ? e.message : "Failed";
-      setErr(m);
-      toast.error("Telegram", m);
+      const report = buildErrorReport(e, {
+        where: `telegram.${action}`,
+        wallet: owner,
+      });
+      rememberErrorReport(report);
+      setErrorReport(report);
+      setErr(report.userMessage);
+      toast.error(
+        "Telegram",
+        `Code ${report.code} — copy report for support`,
+        report
+      );
     } finally {
       setBusy(false);
     }
@@ -427,7 +452,19 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         </button>
       </div>
 
-      {err && <p className="mt-2 text-[11px] text-red-300">{err}</p>}
+      {errorReport ? (
+        <div className="mt-3">
+          <ErrorFeedback
+            report={errorReport}
+            onDismiss={() => {
+              setErrorReport(null);
+              setErr("");
+            }}
+          />
+        </div>
+      ) : err ? (
+        <p className="mt-2 text-[11px] text-red-300">{err}</p>
+      ) : null}
     </div>
   );
 }

@@ -8,7 +8,14 @@ import {
   researchDeskAbi,
   addressUrl,
   EXPLORER_URL,
+  ritualChain,
 } from "@/lib/ritual";
+import { ErrorFeedback } from "@/components/ErrorFeedback";
+import {
+  buildErrorReport,
+  rememberErrorReport,
+  type ErrorReport,
+} from "@/lib/errorReport";
 
 type Row = {
   id: string;
@@ -25,6 +32,7 @@ export function RecordsTab() {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
 
   useEffect(() => {
     if (!isConnected || !address || !publicClient || !RESEARCH_CONTRACT) return;
@@ -33,6 +41,7 @@ export function RecordsTab() {
     (async () => {
       setLoading(true);
       setErr("");
+      setErrorReport(null);
       try {
         const count = (await publicClient.readContract({
           address: RESEARCH_CONTRACT,
@@ -79,13 +88,15 @@ export function RecordsTab() {
         if (!cancelled) setRows(out);
       } catch (e: unknown) {
         if (!cancelled) {
-          const msg =
-            e && typeof e === "object" && "shortMessage" in e
-              ? String((e as { shortMessage?: string }).shortMessage)
-              : e instanceof Error
-                ? e.message
-                : String(e);
-          setErr(msg);
+          const report = buildErrorReport(e, {
+            where: "records.load",
+            chainId: ritualChain.id,
+            wallet: address,
+            userMessage: "Could not load your research records. Try again.",
+          });
+          rememberErrorReport(report);
+          setErrorReport(report);
+          setErr(report.userMessage);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -131,8 +142,20 @@ export function RecordsTab() {
       </p>
 
       {loading && <p className="text-sm text-white/50">Loading…</p>}
-      {err && <p className="text-sm text-red-300">{err}</p>}
-      {!loading && !err && rows.length === 0 && (
+      {errorReport ? (
+        <div className="mb-4">
+          <ErrorFeedback
+            report={errorReport}
+            onDismiss={() => {
+              setErrorReport(null);
+              setErr("");
+            }}
+          />
+        </div>
+      ) : err ? (
+        <p className="text-sm text-red-300">{err}</p>
+      ) : null}
+      {!loading && !err && !errorReport && rows.length === 0 && (
         <p className="text-sm text-white/50">No research payments from this wallet yet.</p>
       )}
 

@@ -32,6 +32,13 @@ import { buildClaimMessage } from "@/lib/researchClaim";
 import { ResearchReport } from "@/components/ResearchReport";
 import { ResearchLoading } from "@/components/ResearchLoading";
 import { useToast } from "@/components/ToastProvider";
+import { ErrorFeedback } from "@/components/ErrorFeedback";
+import {
+  buildErrorReport,
+  isUserRejection,
+  rememberErrorReport,
+  type ErrorReport,
+} from "@/lib/errorReport";
 
 type Phase = "idle" | "paying" | "researching" | "settling" | "done" | "error";
 
@@ -110,6 +117,7 @@ export function ResearchTab() {
   const [prompt, setPrompt] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState("");
+  const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [report, setReport] = useState("");
   const [credits, setCredits] = useState<PaidCredit[]>([]);
   const [claimingId, setClaimingId] = useState<string | null>(null);
@@ -547,15 +555,32 @@ export function ResearchTab() {
       console.error("claimPaid", e);
       setPhase("error");
       setReport("");
-      const m = errText(e);
-      setStatus(formatResearchError(m));
-      if (isSurfTimeoutMsg(m)) {
+      const raw = errText(e);
+      const report = buildErrorReport(e, {
+        where: "research.claim",
+        userMessage: formatResearchError(raw),
+        chainId,
+        wallet: address,
+      });
+      rememberErrorReport(report);
+      if (isUserRejection(raw)) {
+        setErrorReport(null);
+        setStatus("Cancelled in wallet");
+      } else if (isSurfTimeoutMsg(raw)) {
+        setErrorReport(null);
+        setStatus(formatResearchError(raw));
         toast.info(
           "Still unpaid credit",
           "Claim free report again when Surf is faster — no second fee"
         );
-      } else if (!/reject|denied/i.test(m)) {
-        toast.error("Claim failed", m);
+      } else {
+        setErrorReport(report);
+        setStatus(report.userMessage);
+        toast.error(
+          "Claim failed",
+          `Code ${report.code} — copy report for support`,
+          report
+        );
       }
     } finally {
       setClaimingId(null);
@@ -687,16 +712,35 @@ export function ResearchTab() {
       setPhase("error");
       setReport("");
       const msg = errText(e);
-      setStatus(formatResearchError(msg));
-      if (isSurfTimeoutMsg(msg)) {
+      const report = buildErrorReport(e, {
+        where: "research.pay",
+        userMessage: formatResearchError(msg),
+        chainId,
+        wallet: address,
+      });
+      rememberErrorReport(report);
+      if (isUserRejection(msg)) {
+        setErrorReport(null);
+        setStatus("Cancelled in wallet");
+      } else if (isSurfTimeoutMsg(msg)) {
+        setErrorReport(null);
+        setStatus(formatResearchError(msg));
         toast.info(
           "Payment recorded · report not ready",
           "Use Paid credits → Claim free report (same prompt). No second fee."
         );
-      } else if (!/reject|denied|already paid|Claim free/i.test(msg)) {
-        toast.error("Research failed", msg);
-      } else if (/paid|claim/i.test(msg)) {
+      } else if (/already paid|Claim free/i.test(msg)) {
+        setErrorReport(null);
+        setStatus(formatResearchError(msg));
         toast.info("Payment recorded", "Use Claim free report if needed");
+      } else {
+        setErrorReport(report);
+        setStatus(report.userMessage);
+        toast.error(
+          "Research failed",
+          `Code ${report.code} — copy report for support`,
+          report
+        );
       }
       await refreshCredits();
     }
@@ -950,7 +994,24 @@ export function ResearchTab() {
         <ResearchLoading phase={phase} status={status} />
       )}
 
-      {status && phase !== "paying" && phase !== "researching" && phase !== "settling" && (
+      {errorReport && phase === "error" && (
+        <div className="mx-auto mt-5 w-full max-w-2xl">
+          <ErrorFeedback
+            report={errorReport}
+            onDismiss={() => {
+              setErrorReport(null);
+              setPhase("idle");
+              setStatus("");
+            }}
+          />
+        </div>
+      )}
+
+      {status &&
+        phase !== "paying" &&
+        phase !== "researching" &&
+        phase !== "settling" &&
+        !(errorReport && phase === "error") && (
         <p
           className={`mt-5 max-w-2xl whitespace-pre-wrap text-center text-sm ${
             phase === "error" ? "text-red-300" : "text-white/75"
