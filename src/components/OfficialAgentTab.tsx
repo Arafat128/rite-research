@@ -19,6 +19,7 @@ import {
   buildSovereignTwoStepLaunch,
   explainSovereignRevert,
   PERSISTENT_FACTORY,
+  ritualEip1559Fees,
   SOVEREIGN_FACTORY,
   sovereignFactoryAbi,
   sovereignHarnessAbi,
@@ -131,6 +132,11 @@ export function OfficialAgentTab({ mode }: Props) {
           : "Building official Persistent launch (TEE + DA + factory)…"
       );
 
+      // Cheap Ritual EIP-1559 fees (avoids MetaMask "higher fee than necessary")
+      const fees = await ritualEip1559Fees(
+        publicClient ?? undefined
+      );
+
       if (kind === "sovereign") {
         // Two-step: deployHarness → configureFundAndStart (avoids compressed DKMS reverts)
         const built = await buildSovereignTwoStepLaunch({
@@ -146,7 +152,8 @@ export function OfficialAgentTab({ mode }: Props) {
 
         if (publicClient) {
           const bal = await publicClient.getBalance({ address });
-          const need = built.configureValue + parseEther("0.05"); // funding + gas buffer
+          // funding + small gas buffer (Ritual gas is cheap; 0.02 RIT is plenty)
+          const need = built.configureValue + parseEther("0.02");
           if (bal < need) {
             throw new Error(
               `Need ~${formatEther(need)} RIT (funding ${formatEther(built.configureValue)} + gas). Wallet has ${formatEther(bal)} RIT.`
@@ -184,8 +191,9 @@ export function OfficialAgentTab({ mode }: Props) {
           functionName: "deployHarness",
           args: [built.userSalt],
           gas: built.gasDeploy,
-          maxFeePerGas: BigInt(20_000_000_000),
-          maxPriorityFeePerGas: BigInt(1_000_000_000),
+          maxFeePerGas: fees.maxFeePerGas,
+          maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+          type: "eip1559",
         });
 
         setMsg(`Step 1/2 sent ${deployHash.slice(0, 12)}… waiting…`);
@@ -196,13 +204,13 @@ export function OfficialAgentTab({ mode }: Props) {
           });
           if (r1.status !== "success") {
             throw new Error(
-              "deployHarness reverted — try a new agent name (salt may be taken)."
+              `deployHarness failed (gas used ${r1.gasUsed.toString()}/${built.gasDeploy.toString()}). Try a new agent name.`
             );
           }
         }
 
         setMsg(
-          `Step 2/2 · Confirm configure + fund ${formatEther(built.configureValue)} RIT`
+          `Step 2/2 · Confirm configure + fund ${formatEther(built.configureValue)} RIT · accept MetaMask network fee (Ritual is cheap)`
         );
 
         if (publicClient) {
@@ -226,7 +234,7 @@ export function OfficialAgentTab({ mode }: Props) {
               simErr instanceof Error ? simErr.message : String(simErr);
             throw new Error(
               explainSovereignRevert(raw) +
-                " (harness deployed — re-try step 2 only if configure failed)"
+                " (harness deployed — try a new agent name to restart cleanly)"
             );
           }
         }
@@ -245,8 +253,9 @@ export function OfficialAgentTab({ mode }: Props) {
           ],
           value: built.configureValue,
           gas: built.gasConfigure,
-          maxFeePerGas: BigInt(20_000_000_000),
-          maxPriorityFeePerGas: BigInt(1_000_000_000),
+          maxFeePerGas: fees.maxFeePerGas,
+          maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+          type: "eip1559",
         });
 
         setMsg(`Step 2/2 sent ${cfgHash.slice(0, 12)}… waiting…`);
@@ -257,7 +266,7 @@ export function OfficialAgentTab({ mode }: Props) {
           });
           if (r2.status !== "success") {
             throw new Error(
-              "configureFundAndStart reverted on-chain. Harness exists but is not armed — check funding and try again with a new name if stuck."
+              `configureFundAndStart failed (gas used ${r2.gasUsed.toString()}/${built.gasConfigure.toString()}). Check funding amount and try a new agent name.`
             );
           }
         }
@@ -309,8 +318,9 @@ export function OfficialAgentTab({ mode }: Props) {
           args: built.args as never,
           value: built.value,
           gas: built.gasLimit,
-          maxFeePerGas: BigInt(20_000_000_000),
-          maxPriorityFeePerGas: BigInt(1_000_000_000),
+          maxFeePerGas: fees.maxFeePerGas,
+          maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+          type: "eip1559",
         });
 
         setMsg(`Launch sent ${hash.slice(0, 12)}… waiting for confirmation`);

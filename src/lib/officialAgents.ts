@@ -327,6 +327,49 @@ export function makeUserSalt(seed: string): Hex {
   return keccak256(stringToBytes(seed));
 }
 
+/**
+ * Ritual testnet baseFee is tiny (~wei–gwei). Forcing 20 gwei makes MetaMask
+ * warn "higher network fee than necessary" and wastes RIT.
+ * Match keeper style: 2–3× base + small tip, capped low.
+ */
+export async function ritualEip1559Fees(client?: PublicClient): Promise<{
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+}> {
+  const c = client || getRitualReadClient();
+  try {
+    const block = await c.getBlock({ blockTag: "latest" });
+    const base = block.baseFeePerGas ?? BigInt(1);
+    const maxPriorityFeePerGas = BigInt(1_000_000); // 0.001 gwei tip
+    let maxFeePerGas = base * BigInt(3) + maxPriorityFeePerGas;
+    // Floor so zero-fee txs aren't dropped
+    if (maxFeePerGas < BigInt(10_000_000)) {
+      maxFeePerGas = BigInt(10_000_000); // 0.01 gwei
+    }
+    // Cap well below MetaMask "high fee" warnings (was 20 gwei — too high)
+    const cap = BigInt(2_000_000_000); // 2 gwei
+    if (maxFeePerGas > cap) maxFeePerGas = cap;
+    return { maxFeePerGas, maxPriorityFeePerGas };
+  } catch {
+    // Safe Ritual defaults if fee history flakes
+    return {
+      maxFeePerGas: BigInt(50_000_000), // 0.05 gwei
+      maxPriorityFeePerGas: BigInt(1_000_000),
+    };
+  }
+}
+
+/** Fees embedded in Scheduler config (paid when schedule fires). */
+export function ritualScheduleFees(): {
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+} {
+  return {
+    maxFeePerGas: BigInt(1_000_000_000), // 1 gwei — enough for scheduler
+    maxPriorityFeePerGas: BigInt(100_000_000), // 0.1 gwei
+  };
+}
+
 export async function findHealthyExecutor(
   client?: PublicClient
 ): Promise<TeeExecutor> {
@@ -537,8 +580,8 @@ export async function buildSovereignTwoStepLaunch(
     deliveryTarget: harness,
     deliverySelector: SOVEREIGN_DELIVERY_SELECTOR,
     deliveryGasLimit: BigInt(3_000_000),
-    deliveryMaxFeePerGas: BigInt(20_000_000_000),
-    deliveryMaxPriorityFeePerGas: BigInt(1_000_000_000),
+    deliveryMaxFeePerGas: ritualScheduleFees().maxFeePerGas,
+    deliveryMaxPriorityFeePerGas: ritualScheduleFees().maxPriorityFeePerGas,
     cliType,
     prompt: p.prompt || `You are ${p.name}, a Ritual sovereign agent for Rite.`,
     encryptedSecrets,
@@ -554,12 +597,13 @@ export async function buildSovereignTwoStepLaunch(
   };
 
   // schedulerGas is gas for each scheduled wake callback — keep moderate
+  const schedFees = ritualScheduleFees();
   const schedule = {
     schedulerGas: 1_500_000,
     frequency,
     schedulerTtl: 500,
-    maxFeePerGas: BigInt(20_000_000_000),
-    maxPriorityFeePerGas: BigInt(1_000_000_000),
+    maxFeePerGas: schedFees.maxFeePerGas,
+    maxPriorityFeePerGas: schedFees.maxPriorityFeePerGas,
     value: BigInt(0),
   };
 
