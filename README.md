@@ -33,7 +33,7 @@ Fees always split **50% treasury / 50% BountyPool**.
 
 ### Data streams
 
-Token price · Fear & Greed · Crypto news · Stablecoin peg · Gas · Whales · OI / long-short · Narrative · Ritual network pulse  
+Token price · Fear & Greed · Crypto news · Stablecoin peg · Gas (ETH / POL / Ritual / L2s) · Whale / market stress · Ritual network pulse  
 
 ---
 
@@ -183,12 +183,10 @@ If payment succeeded but Surf timed out: use **Paid credits** + same prompt — 
 | `market_price` | Token price |
 | `fear_greed` | Fear & Greed |
 | `news_feed` | Crypto news |
-| `stablecoin_peg` | Stablecoin peg |
-| `gas_fees` | Gas / fees |
-| `whale_transfers` | Whale moves |
-| `open_interest_skew` | OI + long/short |
-| `narrative_sector` | Narrative / sector |
-| `ritual_network` | Ritual network pulse |
+| `stablecoin_peg` | Stablecoin peg (multi-source) |
+| `gas_fees` | Gas / fees (ETH, POL, Ritual, Base, Arb, …) |
+| `whale_transfers` | Whale / perp market stress |
+| `ritual_network` | Ritual network pulse (heartbeat TEE agents) |
 
 ---
 

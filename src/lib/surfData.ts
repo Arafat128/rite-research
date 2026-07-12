@@ -16,9 +16,11 @@ export type DataKindId =
   | "stablecoin_peg"
   | "gas_fees"
   | "whale_transfers"
+  | "ritual_network"
+  /** @deprecated removed from deploy UI — still decoded for old watchlists */
   | "open_interest_skew"
-  | "narrative_sector"
-  | "ritual_network";
+  /** @deprecated removed from deploy UI — still decoded for old watchlists */
+  | "narrative_sector";
 
 export type DataKindDef = {
   id: DataKindId;
@@ -36,12 +38,16 @@ export type DataKindDef = {
   path: (target: string) => string;
 };
 
+/**
+ * Streams offered at deploy. Keep this list short and reliable.
+ * Deprecated kinds stay in the type + fetch switch for old agents only.
+ */
 export const DATA_KINDS: DataKindDef[] = [
   {
     id: "market_price",
     label: "Token price",
     short: "Price",
-    description: "Last ~5 daily/series price points for one symbol (5 rows).",
+    description: "Last ~5 series price points for one symbol (Surf market).",
     targetLabel: "Symbol",
     targetPlaceholder: "BTC",
     defaultTarget: "BTC",
@@ -61,7 +67,7 @@ export const DATA_KINDS: DataKindDef[] = [
     id: "news_feed",
     label: "Crypto news",
     short: "News",
-    description: "Latest crypto headlines (8 rows).",
+    description: "Latest crypto headlines (up to 8 rows).",
     targetLabel: null,
     targetPlaceholder: "",
     defaultTarget: "_",
@@ -71,39 +77,66 @@ export const DATA_KINDS: DataKindDef[] = [
     id: "stablecoin_peg",
     label: "Stablecoin peg stress",
     short: "Peg",
-    description: "Peg vs $1 for the stablecoin symbol you lock at deploy (1 row).",
+    description:
+      "Peg vs $1 for the stablecoin you lock (USDT, USDC, DAI, …). Multi-source price.",
     targetLabel: "Stablecoin symbol",
     targetPlaceholder: "USDT",
     defaultTarget: "USDT",
-    path: () => "", // single-symbol peg
+    path: () => "",
   },
   {
     id: "gas_fees",
     label: "Gas / fee pulse",
     short: "Gas",
     description:
-      "Gas + latest block for the network you lock at deploy (ETH or Ritual).",
+      "Gas + latest block for the network locked at deploy (ETH, POL/Polygon, Ritual, Base, Arb, …).",
     targetLabel: "Network",
-    targetPlaceholder: "ETH or RITUAL",
+    targetPlaceholder: "ETH · POL · RITUAL · BASE · ARB",
     defaultTarget: "ETH",
-    path: () => "", // RPC for selected network
+    path: () => "",
   },
   {
     id: "whale_transfers",
     label: "Whale / large moves",
     short: "Whales",
-    description: "Top 2 large-move / liquidation events for the locked symbol.",
+    description:
+      "Perp market stress for the locked symbol (OI, funding, L/S) when liquidations are unavailable.",
     targetLabel: "Symbol",
     targetPlaceholder: "BTC",
     defaultTarget: "BTC",
-    path: (t) =>
-      `/market/liquidations?symbol=${encodeURIComponent(t.toUpperCase())}`,
+    path: (t) => {
+      const pair = t.includes("-") ? t.toUpperCase() : `${t.toUpperCase()}-USDT`;
+      return `/exchange/perp?pair=${encodeURIComponent(pair)}`;
+    },
   },
   {
+    id: "ritual_network",
+    label: "Ritual network pulse",
+    short: "Ritual",
+    description:
+      "Ritual testnet: block, gas, heartbeat-registered TEE agents (alive/total). Not your Rite Radar deploys.",
+    targetLabel: null,
+    targetPlaceholder: "",
+    defaultTarget: "_",
+    path: () => "",
+  },
+];
+
+/** Legacy locked watchlist kinds still decode after stream rename/removal. */
+const LEGACY_KIND_MAP: Record<string, DataKindId> = {
+  perp_funding: "whale_transfers",
+  social_mindshare: "news_feed",
+  open_interest_skew: "whale_transfers",
+  narrative_sector: "news_feed",
+};
+
+/** Full defs for deprecated kinds (old agents still ticking). Not shown at deploy. */
+const DEPRECATED_DATA_KINDS: DataKindDef[] = [
+  {
     id: "open_interest_skew",
-    label: "OI + long/short skew",
+    label: "OI + long/short skew (legacy)",
     short: "OI skew",
-    description: "One compact row: OI, funding, and long/short for a pair.",
+    description: "Legacy stream — maps to perp market stress.",
     targetLabel: "Pair",
     targetPlaceholder: "BTC-USDT",
     defaultTarget: "BTC-USDT",
@@ -114,38 +147,24 @@ export const DATA_KINDS: DataKindDef[] = [
   },
   {
     id: "narrative_sector",
-    label: "Narrative / sector score",
+    label: "Narrative / sector (legacy)",
     short: "Narrative",
-    description:
-      "3 rows: news + mindshare heat for your sector query.",
-    targetLabel: "Sector / query",
+    description: "Legacy stream — falls back to news.",
+    targetLabel: "Query",
     targetPlaceholder: "AI",
     defaultTarget: "AI",
-    path: (t) =>
-      `/signal/trending?q=${encodeURIComponent(t)}&limit=3`,
-  },
-  {
-    id: "ritual_network",
-    label: "Ritual network pulse",
-    short: "Ritual",
-    description:
-      "Ritual testnet pulse: network agent totals (AgentHeartbeat), Persistent count, block & gas — not your Rite deploys.",
-    targetLabel: null,
-    targetPlaceholder: "",
-    defaultTarget: "_",
-    path: () => "", // RPC + Radar counts
+    path: () => `/news/feed?limit=8`,
   },
 ];
 
-/** Legacy locked watchlist kinds still decode after stream rename. */
-const LEGACY_KIND_MAP: Record<string, DataKindId> = {
-  perp_funding: "open_interest_skew",
-  social_mindshare: "narrative_sector",
-};
-
 export function getDataKind(id: string): DataKindDef | undefined {
-  const mapped = LEGACY_KIND_MAP[id] || id;
-  return DATA_KINDS.find((k) => k.id === mapped);
+  const mapped = (LEGACY_KIND_MAP[id] || id) as DataKindId;
+  return (
+    DATA_KINDS.find((k) => k.id === mapped) ||
+    DEPRECATED_DATA_KINDS.find((k) => k.id === mapped) ||
+    DEPRECATED_DATA_KINDS.find((k) => k.id === id) ||
+    DATA_KINDS.find((k) => k.id === id)
+  );
 }
 
 function baseUrl() {
@@ -307,7 +326,12 @@ function summarizeMarketPrice(
         timestamp: r.timestamp,
       };
     })
-    .filter((p) => p.value != null);
+    .filter(
+      (p) =>
+        p.value != null &&
+        p.value > 0 &&
+        !(asNum(p.timestamp) === 0 && p.value < 1e-9)
+    );
 
   const last = points[points.length - 1];
   const prev = points.length > 1 ? points[points.length - 2] : null;
@@ -434,18 +458,121 @@ function summarizeNews(
   };
 }
 
+/** Prefer real market points — Surf often returns {value:0,timestamp:0} stubs (e.g. USDC). */
 function lastPriceFromMarketJson(json: Record<string, unknown>): number | null {
   const data = Array.isArray(json.data) ? json.data : [];
   for (let i = data.length - 1; i >= 0; i--) {
-    const v = asNum((data[i] as Record<string, unknown>).value);
-    if (v != null) return v;
+    const r = data[i] as Record<string, unknown>;
+    const v = asNum(r.value ?? r.price);
+    const ts = asNum(r.timestamp);
+    // Reject zero stubs / empty timestamps that look like bad placeholders
+    if (v != null && v > 0 && Number.isFinite(v)) {
+      if (ts != null && ts === 0 && v < 1e-6) continue;
+      return v;
+    }
   }
-  // alternate shapes
   const d = json.data as Record<string, unknown> | undefined;
   if (d && !Array.isArray(d)) {
-    return asNum(d.price ?? d.last ?? d.value);
+    const v = asNum(d.price ?? d.last ?? d.value);
+    if (v != null && v > 0) return v;
   }
-  return asNum(json.price ?? json.value);
+  const top = asNum(json.price ?? json.value);
+  return top != null && top > 0 ? top : null;
+}
+
+/** Public spot fallbacks when Surf returns 0 / wrong assets for stables. */
+async function fetchPublicSpotUsd(symbol: string): Promise<{
+  price: number | null;
+  source: string;
+}> {
+  const sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!sym) return { price: null, source: "none" };
+
+  // Binance USDT pairs (USDCUSDT ≈ peg)
+  const binanceMap: Record<string, string> = {
+    USDT: "USDTUSD", // may 404 — try USDCUSDT inverse later
+    USDC: "USDCUSDT",
+    FDUSD: "FDUSDUSDT",
+    TUSD: "TUSDUSDT",
+    USDP: "USDPUSDT",
+    BUSD: "BUSDUSDT",
+    DAI: "DAIUSDT",
+  };
+  const pair = binanceMap[sym] || `${sym}USDT`;
+  try {
+    const r = await fetch(
+      `https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(pair)}`,
+      { cache: "no-store", signal: AbortSignal.timeout(8_000) }
+    );
+    if (r.ok) {
+      const j = (await r.json()) as { price?: string };
+      const px = asNum(j.price);
+      if (px != null && px > 0) return { price: px, source: `binance:${pair}` };
+    }
+  } catch {
+    /* next */
+  }
+
+  // CoinGecko simple (no key)
+  const cgIds: Record<string, string> = {
+    USDT: "tether",
+    USDC: "usd-coin",
+    DAI: "dai",
+    FDUSD: "first-digital-usd",
+    TUSD: "true-usd",
+    USDP: "paxos-standard",
+    FRAX: "frax",
+    PYUSD: "paypal-usd",
+  };
+  const id = cgIds[sym];
+  if (id) {
+    try {
+      const r = await fetch(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(id)}&vs_currencies=usd`,
+        { cache: "no-store", signal: AbortSignal.timeout(10_000) }
+      );
+      if (r.ok) {
+        const j = (await r.json()) as Record<string, { usd?: number }>;
+        const px = asNum(j[id]?.usd);
+        if (px != null && px > 0) return { price: px, source: `coingecko:${id}` };
+      }
+    } catch {
+      /* next */
+    }
+  }
+
+  // DefiLlama coins
+  const llama: Record<string, string> = {
+    USDT: "coingecko:tether",
+    USDC: "coingecko:usd-coin",
+    DAI: "coingecko:dai",
+    FDUSD: "coingecko:first-digital-usd",
+  };
+  const coin = llama[sym];
+  if (coin) {
+    try {
+      const r = await fetch(
+        `https://coins.llama.fi/prices/current/${encodeURIComponent(coin)}`,
+        { cache: "no-store", signal: AbortSignal.timeout(10_000) }
+      );
+      if (r.ok) {
+        const j = (await r.json()) as {
+          coins?: Record<string, { price?: number }>;
+        };
+        const px = asNum(j.coins?.[coin]?.price);
+        if (px != null && px > 0) return { price: px, source: `llama:${coin}` };
+      }
+    } catch {
+      /* none */
+    }
+  }
+
+  return { price: null, source: "none" };
+}
+
+/** True if price is a plausible stablecoin peg quote. */
+function isPlausibleStablePrice(px: number | null): boolean {
+  return px != null && Number.isFinite(px) && px > 0.5 && px < 1.5;
 }
 
 async function fetchStablecoinPeg(
@@ -456,21 +583,42 @@ async function fetchStablecoinPeg(
     "kind" | "kindLabel" | "target" | "fetchedAt" | "endpoint" | "raw"
   >
 > {
-  // Only the symbol locked at deploy (default USDT)
   const sym =
     symbolRaw && symbolRaw !== "_"
       ? symbolRaw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 16) || "USDT"
       : "USDT";
 
   let px: number | null = null;
+  let source = "surf";
   let err: string | null = null;
+
+  // 1) Surf market price (works for USDT; often returns 0 stub for USDC)
   try {
     const json = await surfGet(
       `/market/price?symbol=${encodeURIComponent(sym)}`
     );
-    px = lastPriceFromMarketJson(json);
+    const surfPx = lastPriceFromMarketJson(json);
+    if (isPlausibleStablePrice(surfPx)) {
+      px = surfPx;
+      source = "surf";
+    }
   } catch {
-    err = "fetch failed";
+    /* try public feeds */
+  }
+
+  // 2) Public CEX / CoinGecko / Llama when Surf is wrong or empty
+  if (!isPlausibleStablePrice(px)) {
+    const pub = await fetchPublicSpotUsd(sym);
+    if (isPlausibleStablePrice(pub.price)) {
+      px = pub.price;
+      source = pub.source;
+    } else if (px == null) {
+      err = "no price";
+    } else {
+      // keep non-plausible only if nothing else — but flag error
+      err = "unreliable surf price";
+      px = null;
+    }
   }
 
   const peg = 1;
@@ -481,22 +629,23 @@ async function fetchStablecoinPeg(
   const rows: Array<Record<string, SnapshotCell>> = [
     {
       Stable: sym,
-      Price: err ? "—" : fmtUsd(px),
+      Price: err && px == null ? "—" : fmtUsd(px),
       "vs $1":
-        err || dev == null
+        px == null || dev == null
           ? err || "—"
           : `${dev >= 0 ? "+" : ""}${(dev * 100).toFixed(4)}%`,
-      Stress:
-        err || absBps == null ? err || "—" : `${absBps.toFixed(1)} bps`,
+      Stress: absBps == null ? err || "—" : `${absBps.toFixed(1)} bps`,
+      Source: source,
     },
   ];
 
   return {
-    summary: err
-      ? `${sym} peg check failed`
-      : `${sym} peg · ${fmtUsd(px)} · ${
-          absBps != null ? `${absBps.toFixed(1)} bps off $1` : "n/a"
-        }${alert ? " · ALERT" : ""}`,
+    summary:
+      px == null
+        ? `${sym} peg check failed (${err || "no price"})`
+        : `${sym} peg · ${fmtUsd(px)} · ${
+            absBps != null ? `${absBps.toFixed(1)} bps off $1` : "n/a"
+          }${alert ? " · ALERT" : ""} · via ${source}`,
     rows,
     highlights: [
       { label: "Symbol", value: sym },
@@ -505,21 +654,44 @@ async function fetchStablecoinPeg(
         label: "Stress",
         value: absBps != null ? `${absBps.toFixed(1)} bps` : "—",
       },
-      { label: "Alert", value: alert ? "YES" : "no" },
+      { label: "Source", value: source },
     ],
   };
 }
 
+type GasNetId =
+  | "eth"
+  | "polygon"
+  | "ritual"
+  | "base"
+  | "arb"
+  | "op"
+  | "bsc"
+  | "avax";
+
 /** Map deploy target → which chain gas to read */
 function resolveGasNetwork(
   target: string
-): { id: "eth" | "ritual"; label: string; rpc: string } {
+): { id: GasNetId; label: string; rpc: string; busyGwei: number } {
   const t = (target || "ETH").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const ritualRpc =
     process.env.NEXT_PUBLIC_RPC_URL || "https://rpc.ritualfoundation.org";
   const ethRpc =
     process.env.ETH_RPC_URL || "https://ethereum.publicnode.com";
+  const polyRpc =
+    process.env.POLYGON_RPC_URL || "https://polygon-bor-rpc.publicnode.com";
+  const baseRpc =
+    process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com";
+  const arbRpc =
+    process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com";
+  const opRpc =
+    process.env.OP_RPC_URL || "https://optimism-rpc.publicnode.com";
+  const bscRpc =
+    process.env.BSC_RPC_URL || "https://bsc-rpc.publicnode.com";
+  const avaxRpc =
+    process.env.AVAX_RPC_URL || "https://avalanche-c-chain-rpc.publicnode.com";
 
+  // Ritual testnet
   if (
     t === "RITUAL" ||
     t === "RIT" ||
@@ -527,10 +699,35 @@ function resolveGasNetwork(
     t === "1979" ||
     t.startsWith("RIT")
   ) {
-    return { id: "ritual", label: "Ritual", rpc: ritualRpc };
+    return { id: "ritual", label: "Ritual testnet", rpc: ritualRpc, busyGwei: 50 };
   }
-  // Default + ETH / ETHEREUM / MAINNET
-  return { id: "eth", label: "Ethereum L1", rpc: ethRpc };
+  // Polygon / POL (user locked POL on gas stream — must NOT use Ethereum L1)
+  if (
+    t === "POL" ||
+    t === "MATIC" ||
+    t === "POLYGON" ||
+    t === "POLY" ||
+    t === "137"
+  ) {
+    return { id: "polygon", label: "Polygon", rpc: polyRpc, busyGwei: 200 };
+  }
+  if (t === "BASE" || t === "8453") {
+    return { id: "base", label: "Base", rpc: baseRpc, busyGwei: 0.1 };
+  }
+  if (t === "ARB" || t === "ARBITRUM" || t === "42161") {
+    return { id: "arb", label: "Arbitrum One", rpc: arbRpc, busyGwei: 0.5 };
+  }
+  if (t === "OP" || t === "OPTIMISM" || t === "10") {
+    return { id: "op", label: "Optimism", rpc: opRpc, busyGwei: 0.1 };
+  }
+  if (t === "BSC" || t === "BNB" || t === "56") {
+    return { id: "bsc", label: "BNB Chain", rpc: bscRpc, busyGwei: 3 };
+  }
+  if (t === "AVAX" || t === "AVALANCHE" || t === "43114") {
+    return { id: "avax", label: "Avalanche C-Chain", rpc: avaxRpc, busyGwei: 30 };
+  }
+  // ETH default
+  return { id: "eth", label: "Ethereum L1", rpc: ethRpc, busyGwei: 40 };
 }
 
 async function fetchGasFees(
@@ -556,23 +753,29 @@ async function fetchGasFees(
     /* leave empty */
   }
 
-  const digits = net.id === "ritual" ? 6 : 3;
+  const digits =
+    net.id === "ritual" || net.id === "base" || net.id === "op" || net.id === "arb"
+      ? 4
+      : net.id === "polygon"
+        ? 2
+        : 3;
   const rows = [
     {
       Network: net.label,
       "Gas (gwei)": gwei != null ? gwei.toFixed(digits) : "—",
       Block: block,
+      Target: (target || "ETH").toUpperCase(),
     },
   ];
 
-  const congested = net.id === "eth" && gwei != null && gwei >= 40;
+  const congested = gwei != null && gwei >= net.busyGwei;
   return {
     summary:
       gwei != null
         ? `${net.label} gas ${gwei.toFixed(digits)} gwei · block ${block}${
-            congested ? " · congested" : ""
+            congested ? " · busy" : ""
           }`
-        : `${net.label} gas unavailable`,
+        : `${net.label} gas unavailable (RPC)`,
     rows,
     highlights: [
       { label: "Network", value: net.label },
@@ -583,7 +786,7 @@ async function fetchGasFees(
       { label: "Block", value: block },
       {
         label: "Busy",
-        value: congested ? "YES" : net.id === "eth" ? "no" : "n/a",
+        value: gwei == null ? "—" : congested ? "YES" : "no",
       },
     ],
   };
@@ -721,114 +924,12 @@ function summarizeOiSkew(
   };
 }
 
-/** Build up to 3 rows: news headlines + mindshare for the deploy query */
-async function fetchNarrativeBundle(
-  query: string
-): Promise<
-  Omit<
-    SurfDataSnapshot,
-    "kind" | "kindLabel" | "target" | "fetchedAt" | "endpoint" | "raw"
-  >
-> {
-  const q = query && query !== "_" ? query : "AI";
-  const rows: Array<Record<string, SnapshotCell>> = [];
-
-  // News related to query (prefer 2 headlines)
-  try {
-    let newsJson: Record<string, unknown>;
-    try {
-      newsJson = await surfGet(
-        `/news/feed?limit=3&q=${encodeURIComponent(q)}`
-      );
-    } catch {
-      newsJson = await surfGet(`/news/feed?limit=3`);
-    }
-    const data = Array.isArray(newsJson.data) ? newsJson.data : [];
-    for (const row of data) {
-      if (rows.length >= 2) break;
-      const r = row as Record<string, unknown>;
-      const title = String(r.title ?? "—").slice(0, 200);
-      const urlRaw = String(r.url ?? r.link ?? "").trim();
-      const url = /^https?:\/\//i.test(urlRaw) ? urlRaw.slice(0, 2048) : "";
-      rows.push({
-        Type: "news",
-        Name: url ? { text: title, href: url } : title,
-        Score: "—",
-        "24h Δ": String(r.source ?? "—").slice(0, 24),
-      });
-    }
-  } catch {
-    /* optional news */
-  }
-
-  // Mindshare / trending fill remaining slots up to 3
-  try {
-    let heat: Record<string, unknown> | null = null;
-    try {
-      heat = await surfGet(
-        `/signal/trending?q=${encodeURIComponent(q)}&limit=3`
-      );
-    } catch {
-      try {
-        heat = await surfGet(
-          `/social/mindshare?interval=7d&q=${encodeURIComponent(q)}`
-        );
-      } catch {
-        heat = null;
-      }
-    }
-    if (heat) {
-      const data = Array.isArray(heat.data)
-        ? heat.data
-        : Array.isArray(heat.projects)
-          ? heat.projects
-          : [];
-      for (const row of data) {
-        if (rows.length >= 3) break;
-        const r = row as Record<string, unknown>;
-        const name = String(
-          r.name ?? r.project ?? r.symbol ?? r.token ?? "Mindshare"
-        ).slice(0, 48);
-        const score = asNum(
-          r.score ?? r.heat ?? r.value ?? r.mindshare ?? r.rank
-        );
-        rows.push({
-          Type: "mindshare",
-          Name: name,
-          Score: score != null ? score.toLocaleString() : "—",
-          "24h Δ": "—",
-        });
-      }
-    }
-  } catch {
-    /* optional */
-  }
-
-  // Pad not required — return whatever we have ≤ 3
-  const top =
-    typeof rows[0]?.Name === "object" &&
-    rows[0]?.Name &&
-    "text" in (rows[0].Name as object)
-      ? String((rows[0].Name as { text: string }).text)
-      : String(rows[0]?.Name ?? q);
-
-  return {
-    summary: rows.length
-      ? `Narrative “${q}” · ${rows.length}/3 rows (news + mindshare)`
-      : `No narrative data for “${q}”`,
-    rows: rows.slice(0, 3),
-    highlights: [
-      { label: "Query", value: q },
-      { label: "Rows", value: String(Math.min(3, rows.length)) },
-      { label: "Top", value: top.slice(0, 32) },
-      { label: "Mix", value: "news+mindshare" },
-    ],
-  };
-}
-
 /**
- * Ritual system AgentHeartbeat — network-wide persistent agent registry
- * (not the Rite app RadarAgent). See docs: 0xEF50…3aCa
+ * Ritual system AgentHeartbeat — TEE Persistent agent registry
+ * (not Rite Radar; not Sovereign 0x080C jobs). Docs: 0xEF50…3aCa
+ *
+ * On-chain: agentCount(), agentList(i), isAlive(addr).
+ * Explorer may list Sovereign sessions separately — they do NOT register here.
  */
 const RITUAL_AGENT_HEARTBEAT =
   "0xEF505E801f1Db392B5289690E2ffc20e840A3aCa";
@@ -845,10 +946,8 @@ async function fetchRitualNetwork(): Promise<
   let block = "—";
   let gasGwei: number | null = null;
   let chainId = "—";
-  /** Network-wide totals from Ritual AgentHeartbeat (testnet registry) */
   let networkTotal = 0;
-  let networkPersistent = 0;
-  let networkSovereign = 0;
+  let networkAlive = 0;
   let networkCountsOk = false;
 
   try {
@@ -864,7 +963,6 @@ async function fetchRitualNetwork(): Promise<
     /* ignore */
   }
 
-  // Ritual testnet agent registry (AgentHeartbeat.agentCount) — NOT Rite Radar
   try {
     const { createPublicClient, http, defineChain, parseAbi } = await import(
       "viem"
@@ -877,43 +975,60 @@ async function fetchRitualNetwork(): Promise<
     });
     const client = createPublicClient({
       chain,
-      transport: http(ritualRpc, { timeout: 20_000 }),
+      transport: http(ritualRpc, { timeout: 25_000 }),
     });
+    const hb = RITUAL_AGENT_HEARTBEAT as `0x${string}`;
 
-    // agentCount() — total agents registered for network heartbeat / lifecycle
     const count = (await client.readContract({
-      address: RITUAL_AGENT_HEARTBEAT as `0x${string}`,
+      address: hb,
       abi: parseAbi(["function agentCount() view returns (uint256)"]),
       functionName: "agentCount",
     })) as bigint;
     networkTotal = Number(count);
     networkCountsOk = true;
 
-    // Heartbeat registry tracks Persistent-style network agents.
-    // Prefer explicit counters if the contract exposes them later.
-    for (const [fn, assign] of [
-      ["persistentCount", (n: number) => (networkPersistent = n)],
-      ["persistentAgentCount", (n: number) => (networkPersistent = n)],
-      ["sovereignCount", (n: number) => (networkSovereign = n)],
-      ["sovereignAgentCount", (n: number) => (networkSovereign = n)],
-    ] as const) {
-      try {
-        const n = (await client.readContract({
-          address: RITUAL_AGENT_HEARTBEAT as `0x${string}`,
-          abi: parseAbi([`function ${fn}() view returns (uint256)`]),
-          functionName: fn,
-        })) as bigint;
-        assign(Number(n));
-      } catch {
-        /* optional */
-      }
+    // Count alive via isAlive(agentList(i)) — heartbeat registry = Persistent TEE agents
+    const n = Math.min(networkTotal, 80); // safety cap
+    let alive = 0;
+    const batch = 8;
+    for (let i = 0; i < n; i += batch) {
+      const slice = Array.from(
+        { length: Math.min(batch, n - i) },
+        (_, k) => i + k
+      );
+      const results = await Promise.all(
+        slice.map(async (idx) => {
+          try {
+            const addr = (await client.readContract({
+              address: hb,
+              abi: parseAbi([
+                "function agentList(uint256) view returns (address)",
+              ]),
+              functionName: "agentList",
+              args: [BigInt(idx)],
+            })) as `0x${string}`;
+            if (
+              !addr ||
+              addr === "0x0000000000000000000000000000000000000000"
+            ) {
+              return false;
+            }
+            return (await client.readContract({
+              address: hb,
+              abi: parseAbi([
+                "function isAlive(address) view returns (bool)",
+              ]),
+              functionName: "isAlive",
+              args: [addr],
+            })) as boolean;
+          } catch {
+            return false;
+          }
+        })
+      );
+      alive += results.filter(Boolean).length;
     }
-
-    // Default: AgentHeartbeat is the Persistent agent registry on Ritual
-    if (networkPersistent === 0 && networkTotal > 0) {
-      networkPersistent = networkTotal;
-    }
-    // Sovereign network agents are separate (0x080C / explorer); leave 0 if unknown
+    networkAlive = alive;
   } catch {
     networkCountsOk = false;
   }
@@ -925,20 +1040,21 @@ async function fetchRitualNetwork(): Promise<
       Value: gasGwei != null ? `${gasGwei.toFixed(6)} gwei` : "—",
     },
     {
-      Field: "Total agents (testnet)",
+      Field: "Heartbeat agents (total)",
       Value: networkCountsOk ? String(networkTotal) : "—",
     },
     {
-      Field: "Persistent agents (testnet)",
-      Value: networkCountsOk ? String(networkPersistent) : "—",
+      Field: "Heartbeat agents (alive)",
+      Value: networkCountsOk ? String(networkAlive) : "—",
     },
     {
-      Field: "Sovereign agents (testnet)",
-      Value: networkCountsOk
-        ? networkSovereign > 0
-          ? String(networkSovereign)
-          : "n/a*"
-        : "—",
+      Field: "Registry type",
+      Value: "Persistent TEE (AgentHeartbeat)",
+    },
+    {
+      Field: "Sovereign TEE jobs",
+      Value:
+        "Not in heartbeat — listed separately on explorer (0x080C jobs)",
     },
     { Field: "Chain id", Value: chainId },
     {
@@ -947,16 +1063,11 @@ async function fetchRitualNetwork(): Promise<
     },
   ];
 
-  const sovNote =
-    networkSovereign > 0
-      ? `${networkSovereign} Sovereign`
-      : "Sovereign n/a (not in heartbeat registry)";
-
   return {
     summary: networkCountsOk
       ? `Ritual testnet · block ${block} · gas ${
           gasGwei != null ? gasGwei.toFixed(4) : "—"
-        } gwei · ${networkTotal} network agents (${networkPersistent} Persistent · ${sovNote})`
+        } gwei · ${networkAlive}/${networkTotal} heartbeat agents alive (Persistent TEE registry)`
       : `Ritual · block ${block} · gas ${
           gasGwei != null ? gasGwei.toFixed(4) : "—"
         } gwei · agent registry unavailable`,
@@ -968,12 +1079,12 @@ async function fetchRitualNetwork(): Promise<
         value: gasGwei != null ? `${gasGwei.toFixed(4)} gwei` : "—",
       },
       {
-        label: "Total",
-        value: networkCountsOk ? String(networkTotal) : "—",
+        label: "Alive",
+        value: networkCountsOk ? String(networkAlive) : "—",
       },
       {
-        label: "Persistent",
-        value: networkCountsOk ? String(networkPersistent) : "—",
+        label: "Total",
+        value: networkCountsOk ? String(networkTotal) : "—",
       },
     ],
   };
@@ -1026,39 +1137,7 @@ export async function fetchSurfData(
       break;
     }
     case "whale_transfers": {
-      try {
-        const json = await surfGet(
-          `/market/liquidations?symbol=${encodeURIComponent(t.toUpperCase())}&limit=2`
-        );
-        shaped = summarizeWhale(json, t);
-        endpoint = "/market/liquidations?limit=2";
-      } catch (e1) {
-        try {
-          const json = await surfGet(kind.path(t));
-          shaped = summarizeWhale(json, t);
-        } catch {
-          try {
-            const json = await surfGet(
-              `/exchange/perp?pair=${encodeURIComponent(
-                t.includes("-") ? t.toUpperCase() : `${t.toUpperCase()}-USDT`
-              )}`
-            );
-            // Still max 1–2 rows for whale fallback
-            const oi = summarizeOiSkew(json, t);
-            shaped = {
-              summary: `Whale fallback → ${oi.summary}`,
-              rows: oi.rows.slice(0, 2),
-              highlights: oi.highlights,
-            };
-            endpoint = "/exchange/perp (fallback)";
-          } catch {
-            throw e1;
-          }
-        }
-      }
-      break;
-    }
-    case "open_interest_skew": {
+      // Liquidations route removed from Surf (404). Use exchange/perp + L/S.
       const pair = t.includes("-")
         ? t.toUpperCase()
         : `${t.toUpperCase()}-USDT`;
@@ -1066,23 +1145,78 @@ export async function fetchSurfData(
         const json = await surfGet(
           `/exchange/perp?pair=${encodeURIComponent(pair)}`
         );
-        shaped = summarizeOiSkew(json, pair);
-      } catch {
-        const json = await surfGet(
-          `/exchange/funding?pair=${encodeURIComponent(pair)}`
-        );
-        shaped = summarizeOiSkew(json, pair);
-        endpoint = "/exchange/funding";
+        const oi = summarizeOiSkew(json, pair);
+        // Optional L/S enrich
+        try {
+          const ls = await surfGet(
+            `/exchange/long-short-ratio?pair=${encodeURIComponent(pair)}`
+          );
+          const data = Array.isArray(ls.data)
+            ? (ls.data[0] as Record<string, unknown>)
+            : ((ls.data ?? ls) as Record<string, unknown>);
+          const lsr = asNum(
+            data.long_short_ratio ?? data.longShortRatio ?? data.ratio
+          );
+          if (oi.rows[0] && lsr != null) {
+            oi.rows = [
+              {
+                ...oi.rows[0],
+                "L/S": lsr.toFixed(3),
+                Skew:
+                  lsr > 1.2
+                    ? "long-crowded"
+                    : lsr < 0.85
+                      ? "short-crowded"
+                      : String(oi.rows[0].Skew ?? "balanced"),
+              },
+            ];
+          }
+        } catch {
+          /* optional */
+        }
+        shaped = {
+          summary: `${t.toUpperCase()} market stress · ${oi.summary}`,
+          rows: oi.rows.slice(0, 2),
+          highlights: [
+            { label: "Symbol", value: t.toUpperCase() },
+            ...oi.highlights.slice(0, 3),
+          ],
+        };
+        endpoint = "/exchange/perp + long-short-ratio";
+      } catch (e1) {
+        // last resort: liquidations (if restored)
+        try {
+          const json = await surfGet(
+            `/market/liquidations?symbol=${encodeURIComponent(t.toUpperCase())}&limit=2`
+          );
+          shaped = summarizeWhale(json, t);
+          endpoint = "/market/liquidations";
+        } catch {
+          throw e1;
+        }
       }
-      // Enrich long/short into the single row (do not add extra rows)
+      break;
+    }
+    case "open_interest_skew": {
+      // Legacy agents only — same as whale perp stress
+      const pair = t.includes("-")
+        ? t.toUpperCase()
+        : `${t.toUpperCase()}-USDT`;
+      const json = await surfGet(
+        `/exchange/perp?pair=${encodeURIComponent(pair)}`
+      );
+      shaped = summarizeOiSkew(json, pair);
       try {
         const ls = await surfGet(
           `/exchange/long-short-ratio?pair=${encodeURIComponent(pair)}`
         );
-        const data = (ls.data ?? ls) as Record<string, unknown>;
+        const data = Array.isArray(ls.data)
+          ? (ls.data[0] as Record<string, unknown>)
+          : ((ls.data ?? ls) as Record<string, unknown>);
         const longR = asNum(data.long_ratio ?? data.longAccount);
         const shortR = asNum(data.short_ratio ?? data.shortAccount);
-        if (shaped.rows[0] && (longR != null || shortR != null)) {
+        const lsr = asNum(data.long_short_ratio ?? data.longShortRatio);
+        if (shaped.rows[0]) {
           shaped.rows = [
             {
               ...shaped.rows[0],
@@ -1094,19 +1228,33 @@ export async function fetchSurfData(
                 shortR != null
                   ? `${(shortR * 100).toFixed(1)}%`
                   : String(shaped.rows[0].Short ?? "—"),
+              "L/S":
+                lsr != null
+                  ? lsr.toFixed(3)
+                  : String(shaped.rows[0]["L/S"] ?? "—"),
             },
           ];
         }
       } catch {
         /* optional */
       }
-      // Enforce 1 row
       shaped.rows = shaped.rows.slice(0, 1);
       break;
     }
     case "narrative_sector": {
-      shaped = await fetchNarrativeBundle(t);
-      endpoint = "news+mindshare (3 rows)";
+      // Legacy — news only (trending endpoint removed)
+      const q = t && t !== "_" ? t : "crypto";
+      try {
+        const json = await surfGet(
+          `/news/feed?limit=8&q=${encodeURIComponent(q)}`
+        );
+        shaped = summarizeNews(json);
+        shaped.summary = `News for “${q}” · ${shaped.summary}`;
+      } catch {
+        const json = await surfGet(`/news/feed?limit=8`);
+        shaped = summarizeNews(json);
+      }
+      endpoint = "/news/feed";
       break;
     }
     case "ritual_network": {
