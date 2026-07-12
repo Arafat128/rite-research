@@ -114,7 +114,7 @@ export const DATA_KINDS: DataKindDef[] = [
     label: "Ritual network pulse",
     short: "Ritual",
     description:
-      "Ritual testnet: block, gas, heartbeat-registered TEE agents (alive/total). Not your Rite Radar deploys.",
+      "Ritual testnet autonomous agents (same as explorer): Persistent + Sovereign + total, block & gas.",
     targetLabel: null,
     targetPlaceholder: "",
     defaultTarget: "_",
@@ -925,14 +925,110 @@ function summarizeOiSkew(
 }
 
 /**
- * Ritual system AgentHeartbeat — TEE Persistent agent registry
- * (not Rite Radar; not Sovereign 0x080C jobs). Docs: 0xEF50…3aCa
+ * Ritual autonomous agents (matches explorer.ritualfoundation.org/agents):
+ * - Persistent = AgentHeartbeat registry (0xEF50…3aCa)
+ * - Sovereign  = scheduled 0x080C runners (tracked by explorer indexer)
+ * - Total      = unique(persistent ∪ sovereign)
  *
- * On-chain: agentCount(), agentList(i), isAlive(addr).
- * Explorer may list Sovereign sessions separately — they do NOT register here.
+ * Primary source: explorer `/api/agents/cache` (same numbers as the UI cards).
+ * Fallback: on-chain AgentHeartbeat.agentCount for Persistent only.
  */
 const RITUAL_AGENT_HEARTBEAT =
   "0xEF505E801f1Db392B5289690E2ffc20e840A3aCa";
+
+const RITUAL_EXPLORER_AGENTS_CACHE =
+  process.env.RITUAL_EXPLORER_AGENTS_URL ||
+  "https://explorer.ritualfoundation.org/api/agents/cache";
+
+type ExplorerAgentCache = {
+  persistent?: Array<{
+    address?: string;
+    info?: { state?: string; isAlive?: boolean };
+  }>;
+  sovereign?: Array<{ address?: string; lastActivityBlock?: number }>;
+  totalUnique?: number;
+  lastUpdated?: number;
+  currentBlock?: number;
+  isReady?: boolean;
+};
+
+async function fetchExplorerAgentCache(): Promise<ExplorerAgentCache | null> {
+  try {
+    const res = await fetch(RITUAL_EXPLORER_AGENTS_CACHE, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "RiteResearchDesk/1.0",
+      },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as ExplorerAgentCache;
+    if (!j || !Array.isArray(j.persistent)) return null;
+    return j;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchHeartbeatPersistentCount(
+  ritualRpc: string
+): Promise<{ total: number; alive: number } | null> {
+  try {
+    const { createPublicClient, http, defineChain, parseAbi } = await import(
+      "viem"
+    );
+    const chain = defineChain({
+      id: Number(process.env.NEXT_PUBLIC_CHAIN_ID || 1979),
+      name: "ritual",
+      nativeCurrency: { name: "RIT", symbol: "RIT", decimals: 18 },
+      rpcUrls: { default: { http: [ritualRpc] } },
+    });
+    const client = createPublicClient({
+      chain,
+      transport: http(ritualRpc, { timeout: 20_000 }),
+    });
+    const hb = RITUAL_AGENT_HEARTBEAT as `0x${string}`;
+    const count = Number(
+      (await client.readContract({
+        address: hb,
+        abi: parseAbi(["function agentCount() view returns (uint256)"]),
+        functionName: "agentCount",
+      })) as bigint
+    );
+    // Quick alive sample (full scan is slow); prefer explorer for status breakdown
+    let alive = 0;
+    const n = Math.min(count, 24);
+    for (let i = 0; i < n; i++) {
+      try {
+        const addr = (await client.readContract({
+          address: hb,
+          abi: parseAbi([
+            "function agentList(uint256) view returns (address)",
+          ]),
+          functionName: "agentList",
+          args: [BigInt(i)],
+        })) as `0x${string}`;
+        const ok = (await client.readContract({
+          address: hb,
+          abi: parseAbi(["function isAlive(address) view returns (bool)"]),
+          functionName: "isAlive",
+          args: [addr],
+        })) as boolean;
+        if (ok) alive++;
+      } catch {
+        /* skip */
+      }
+    }
+    // Scale sample if we only checked a subset
+    if (count > n && n > 0) {
+      alive = Math.round((alive / n) * count);
+    }
+    return { total: count, alive };
+  } catch {
+    return null;
+  }
+}
 
 async function fetchRitualNetwork(): Promise<
   Omit<
@@ -946,9 +1042,6 @@ async function fetchRitualNetwork(): Promise<
   let block = "—";
   let gasGwei: number | null = null;
   let chainId = "—";
-  let networkTotal = 0;
-  let networkAlive = 0;
-  let networkCountsOk = false;
 
   try {
     const [b, g, c] = await Promise.all([
@@ -963,128 +1056,112 @@ async function fetchRitualNetwork(): Promise<
     /* ignore */
   }
 
-  try {
-    const { createPublicClient, http, defineChain, parseAbi } = await import(
-      "viem"
-    );
-    const chain = defineChain({
-      id: Number(process.env.NEXT_PUBLIC_CHAIN_ID || 1979),
-      name: "ritual",
-      nativeCurrency: { name: "RIT", symbol: "RIT", decimals: 18 },
-      rpcUrls: { default: { http: [ritualRpc] } },
-    });
-    const client = createPublicClient({
-      chain,
-      transport: http(ritualRpc, { timeout: 25_000 }),
-    });
-    const hb = RITUAL_AGENT_HEARTBEAT as `0x${string}`;
+  // 1) Explorer cache — same source as https://explorer.ritualfoundation.org/agents
+  const cache = await fetchExplorerAgentCache();
+  let persistent = 0;
+  let sovereign = 0;
+  let totalUnique = 0;
+  let monitored = 0;
+  let reviving = 0;
+  let failed = 0;
+  let source = "—";
+  let countsOk = false;
 
-    const count = (await client.readContract({
-      address: hb,
-      abi: parseAbi(["function agentCount() view returns (uint256)"]),
-      functionName: "agentCount",
-    })) as bigint;
-    networkTotal = Number(count);
-    networkCountsOk = true;
+  if (cache?.isReady !== false && Array.isArray(cache?.persistent)) {
+    persistent = cache.persistent.length;
+    sovereign = Array.isArray(cache.sovereign) ? cache.sovereign.length : 0;
+    totalUnique =
+      typeof cache.totalUnique === "number"
+        ? cache.totalUnique
+        : persistent + sovereign;
 
-    // Count alive via isAlive(agentList(i)) — heartbeat registry = Persistent TEE agents
-    const n = Math.min(networkTotal, 80); // safety cap
-    let alive = 0;
-    const batch = 8;
-    for (let i = 0; i < n; i += batch) {
-      const slice = Array.from(
-        { length: Math.min(batch, n - i) },
-        (_, k) => i + k
-      );
-      const results = await Promise.all(
-        slice.map(async (idx) => {
-          try {
-            const addr = (await client.readContract({
-              address: hb,
-              abi: parseAbi([
-                "function agentList(uint256) view returns (address)",
-              ]),
-              functionName: "agentList",
-              args: [BigInt(idx)],
-            })) as `0x${string}`;
-            if (
-              !addr ||
-              addr === "0x0000000000000000000000000000000000000000"
-            ) {
-              return false;
-            }
-            return (await client.readContract({
-              address: hb,
-              abi: parseAbi([
-                "function isAlive(address) view returns (bool)",
-              ]),
-              functionName: "isAlive",
-              args: [addr],
-            })) as boolean;
-          } catch {
-            return false;
-          }
-        })
-      );
-      alive += results.filter(Boolean).length;
+    for (const a of cache.persistent) {
+      const st = String(a.info?.state || "").toUpperCase();
+      if (st === "MONITORED") monitored++;
+      else if (st === "REVIVING") reviving++;
+      else if (st === "FAILED") failed++;
+      else if (a.info?.isAlive === true) monitored++;
+      else if (a.info?.isAlive === false) failed++;
     }
-    networkAlive = alive;
-  } catch {
-    networkCountsOk = false;
+    // Prefer explorer current block when present
+    if (cache.currentBlock && cache.currentBlock > 0) {
+      block = String(cache.currentBlock);
+    }
+    source = "explorer /api/agents/cache";
+    countsOk = true;
+  } else {
+    // 2) On-chain heartbeat fallback (Persistent only)
+    const hb = await fetchHeartbeatPersistentCount(ritualRpc);
+    if (hb) {
+      persistent = hb.total;
+      monitored = hb.alive;
+      sovereign = 0;
+      totalUnique = persistent;
+      source = "AgentHeartbeat on-chain (Persistent only)";
+      countsOk = true;
+    }
   }
 
-  const rows = [
+  const rows: Array<Record<string, SnapshotCell>> = [
     { Field: "Latest block", Value: block },
     {
       Field: "Network gas",
       Value: gasGwei != null ? `${gasGwei.toFixed(6)} gwei` : "—",
     },
     {
-      Field: "Heartbeat agents (total)",
-      Value: networkCountsOk ? String(networkTotal) : "—",
+      Field: "Persistent agents",
+      Value: countsOk ? String(persistent) : "—",
     },
     {
-      Field: "Heartbeat agents (alive)",
-      Value: networkCountsOk ? String(networkAlive) : "—",
+      Field: "Sovereign agents",
+      Value: countsOk ? String(sovereign) : "—",
     },
     {
-      Field: "Registry type",
-      Value: "Persistent TEE (AgentHeartbeat)",
+      Field: "Total agents (unique)",
+      Value: countsOk ? String(totalUnique) : "—",
     },
     {
-      Field: "Sovereign TEE jobs",
-      Value:
-        "Not in heartbeat — listed separately on explorer (0x080C jobs)",
+      Field: "Persistent · Monitored",
+      Value: countsOk ? String(monitored) : "—",
+    },
+    {
+      Field: "Persistent · Reviving",
+      Value: countsOk ? String(reviving) : "—",
+    },
+    {
+      Field: "Persistent · Failed",
+      Value: countsOk ? String(failed) : "—",
     },
     { Field: "Chain id", Value: chainId },
     {
       Field: "Source",
-      Value: "AgentHeartbeat 0xEF50…3aCa",
+      Value: source,
+    },
+    {
+      Field: "Explorer",
+      Value: {
+        text: "explorer.ritualfoundation.org/agents",
+        href: "https://explorer.ritualfoundation.org/agents",
+      },
     },
   ];
 
   return {
-    summary: networkCountsOk
+    summary: countsOk
       ? `Ritual testnet · block ${block} · gas ${
           gasGwei != null ? gasGwei.toFixed(4) : "—"
-        } gwei · ${networkAlive}/${networkTotal} heartbeat agents alive (Persistent TEE registry)`
+        } gwei · ${persistent} Persistent · ${sovereign} Sovereign · ${totalUnique} total (explorer)`
       : `Ritual · block ${block} · gas ${
           gasGwei != null ? gasGwei.toFixed(4) : "—"
-        } gwei · agent registry unavailable`,
+        } gwei · agent stats unavailable`,
     rows,
     highlights: [
-      { label: "Block", value: block },
+      { label: "Persistent", value: countsOk ? String(persistent) : "—" },
+      { label: "Sovereign", value: countsOk ? String(sovereign) : "—" },
+      { label: "Total", value: countsOk ? String(totalUnique) : "—" },
       {
-        label: "Gas",
-        value: gasGwei != null ? `${gasGwei.toFixed(4)} gwei` : "—",
-      },
-      {
-        label: "Alive",
-        value: networkCountsOk ? String(networkAlive) : "—",
-      },
-      {
-        label: "Total",
-        value: networkCountsOk ? String(networkTotal) : "—",
+        label: "Block",
+        value: block,
       },
     ],
   };
@@ -1259,7 +1336,7 @@ export async function fetchSurfData(
     }
     case "ritual_network": {
       shaped = await fetchRitualNetwork();
-      endpoint = "ritual-rpc+radar";
+      endpoint = "explorer/api/agents/cache + ritual-rpc";
       break;
     }
     default:
