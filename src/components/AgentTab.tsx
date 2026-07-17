@@ -553,22 +553,30 @@ export function AgentTab({
       }
 
       /**
-       * SELECTION RULES (fixes Dead ↔ #10 shutter):
-       * 1. Soft refresh: NEVER change selectedId or agent panel — list/meta only.
+       * SELECTION RULES:
+       * 1. Soft refresh: never re-pick chips; still re-hydrate the selected panel
+       *    (fixes empty My Agents until chip click after open/deploy).
        * 2. Hard refresh: keep current selection if still set (user intent wins).
-       * 3. Auto-pick only when nothing is selected (first connect / after kill).
-       * 4. If user changed chip while this refresh ran, abort panel load.
+       * 3. Auto-pick only when nothing is selected (first connect / My Agents mount / after kill).
+       * 4. Never abort panel load just because we auto-picked (selectionAtStart was null).
+       *    loadAgentPanel gen + selectedIdRef guards drop stale loads if user clicked a chip.
        */
       if (opts?.soft) {
-        // Background auto-wake / post-tx soft: chips stay put; no setAgent/setSelectedId
+        const sel = selectedIdRef.current;
+        if (sel != null) {
+          // Same agent only — updates LIVE/balance without changing chips
+          await loadAgentPanel(sel, {
+            soft: true,
+            gen: panelLoadGenRef.current,
+          });
+        }
         await refreshNetwork();
         return;
       }
 
-      // Hard refresh path
-      const currentNow = selectedIdRef.current;
-      let pick: bigint | null = currentNow;
-      if (pick == null) {
+      // Hard refresh path — always use latest selection after meta load
+      let pick: bigint | null = selectedIdRef.current;
+      if (pick == null && selectionAtStart == null) {
         const liveIds = ids.filter((id) => {
           const m = metaForPick[id.toString()];
           return !m || m.status !== 4;
@@ -580,23 +588,16 @@ export function AgentTab({
         else if (deadIds.length) pick = deadIds[deadIds.length - 1];
         else pick = null;
 
-        // Only write selection when user had none (never steal a chip click)
-        if (
-          selectedIdRef.current == null &&
-          pick != null &&
-          selectionAtStart == null
-        ) {
+        // Only write selection when user still has none (never steal a chip click)
+        if (selectedIdRef.current == null && pick != null) {
           selectedIdRef.current = pick;
           setSelectedId(pick);
         } else {
           pick = selectedIdRef.current;
         }
-      }
-
-      // User clicked another agent while hard refresh was in flight
-      if (selectedIdRef.current !== selectionAtStart) {
-        await refreshNetwork();
-        return;
+      } else {
+        // User may have clicked a chip while meta loaded — follow that selection
+        pick = selectedIdRef.current;
       }
 
       if (pick != null) {
@@ -875,12 +876,18 @@ export function AgentTab({
           await refresh({ soft: true });
         } else {
           const mine = (data.results || []).filter(
-            (r) => r.skipped !== "not_owner"
+            (r) =>
+              r.skipped !== "not_owner" && r.skipped !== "unknown_agent"
           );
           const dueWait = mine.find((r) => r.skipped?.startsWith("not_due"));
           const notActive = mine.find((r) => r.skipped === "not_active");
           const dead = mine.find((r) => r.skipped === "dead");
-          const err = mine.find((r) => r.error);
+          // Prefer real tick failures — not raw getAgent/UnknownAgent noise
+          const err = mine.find(
+            (r) =>
+              r.error &&
+              !/UnknownAgent|function ["']?getAgent/i.test(r.error)
+          );
           if (!cancelled) {
             if (err?.error) {
               setAutoWakeNote(err.error.slice(0, 160));

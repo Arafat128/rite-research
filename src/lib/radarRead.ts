@@ -43,16 +43,30 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function errText(e: unknown): string {
+  if (e == null) return "";
+  if (typeof e === "string") return e;
+  if (e instanceof Error) {
+    const o = e as Error & { shortMessage?: string; details?: string };
+    return `${o.shortMessage || ""} ${o.message || ""} ${o.details || ""}`;
+  }
+  if (typeof e === "object") {
+    const o = e as { shortMessage?: string; message?: string; details?: string };
+    return `${o.shortMessage || ""} ${o.message || ""} ${o.details || ""}`;
+  }
+  return String(e);
+}
+
 function isEmptyCallError(e: unknown): boolean {
-  const m =
-    e && typeof e === "object" && "shortMessage" in e
-      ? String((e as { shortMessage?: string }).shortMessage)
-      : e instanceof Error
-        ? e.message
-        : String(e ?? "");
   return /returned no data|no data \("0x"\)|could not be found|HTTP request failed|fetch failed|timeout|network/i.test(
-    m
+    errText(e)
   );
+}
+
+/** getAgent reverts for missing / out-of-range ids — not an RPC failure. */
+function isUnknownAgentError(e: unknown): boolean {
+  const t = errText(e);
+  return /UnknownAgent|0x0df2949d/i.test(t);
 }
 
 /** Read with retries; recreate client on transport-level failures. */
@@ -125,18 +139,24 @@ export async function readAgent(id: bigint): Promise<AgentView | null> {
       args: [id],
     });
   } catch (e) {
-    if (isEmptyCallError(e) || /UnknownAgent|execution reverted/i.test(String(e))) {
-      // one more direct try after short delay
+    // Missing agent is expected (scan gaps / just-deleted) — never surface as UI error
+    if (isUnknownAgentError(e)) return null;
+
+    if (isEmptyCallError(e) || /execution reverted/i.test(errText(e))) {
+      // one more direct try after short delay (RPC flake on valid agents)
       try {
         await sleep(400);
         return await radarReadContract<AgentView>(
           { functionName: "getAgent", args: [id] },
           2
         );
-      } catch {
+      } catch (e2) {
+        if (isUnknownAgentError(e2) || isEmptyCallError(e2)) return null;
         return null;
       }
     }
+    // Never throw getAgent noise into the agent tab — treat as unreadable
+    if (/getAgent/i.test(errText(e))) return null;
     throw e;
   }
 }

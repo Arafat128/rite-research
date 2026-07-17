@@ -710,6 +710,15 @@ export async function runDueAgentTicks(opts?: {
       });
     } catch (e: unknown) {
       const msg = errBlob(e).slice(0, 280);
+      // Missing id in scan range — not a user-facing failure
+      if (/UnknownAgent|0x0df2949d/i.test(msg)) {
+        results.push({
+          agentId: String(i),
+          ok: false,
+          skipped: "unknown_agent",
+        });
+        continue;
+      }
       let error = msg;
       if (/NotAuthorized|0x82b42900/i.test(msg)) {
         error =
@@ -725,6 +734,9 @@ export async function runDueAgentTicks(opts?: {
       } else if (isRpcFlake(e)) {
         error =
           "Ritual RPC flake during auto-wake send — retrying on next poll (~20s).";
+      } else if (/getAgent/i.test(msg)) {
+        // Don't dump raw viem getAgent reverts into the My Agents auto-wake line
+        error = "Could not read agent on-chain (RPC). Retrying next poll.";
       }
       console.error(`[agentKeeper] agent ${i} tick failed:`, msg.slice(0, 200));
       results.push({

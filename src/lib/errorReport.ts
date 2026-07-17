@@ -97,6 +97,9 @@ export function friendlyUserMessage(raw: string): string {
   const t = raw.trim();
   if (!t) return "Something went wrong. Please try again.";
   if (isUserRejection(t)) return "Transaction cancelled in wallet.";
+  if (/UnknownAgent|0x0df2949d|function ["']?getAgent/i.test(t)) {
+    return "Agent not found on-chain yet. Click Refresh — if you just deployed, wait a few seconds and open My Agents again.";
+  }
   if (/insufficient funds|exceeds the balance|gas required exceeds/i.test(t)) {
     return "Not enough RIT in your wallet for this action (including gas).";
   }
