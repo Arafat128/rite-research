@@ -17,6 +17,8 @@ import {
 } from "viem";
 import {
   addressUrl,
+  ritualAgentUrl,
+  RITUAL_AGENTS_URL,
   ritualChain,
   txUrl,
 } from "@/lib/ritual";
@@ -60,8 +62,9 @@ export function OfficialAgentTab({ mode }: Props) {
 
   const [kind, setKind] = useState<OfficialKind>("sovereign");
   const [name, setName] = useState("Rite Agent");
+  /** Lean defaults — minimize prepaid RIT; advanced panel can raise. */
   const [prompt, setPrompt] = useState(
-    "You are a helpful Ritual AI agent for crypto research. Introduce yourself briefly."
+    "You are a helpful Ritual AI agent. Introduce yourself briefly."
   );
   const [model, setModel] = useState("");
   const [useRitualLlm, setUseRitualLlm] = useState(true);
@@ -69,12 +72,14 @@ export function OfficialAgentTab({ mode }: Props) {
   const [llmKey, setLlmKey] = useState("");
   const [hfToken, setHfToken] = useState("");
   const [hfRepoId, setHfRepoId] = useState("");
-  const [schedulerFunding, setSchedulerFunding] = useState("2");
+  const [schedulerFunding, setSchedulerFunding] = useState("0.12");
   const [dkmsFunding, setDkmsFunding] = useState("0");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [rows, setRows] = useState<OfficialAgentRecord[]>([]);
+  const [lastLaunched, setLastLaunched] = useState<string | null>(null);
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
 
@@ -92,9 +97,11 @@ export function OfficialAgentTab({ mode }: Props) {
 
   useEffect(() => {
     if (kind === "persistent") {
-      setDkmsFunding((v) => (v === "0" ? "50" : v));
+      setSchedulerFunding("0.15");
+      setDkmsFunding("2");
       setUseRitualLlm(false);
     } else {
+      setSchedulerFunding("0.12");
       setDkmsFunding("0");
       setUseRitualLlm(true);
     }
@@ -379,7 +386,7 @@ export function OfficialAgentTab({ mode }: Props) {
                 );
               }
               throw new Error(
-                `Step 2 configureFundAndStart reverted (gas ${used.toString()}/${limit.toString()}). Check ≥2 RIT funding or try a new agent name.`
+                `Step 2 configureFundAndStart reverted (gas ${used.toString()}/${limit.toString()}). Try a new agent name or slightly higher funding in Advanced.`
               );
             }
           }
@@ -395,14 +402,15 @@ export function OfficialAgentTab({ mode }: Props) {
             prompt: prompt.trim(),
             model: built.model,
             executor: built.executor.teeAddress,
-            status: "armed · scheduler will call 0x080C",
+            status: "armed · open on Ritual explorer",
           });
+          setLastLaunched(built.harness);
           toast.success(
-            "Official Sovereign launched",
-            `Harness ${built.harness.slice(0, 10)}…`
+            "Sovereign launched",
+            `Open on Ritual · ${built.harness.slice(0, 10)}…`
           );
           setMsg(
-            `Sovereign ready · harness ${built.harness}\nDeploy tx ${deployHash}\nConfigure tx ${cfgHash}\nOpen My Agents → Ritual AI.`
+            `Sovereign ready · ${built.harness}`
           );
         }
       } else {
@@ -460,15 +468,14 @@ export function OfficialAgentTab({ mode }: Props) {
           createdAt: Date.now(),
           model: model.trim() || "provider default",
           executor: built.executor.teeAddress,
-          status: "launched · monitor heartbeat after Phase 2",
+          status: "launched · open on Ritual explorer",
         });
+        setLastLaunched(built.launcher);
         toast.success(
-          "Official Persistent launched",
-          `Launcher ${built.launcher.slice(0, 10)}…`
+          "Persistent launched",
+          `Open on Ritual · ${built.launcher.slice(0, 10)}…`
         );
-        setMsg(
-          `Persistent launcher deployed · ${built.launcher}\nTx ${hash}\nSpawn runs via 0x0820 after schedule. Fund DKMS was ${dkmsFunding} RIT.`
-        );
+        setMsg(`Persistent ready · ${built.launcher}`);
       }
 
       refreshList();
@@ -559,36 +566,55 @@ export function OfficialAgentTab({ mode }: Props) {
             : "My Ritual AI agents"}
         </h2>
         <span className="rounded-full border border-violet-400/40 bg-violet-500/15 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-violet-200">
-          Official TEE · v4 (higher gas)
+          Official TEE · lean RIT
         </span>
       </div>
       <p className="mb-5 text-sm text-white/50">
         {mode === "deploy" ? (
           <>
-            Launch real Ritual chain agents via factories —{" "}
-            <b className="text-white/75">Sovereign</b> (job ·{" "}
-            <code className="text-white/45">0x080C</code>) or{" "}
-            <b className="text-white/75">Persistent</b> (long-lived ·{" "}
-            <code className="text-white/45">0x0820</code>). Separate from Surf
-            data agents.
+            One-click style launch with minimal funding.{" "}
+            <b className="text-white/75">Sovereign</b> ≈ {totalFundingLabel} RIT
+            + gas (Ritual LLM). <b className="text-white/75">Persistent</b> needs
+            LLM + HF keys and a bit more RIT for heartbeats.
           </>
         ) : (
           <>
-            Official agents launched from this browser. Child contract =
-            harness (Sovereign) or launcher (Persistent).
+            Your launched agents — open each on Ritual explorer with one click.
           </>
         )}
       </p>
+
+      {lastLaunched && mode === "deploy" && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-violet-400/30 bg-violet-500/10 px-4 py-3">
+          <span className="text-sm text-violet-100">Launched ·</span>
+          <a
+            href={ritualAgentUrl(lastLaunched)}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-full bg-violet-400 px-3 py-1.5 text-xs font-bold text-black hover:bg-violet-300"
+          >
+            Open on Ritual ↗
+          </a>
+          <a
+            href={RITUAL_AGENTS_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[11px] text-violet-200/80 underline"
+          >
+            All agents
+          </a>
+        </div>
+      )}
 
       {mode === "deploy" && (
         <div className="glass space-y-4 rounded-2xl p-5">
           <div className="flex flex-wrap gap-2">
             {(
               [
-                ["sovereign", "Sovereign · 0x080C"],
-                ["persistent", "Persistent · 0x0820"],
+                ["sovereign", "Sovereign", "~0.12 RIT"],
+                ["persistent", "Persistent", "~2.15 RIT"],
               ] as const
-            ).map(([id, label]) => (
+            ).map(([id, label, cost]) => (
               <button
                 key={id}
                 type="button"
@@ -600,6 +626,7 @@ export function OfficialAgentTab({ mode }: Props) {
                 }`}
               >
                 {label}
+                <span className="ml-1.5 opacity-70">{cost}</span>
               </button>
             ))}
           </div>
@@ -609,62 +636,33 @@ export function OfficialAgentTab({ mode }: Props) {
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
+              placeholder="My Ritual agent"
               className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
             />
           </div>
 
           {kind === "sovereign" && (
-            <>
-              <div>
-                <label className="text-[11px] text-white/40">Prompt</label>
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  rows={3}
-                  className="mt-1 w-full resize-y rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-                />
-              </div>
-              <label className="flex items-center gap-2 text-[12px] text-white/60">
-                <input
-                  type="checkbox"
-                  checked={useRitualLlm && !anthropicKey}
-                  onChange={(e) => setUseRitualLlm(e.target.checked)}
-                />
-                Use Ritual LLM (no API key · ZeroClaw · recommended)
-              </label>
-              {!useRitualLlm && (
-                <div>
-                  <label className="text-[11px] text-white/40">
-                    Anthropic API key (encrypted to TEE)
-                  </label>
-                  <input
-                    type="password"
-                    value={anthropicKey}
-                    onChange={(e) => setAnthropicKey(e.target.value)}
-                    placeholder="sk-ant-…"
-                    className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-                    autoComplete="off"
-                  />
-                </div>
-              )}
-            </>
+            <p className="rounded-lg border border-[#c8ff4a]/20 bg-[#c8ff4a]/5 px-3 py-2 text-[11px] text-white/55">
+              Uses <b className="text-white/75">Ritual LLM</b> by default (no
+              API key). Two wallet confirms: deploy harness → fund &amp; arm.
+            </p>
           )}
 
           {kind === "persistent" && (
             <>
               <p className="rounded-lg border border-amber-400/30 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-100">
-                Persistent needs a real LLM key + HuggingFace DA. DKMS funding
-                pays heartbeats — too low and the agent may not stay alive.
+                Persistent needs LLM + HuggingFace for heartbeats. Defaults are
+                lean (~2.15 RIT); top up DKMS later if monitoring stops.
               </p>
               <div>
                 <label className="text-[11px] text-white/40">
-                  LLM API key (encrypted to TEE)
+                  LLM API key
                 </label>
                 <input
                   type="password"
                   value={llmKey}
                   onChange={(e) => setLlmKey(e.target.value)}
-                  placeholder="sk-ant-… or OpenAI / Gemini key"
+                  placeholder="sk-ant-… / OpenAI / Gemini"
                   className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
                   autoComplete="off"
                 />
@@ -690,7 +688,7 @@ export function OfficialAgentTab({ mode }: Props) {
                   <input
                     value={hfRepoId}
                     onChange={(e) => setHfRepoId(e.target.value)}
-                    placeholder="alice/my-agent-workspace"
+                    placeholder="you/agent-workspace"
                     className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
                   />
                 </div>
@@ -698,60 +696,94 @@ export function OfficialAgentTab({ mode }: Props) {
             </>
           )}
 
-          <div>
-            <label className="text-[11px] text-white/40">
-              Model (optional override)
-            </label>
-            <input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={
-                kind === "sovereign"
-                  ? "default: zai-org/GLM-4.7-FP8"
-                  : "default: claude-sonnet-4-5-20250929"
-              }
-              className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-            />
-          </div>
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            className="text-[11px] text-white/40 underline"
+          >
+            {showAdvanced ? "Hide advanced" : "Advanced (prompt, funding, model)"}
+          </button>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="text-[11px] text-white/40">
-                Scheduler funding (RIT)
-              </label>
-              <input
-                value={schedulerFunding}
-                onChange={(e) => setSchedulerFunding(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-              />
+          {showAdvanced && (
+            <div className="space-y-3 rounded-xl border border-white/10 bg-black/25 p-3">
+              {kind === "sovereign" && (
+                <>
+                  <div>
+                    <label className="text-[11px] text-white/40">Prompt</label>
+                    <textarea
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.target.value)}
+                      rows={2}
+                      className="mt-1 w-full resize-y rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-[12px] text-white/60">
+                    <input
+                      type="checkbox"
+                      checked={useRitualLlm && !anthropicKey}
+                      onChange={(e) => setUseRitualLlm(e.target.checked)}
+                    />
+                    Ritual LLM (no key)
+                  </label>
+                  {!useRitualLlm && (
+                    <input
+                      type="password"
+                      value={anthropicKey}
+                      onChange={(e) => setAnthropicKey(e.target.value)}
+                      placeholder="Anthropic key"
+                      className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                      autoComplete="off"
+                    />
+                  )}
+                </>
+              )}
+              <div>
+                <label className="text-[11px] text-white/40">Model</label>
+                <input
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="optional override"
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-[11px] text-white/40">
+                    Scheduler funding (RIT)
+                  </label>
+                  <input
+                    value={schedulerFunding}
+                    onChange={(e) => setSchedulerFunding(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-white/40">
+                    DKMS funding (RIT)
+                  </label>
+                  <input
+                    value={dkmsFunding}
+                    onChange={(e) => setDkmsFunding(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
+                  />
+                </div>
+              </div>
             </div>
-            <div>
-              <label className="text-[11px] text-white/40">
-                DKMS funding (RIT)
-              </label>
-              <input
-                value={dkmsFunding}
-                onChange={(e) => setDkmsFunding(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-              />
-            </div>
-          </div>
+          )}
 
           <div className="rounded-xl border border-violet-400/25 bg-black/30 p-3 text-sm">
             <div className="flex justify-between text-white/70">
-              <span>
-                {kind === "sovereign"
-                  ? "Configure funding (step 2)"
-                  : "Total factory value"}
-              </span>
+              <span>Prepaid RIT (excl. gas)</span>
               <span className="font-semibold text-violet-200">
                 {totalFundingLabel} RIT
               </span>
             </div>
             <p className="mt-1 text-[10px] text-white/35">
               {kind === "sovereign"
-                ? "Sovereign uses 2 wallet confirms: deploy harness, then fund+arm. Plus gas."
-                : "Plus gas. Factory: " + PERSISTENT_FACTORY.slice(0, 10) + "…"}
+                ? "Lean schedule: 1 run window · 2 confirms + gas only."
+                : "DKMS + scheduler · factory " +
+                  PERSISTENT_FACTORY.slice(0, 10) +
+                  "…"}
             </p>
           </div>
 
@@ -763,17 +795,33 @@ export function OfficialAgentTab({ mode }: Props) {
           >
             {busy
               ? "Launching…"
-              : `Launch official ${kind === "sovereign" ? "Sovereign (2 steps)" : "Persistent"} · ${totalFundingLabel} RIT + gas`}
+              : `Launch ${kind === "sovereign" ? "Sovereign" : "Persistent"} · ${totalFundingLabel} RIT + gas`}
           </button>
         </div>
       )}
 
       {mode === "manage" && (
         <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href={RITUAL_AGENTS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-full border border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-[11px] font-semibold text-violet-100 hover:bg-violet-500/25"
+            >
+              Ritual agents network ↗
+            </a>
+            <button
+              type="button"
+              onClick={refreshList}
+              className="text-[11px] text-white/40 underline"
+            >
+              Refresh
+            </button>
+          </div>
           {rows.length === 0 ? (
             <div className="glass rounded-2xl p-6 text-center text-sm text-white/50">
-              No official Ritual agents in this browser yet. Deploy one from
-              the Deploy tab → Ritual AI agent.
+              No official Ritual agents yet. Deploy → Ritual AI agents.
             </div>
           ) : (
             rows.map((r) => (
@@ -787,56 +835,63 @@ export function OfficialAgentTab({ mode }: Props) {
                       {r.name}
                     </div>
                     <div className="text-xs text-white/45">
-                      {r.kind === "sovereign" ? "Sovereign" : "Persistent"} ·{" "}
-                      {r.model || "—"}
+                      {r.kind === "sovereign" ? "Sovereign" : "Persistent"}
+                      {r.model ? ` · ${r.model}` : ""}
                     </div>
                   </div>
                   <span className="rounded-full border border-violet-400/40 bg-violet-500/15 px-2.5 py-0.5 text-[11px] text-violet-100">
                     {r.kind}
                   </span>
                 </div>
-                <p className="mt-2 break-all font-mono text-[11px] text-white/55">
+                <p className="mt-2 break-all font-mono text-[11px] text-white/45">
                   {r.childAddress}
                 </p>
-                <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <a
+                    href={ritualAgentUrl(r.childAddress)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-full bg-violet-400 px-3.5 py-1.5 text-xs font-bold text-black hover:bg-violet-300"
+                  >
+                    Open on Ritual ↗
+                  </a>
                   <a
                     href={addressUrl(r.childAddress as Address)}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-violet-200 underline"
+                    className="rounded-full border border-white/15 px-3 py-1.5 text-[11px] text-white/70 hover:bg-white/5"
                   >
-                    Explorer ↗
+                    Explorer
                   </a>
                   {r.createTx && (
                     <a
                       href={txUrl(r.createTx as Hex)}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-[#c8ff4a]/80 underline"
+                      className="rounded-full border border-[#c8ff4a]/30 px-3 py-1.5 text-[11px] text-[#c8ff4a]/90 hover:bg-[#c8ff4a]/10"
                     >
-                      Launch tx ↗
+                      Launch tx
                     </a>
                   )}
+                  <a
+                    href={RITUAL_AGENTS_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] text-white/45 hover:text-white/70"
+                  >
+                    Agents list
+                  </a>
                 </div>
-                {r.status && (
-                  <p className="mt-2 text-[11px] text-white/40">{r.status}</p>
-                )}
-                {r.prompt && (
-                  <p className="mt-1 line-clamp-2 text-[11px] text-white/35">
-                    {r.prompt}
-                  </p>
-                )}
               </div>
             ))
           )}
-          <button
-            type="button"
-            onClick={refreshList}
-            className="text-xs text-white/40 underline"
-          >
-            Refresh list
-          </button>
         </div>
+      )}
+
+      {msg && (
+        <p className="mt-3 whitespace-pre-wrap text-xs text-violet-100/90">
+          {msg}
+        </p>
       )}
 
       {errorReport && (

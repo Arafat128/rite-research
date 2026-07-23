@@ -567,9 +567,9 @@ export async function buildSovereignTwoStepLaunch(
       ? CLI_TYPE.ZEROCLAW
       : CLI_TYPE.CRUSH);
 
-  // Keep lifespan safely under Scheduler MAX_LIFESPAN (10_000):
-  // frequency * windowNumCalls <= 10000
-  const windowNumCalls = p.windowNumCalls ?? 3;
+  // Minimal rolling window keeps scheduler funding low (1 run × 2000 blocks).
+  // frequency * windowNumCalls must stay ≤ 10_000 (Scheduler MAX_LIFESPAN).
+  const windowNumCalls = p.windowNumCalls ?? 1;
   const frequency = p.frequency ?? 2000;
   if (frequency * windowNumCalls > 10_000) {
     throw new Error(
@@ -577,18 +577,19 @@ export async function buildSovereignTwoStepLaunch(
     );
   }
 
-  const schedulerFunding = parseEther(p.schedulerFundingRit || "2");
+  // Lean default — enough for one short sovereign window + gas headroom on Ritual
+  const schedulerFunding = parseEther(p.schedulerFundingRit || "0.12");
 
   const params = {
     executor: executor.teeAddress,
-    ttl: BigInt(500),
+    ttl: BigInt(300),
     userPublicKey: "0x" as Hex,
     pollIntervalBlocks: BigInt(5),
-    maxPollBlock: BigInt(6000),
+    maxPollBlock: BigInt(3000),
     taskIdMarker: "RITE_SOVEREIGN",
     deliveryTarget: harness,
     deliverySelector: SOVEREIGN_DELIVERY_SELECTOR,
-    deliveryGasLimit: BigInt(3_000_000),
+    deliveryGasLimit: BigInt(2_000_000),
     deliveryMaxFeePerGas: ritualScheduleFees().maxFeePerGas,
     deliveryMaxPriorityFeePerGas: ritualScheduleFees().maxPriorityFeePerGas,
     cliType,
@@ -600,17 +601,17 @@ export async function buildSovereignTwoStepLaunch(
     systemPrompt: emptyRef,
     model,
     tools: [] as string[],
-    maxTurns: 50,
-    maxTokens: 8192,
+    maxTurns: 20,
+    maxTokens: 4096,
     rpcUrls: JSON.stringify({ ritual: RPC_URL }),
   };
 
   // schedulerGas is gas for each scheduled wake callback — keep moderate
   const schedFees = ritualScheduleFees();
   const schedule = {
-    schedulerGas: 1_500_000,
+    schedulerGas: 1_200_000,
     frequency,
-    schedulerTtl: 500,
+    schedulerTtl: 400,
     maxFeePerGas: schedFees.maxFeePerGas,
     maxPriorityFeePerGas: schedFees.maxPriorityFeePerGas,
     value: BigInt(0),
@@ -631,10 +632,10 @@ export async function buildSovereignTwoStepLaunch(
     params,
     schedule,
     rolling,
-    schedulerLockDuration: BigInt(100_000),
-    // Live CREATE3 deploy used ~1.13M gas in the wild — 1.2M OOG'd. Give headroom.
-    gasDeploy: BigInt(3_500_000),
-    gasConfigure: BigInt(6_000_000),
+    schedulerLockDuration: BigInt(50_000),
+    // Live CREATE3 deploy used ~1.13M gas — keep headroom without over-estimating
+    gasDeploy: BigInt(2_800_000),
+    gasConfigure: BigInt(4_500_000),
   };
 }
 
@@ -845,13 +846,14 @@ export async function buildPersistentCompressedLaunch(
     0, // ZeroClaw runtime
   ]);
 
-  // DKMS funding must be real for heartbeats; default lower for UX with warning in UI
-  const dkmsFunding = parseEther(p.dkmsFundingRit || "50");
-  const schedulerFunding = parseEther(p.schedulerFundingRit || "5");
+  // DKMS pays heartbeats — still required, but lean defaults for Rite UX.
+  // (Skill docs mention high dev funds; users can top up later if heartbeats stop.)
+  const dkmsFunding = parseEther(p.dkmsFundingRit || "2");
+  const schedulerFunding = parseEther(p.schedulerFundingRit || "0.15");
 
   const schedule = {
-    schedulerGas: 3_000_000,
-    schedulerTtl: 500,
+    schedulerGas: 2_000_000,
+    schedulerTtl: 400,
     maxFeePerGas: BigInt(1_000_000_000),
     maxPriorityFeePerGas: BigInt(100_000_000),
     value: BigInt(0),
@@ -862,7 +864,7 @@ export async function buildPersistentCompressedLaunch(
     launcher,
     executor,
     value: dkmsFunding + schedulerFunding,
-    gasLimit: BigInt(10_000_000),
+    gasLimit: BigInt(8_000_000),
     factory: PERSISTENT_FACTORY,
     args: [
       userSalt,

@@ -31,6 +31,22 @@ export const EXPLORER_URL =
   process.env.NEXT_PUBLIC_EXPLORER_URL ||
   "https://explorer.ritualfoundation.org";
 
+/** Ritual agent explorer hub (network-wide agent list). */
+export const RITUAL_AGENTS_URL =
+  process.env.NEXT_PUBLIC_RITUAL_AGENTS_URL ||
+  "https://explorer.ritualfoundation.org/agents";
+
+/** External Ritual agents portal (if available). */
+export const RITUAL_AGENTS_PORTAL_URL =
+  process.env.NEXT_PUBLIC_RITUAL_AGENTS_PORTAL_URL ||
+  "https://agents.ritualfoundation.org";
+
+/** Open a specific agent/harness/launcher address on Ritual explorer. */
+export function ritualAgentUrl(address: string): string {
+  const a = (address || "").trim();
+  return `${EXPLORER_URL.replace(/\/$/, "")}/address/${a}`;
+}
+
 export const ritualChain = defineChain({
   id: Number(process.env.NEXT_PUBLIC_CHAIN_ID || 1979),
   name: "Ritual Testnet",
