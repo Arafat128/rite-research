@@ -337,35 +337,55 @@ export function makeUserSalt(seed: string): Hex {
 }
 
 /**
- * Ritual testnet baseFee is tiny (~wei–gwei). Forcing 20 gwei makes MetaMask
- * warn "higher network fee than necessary" and wastes RIT.
- * Match keeper style: 2–3× base + small tip, capped low.
+ * Ritual fee strategy (learned the hard way):
+ * - feeHistory baseFee is often ~wei, so pure EIP-1559 floors of 0.01 gwei
+ *   get rejected by RPC/wallet as "Internal JSON-RPC error".
+ * - eth_gasPrice is typically ~1 gwei — use that for **legacy gasPrice**
+ *   on factory launches (same approach as radarWrite).
+ * - Cap at 5 gwei so MetaMask doesn't show absurd fees.
  */
 export async function ritualEip1559Fees(client?: PublicClient): Promise<{
   maxFeePerGas: bigint;
   maxPriorityFeePerGas: bigint;
+  /** Prefer this for sendTransaction — type-0 legacy is more reliable on Ritual. */
+  gasPrice: bigint;
 }> {
-  const c = client || getRitualReadClient();
+  const c = client || getRitualReadClient(true);
+  let gasPrice = BigInt(1_500_000_000); // 1.5 gwei fallback
+  try {
+    gasPrice = await c.getGasPrice();
+  } catch {
+    /* keep fallback */
+  }
+  const minGwei = BigInt(1_000_000_000); // 1 gwei floor
+  if (gasPrice < minGwei) gasPrice = minGwei;
+  gasPrice = (gasPrice * BigInt(120)) / BigInt(100); // +20% headroom
+  const cap = BigInt(5_000_000_000); // 5 gwei
+  if (gasPrice > cap) gasPrice = cap;
+
+  let base = BigInt(1);
   try {
     const block = await c.getBlock({ blockTag: "latest" });
-    const base = block.baseFeePerGas ?? BigInt(1);
-    const maxPriorityFeePerGas = BigInt(1_000_000); // 0.001 gwei tip
-    let maxFeePerGas = base * BigInt(3) + maxPriorityFeePerGas;
-    // Floor so zero-fee txs aren't dropped
-    if (maxFeePerGas < BigInt(10_000_000)) {
-      maxFeePerGas = BigInt(10_000_000); // 0.01 gwei
-    }
-    // Cap well below MetaMask "high fee" warnings (was 20 gwei — too high)
-    const cap = BigInt(2_000_000_000); // 2 gwei
-    if (maxFeePerGas > cap) maxFeePerGas = cap;
-    return { maxFeePerGas, maxPriorityFeePerGas };
+    base = block.baseFeePerGas ?? BigInt(1);
   } catch {
-    // Safe Ritual defaults if fee history flakes
-    return {
-      maxFeePerGas: BigInt(50_000_000), // 0.05 gwei
-      maxPriorityFeePerGas: BigInt(1_000_000),
-    };
+    /* ignore */
   }
+  const maxPriorityFeePerGas = BigInt(100_000_000); // 0.1 gwei
+  let maxFeePerGas = base * BigInt(3) + maxPriorityFeePerGas;
+  // Never undercut legacy gasPrice — underpriced EIP-1559 → Internal JSON-RPC
+  if (maxFeePerGas < gasPrice) maxFeePerGas = gasPrice;
+  if (maxFeePerGas > cap) maxFeePerGas = cap;
+
+  return { maxFeePerGas, maxPriorityFeePerGas, gasPrice };
+}
+
+/** Overrides for walletClient.sendTransaction on Ritual (legacy preferred). */
+export function ritualLegacyTxFees(fees: {
+  gasPrice: bigint;
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
+}): { gasPrice: bigint } {
+  return { gasPrice: fees.gasPrice };
 }
 
 /** Fees embedded in Scheduler config (paid when schedule fires). */
@@ -686,6 +706,18 @@ export async function buildSovereignRollingCompressedLaunch(
 /** Decode common factory/harness revert strings for user reports. */
 export function explainSovereignRevert(raw: string): string {
   const t = raw || "";
+  if (/Internal JSON-RPC|internal error was received|Internal error/i.test(t)) {
+    return (
+      "Ritual RPC rejected the launch tx (often fee/nonce). " +
+      "Hard-refresh, switch network off/on Ritual (1979), use a new agent name, " +
+      "and retry. Keep a little extra RIT for gas (~0.05+)."
+    );
+  }
+  if (/replacement transaction underpriced|nonce too low/i.test(t)) {
+    return (
+      "Wallet nonce stuck. In MetaMask: Settings → Advanced → Clear activity tab data, then retry."
+    );
+  }
   if (/InvalidDeliveryTarget/i.test(t)) {
     return "Harness address mismatch — refresh and try again (delivery target bug).";
   }
@@ -708,7 +740,7 @@ export function explainSovereignRevert(raw: string): string {
     return "Transaction ran out of gas — retry (we use higher limits now).";
   }
   if (/execution reverted/i.test(t) && t.length < 80) {
-    return "On-chain revert. Ensure ≥2 RIT for scheduler funding + gas, then retry.";
+    return "On-chain revert. Check funding + gas, use a new agent name, then retry.";
   }
   return t.slice(0, 280);
 }

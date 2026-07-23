@@ -146,10 +146,8 @@ export function OfficialAgentTab({ mode }: Props) {
           : "Building official Persistent launch (TEE + DA + factory)…"
       );
 
-      // Cheap Ritual EIP-1559 fees (avoids MetaMask "higher fee than necessary")
-      const fees = await ritualEip1559Fees(
-        publicClient ?? undefined
-      );
+      // Legacy gasPrice (~1 gwei) — ultra-low EIP-1559 caused Internal JSON-RPC on Ritual
+      const fees = await ritualEip1559Fees(publicClient ?? undefined);
 
       if (kind === "sovereign") {
         /**
@@ -185,9 +183,7 @@ export function OfficialAgentTab({ mode }: Props) {
             data,
             value: built.value,
             gas: built.gasLimit,
-            maxFeePerGas: fees.maxFeePerGas,
-            maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
-            type: "eip1559",
+            gasPrice: fees.gasPrice,
           });
           if (publicClient) {
             const r = await publicClient.waitForTransactionReceipt({
@@ -280,16 +276,39 @@ export function OfficialAgentTab({ mode }: Props) {
               deployGas = BigInt(3_500_000);
             }
           }
-          const deployHash = await walletClient.sendTransaction({
-            chain: ritualChain,
-            account: address,
-            to: SOVEREIGN_FACTORY,
-            data: deployData,
-            gas: deployGas,
-            maxFeePerGas: fees.maxFeePerGas,
-            maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
-            type: "eip1559",
-          });
+          let deployHash: `0x${string}`;
+          try {
+            deployHash = await walletClient.sendTransaction({
+              chain: ritualChain,
+              account: address,
+              to: SOVEREIGN_FACTORY,
+              data: deployData,
+              gas: deployGas,
+              gasPrice: fees.gasPrice,
+            });
+          } catch (sendErr: unknown) {
+            const raw =
+              sendErr instanceof Error ? sendErr.message : String(sendErr);
+            // One retry with bumped legacy gas if RPC rejected underpriced
+            if (/Internal JSON-RPC|internal error|underpriced/i.test(raw)) {
+              setMsg("RPC rejected fee — retrying with higher gas price…");
+              const bumped =
+                (fees.gasPrice * BigInt(150)) / BigInt(100) >
+                BigInt(5_000_000_000)
+                  ? BigInt(5_000_000_000)
+                  : (fees.gasPrice * BigInt(150)) / BigInt(100);
+              deployHash = await walletClient.sendTransaction({
+                chain: ritualChain,
+                account: address,
+                to: SOVEREIGN_FACTORY,
+                data: deployData,
+                gas: deployGas < BigInt(4_000_000) ? BigInt(4_000_000) : deployGas,
+                gasPrice: bumped,
+              });
+            } else {
+              throw sendErr;
+            }
+          }
 
           setMsg(`Step 1/2 sent ${deployHash.slice(0, 12)}… waiting…`);
           if (publicClient) {
@@ -366,9 +385,7 @@ export function OfficialAgentTab({ mode }: Props) {
             data: cfgData,
             value: built.configureValue,
             gas: built.gasConfigure,
-            maxFeePerGas: fees.maxFeePerGas,
-            maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
-            type: "eip1559",
+            gasPrice: fees.gasPrice,
           });
 
           setMsg(`Step 2/2 sent ${cfgHash.slice(0, 12)}… waiting…`);
@@ -429,20 +446,22 @@ export function OfficialAgentTab({ mode }: Props) {
           `Confirm launch in wallet · launcher ${built.launcher.slice(0, 10)}… · total ${formatEther(built.value)} RIT`
         );
 
-        const hash = await walletClient.writeContract({
-          chain: ritualChain,
-          account: address,
-          address: PERSISTENT_FACTORY,
+        // Prefer sendTransaction + legacy gasPrice (writeContract can force EIP-1559)
+        const persistData = encodeFunctionData({
           abi: (
             await import("@/lib/officialAgents")
           ).persistentFactoryAbi,
           functionName: "launchPersistentCompressed",
           args: built.args as never,
+        });
+        const hash = await walletClient.sendTransaction({
+          chain: ritualChain,
+          account: address,
+          to: PERSISTENT_FACTORY,
+          data: persistData,
           value: built.value,
           gas: built.gasLimit,
-          maxFeePerGas: fees.maxFeePerGas,
-          maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
-          type: "eip1559",
+          gasPrice: fees.gasPrice,
         });
 
         setMsg(`Launch sent ${hash.slice(0, 12)}… waiting for confirmation`);
