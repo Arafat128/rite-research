@@ -12,6 +12,7 @@ import { parseEther, type Hex } from "viem";
 import { ritualChain } from "@/lib/ritual";
 import {
   FREQ_OPTIONS_MIN,
+  ORACAST_MIN_DEPOSIT_RIT,
   ORACAST_RATE_RIT_PER_HOUR,
 } from "@/lib/oracastConstants";
 import { ORACAST_TOKEN_LIST } from "@/lib/oracastPrice";
@@ -74,7 +75,7 @@ export function OracastMarketTab() {
     priceLabel?: string;
   } | null>(null);
   const [frequencyMin, setFrequencyMin] = useState(60);
-  const [depositRit, setDepositRit] = useState("0.5");
+  const [depositRit, setDepositRit] = useState("0.05");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -198,8 +199,10 @@ export function OracastMarketTab() {
       }
 
       const value = parseEther(depositRit || "0");
-      if (value < parseEther(String(rate))) {
-        throw new Error(`Minimum deposit is ${rate} RIT (1 hour of alerts)`);
+      if (value < parseEther(String(ORACAST_MIN_DEPOSIT_RIT))) {
+        throw new Error(
+          `Deposit must be at least ${ORACAST_MIN_DEPOSIT_RIT} RIT (any amount above that is fine)`
+        );
       }
 
       setMsg("Confirm deposit in wallet…");
@@ -314,7 +317,7 @@ export function OracastMarketTab() {
     setErr("");
     try {
       await ensureWallet();
-      const value = parseEther(depositRit || "0.05");
+      const value = parseEther(depositRit || String(ORACAST_MIN_DEPOSIT_RIT));
       const hash = await walletClient.sendTransaction({
         chain: ritualChain,
         account: address,
@@ -507,7 +510,8 @@ export function OracastMarketTab() {
               className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
             />
             <p className="mt-1 text-[10px] text-white/35">
-              ≈ {hoursPreview} hours at {rate} RIT/h · min {rate} RIT
+              ≈ {hoursPreview}h at {rate} RIT/h · deposit any amount ≥{" "}
+              {ORACAST_MIN_DEPOSIT_RIT} RIT
             </p>
           </div>
         </div>

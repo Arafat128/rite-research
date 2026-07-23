@@ -1,6 +1,7 @@
 /**
  * Oracast price-watch subscriptions with prepaid RIT billing.
- * Rate: 0.05 RIT per hour of active monitoring (configurable).
+ * Rate: 0.005 RIT per hour of active monitoring (configurable).
+ * Users may deposit any amount ≥ dust floor; runtime = deposit / rate.
  *
  * Storage: Upstash Redis when configured, else memory + /tmp file (local).
  */
@@ -16,13 +17,22 @@ import { sendTelegramMessage } from "@/lib/telegram";
 import { formatUsdPrice, resolvePrice } from "@/lib/oracastPrice";
 import {
   FREQ_OPTIONS_MIN,
+  ORACAST_MIN_DEPOSIT_RIT,
   ORACAST_RATE_RIT_PER_HOUR,
 } from "@/lib/oracastConstants";
 
-export { FREQ_OPTIONS_MIN, ORACAST_RATE_RIT_PER_HOUR };
+export {
+  FREQ_OPTIONS_MIN,
+  ORACAST_MIN_DEPOSIT_RIT,
+  ORACAST_RATE_RIT_PER_HOUR,
+};
 
 export const ORACAST_RATE_WEI = parseEther(
   String(ORACAST_RATE_RIT_PER_HOUR)
+);
+
+export const ORACAST_MIN_DEPOSIT_WEI = parseEther(
+  String(ORACAST_MIN_DEPOSIT_RIT)
 );
 
 export type OracastWatch = {
@@ -304,9 +314,10 @@ export async function createWatch(
   } catch {
     throw new Error("Invalid deposit amount");
   }
-  if (depositWei < ORACAST_RATE_WEI) {
+  // Any positive deposit is allowed (above dust) — hours = deposit / rate
+  if (depositWei < ORACAST_MIN_DEPOSIT_WEI) {
     throw new Error(
-      `Minimum deposit is ${ORACAST_RATE_RIT_PER_HOUR} RIT (1 hour)`
+      `Deposit must be at least ${ORACAST_MIN_DEPOSIT_RIT} RIT`
     );
   }
 
@@ -317,14 +328,19 @@ export async function createWatch(
     chainHint: input.chainHint,
   });
 
+  // Accept any on-chain transfer ≥ stated amount (or dust if stated was higher due to float)
+  const minOnChain =
+    depositWei < ORACAST_MIN_DEPOSIT_WEI
+      ? ORACAST_MIN_DEPOSIT_WEI
+      : depositWei;
   const { valueWei } = await verifyDepositTx({
     txHash: input.txHash,
     owner,
-    minValueWei: depositWei,
+    minValueWei: minOnChain,
   });
 
-  // Credit actual on-chain value (may be higher than stated)
-  const credited = valueWei >= depositWei ? valueWei : depositWei;
+  // Always credit actual on-chain value
+  const credited = valueWei;
 
   await markTxUsed(input.txHash);
 
@@ -369,8 +385,10 @@ export async function fundWatch(opts: {
   } catch {
     throw new Error("Invalid amount");
   }
-  if (depositWei < ORACAST_RATE_WEI / BigInt(2)) {
-    throw new Error("Deposit too small");
+  if (depositWei < ORACAST_MIN_DEPOSIT_WEI) {
+    throw new Error(
+      `Top-up must be at least ${ORACAST_MIN_DEPOSIT_RIT} RIT`
+    );
   }
   const { valueWei } = await verifyDepositTx({
     txHash: opts.txHash,

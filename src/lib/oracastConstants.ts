@@ -1,9 +1,15 @@
 /** Client-safe Oracast watch constants (no server imports). */
 
+/** RIT burned per hour of active monitoring (default 0.005). */
 export const ORACAST_RATE_RIT_PER_HOUR = Number(
   process.env.NEXT_PUBLIC_ORACAST_RATE_RIT ||
     process.env.ORACAST_RATE_RIT_PER_HOUR ||
-    "0.05"
+    "0.005"
+);
+
+/** Absolute dust floor — any deposit above this is allowed. */
+export const ORACAST_MIN_DEPOSIT_RIT = Number(
+  process.env.NEXT_PUBLIC_ORACAST_MIN_DEPOSIT_RIT || "0.001"
 );
 
 export const FREQ_OPTIONS_MIN = [

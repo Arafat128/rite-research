@@ -19,7 +19,11 @@ export async function GET(req: NextRequest) {
   if (req.nextUrl.searchParams.get("list") === "1") {
     return NextResponse.json({
       tokens: ORACAST_TOKEN_LIST,
-      rateRitPerHour: Number(process.env.ORACAST_RATE_RIT_PER_HOUR || "0.05"),
+      rateRitPerHour: Number(
+        process.env.NEXT_PUBLIC_ORACAST_RATE_RIT ||
+          process.env.ORACAST_RATE_RIT_PER_HOUR ||
+          "0.005"
+      ),
     });
   }
 
