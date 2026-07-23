@@ -43,12 +43,26 @@ const ProductAgentsShell = dynamic(
     ),
   }
 );
+const OracastMarketTab = dynamic(
+  () =>
+    import("./OracastMarketTab").then((m) => ({
+      default: m.OracastMarketTab,
+    })),
+  {
+    ssr: false,
+    loading: () => (
+      <p className="py-12 text-center text-sm text-white/40">
+        Loading Oracast…
+      </p>
+    ),
+  }
+);
 const BountyBanner = dynamic(
   () => import("./BountyBanner").then((m) => ({ default: m.BountyBanner })),
   { ssr: false }
 );
 
-type Tab = "research" | "records" | "deploy" | "agents";
+type Tab = "research" | "records" | "deploy" | "agents" | "markets";
 
 export function AppShell() {
   const [tab, setTab] = useState<Tab>("research");
@@ -86,6 +100,7 @@ export function AppShell() {
                 ["records", "Records"],
                 ["deploy", "Deploy"],
                 ["agents", "My Agents"],
+                ["markets", "Oracast"],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -151,6 +166,7 @@ export function AppShell() {
         {tab === "records" && <RecordsTab />}
         {tab === "deploy" && <ProductAgentsShell mode="deploy" />}
         {tab === "agents" && <ProductAgentsShell mode="manage" />}
+        {tab === "markets" && <OracastMarketTab />}
 
         <footer className="mt-14 border-t border-white/10 pt-6 pb-2 text-center">
           <p className="text-sm text-white/50">
