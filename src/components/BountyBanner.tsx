@@ -299,6 +299,9 @@ export function BountyBanner() {
       <p className="text-center text-[11px] text-white/35">
         <b className="text-white/55">50%</b> of research fees, agent deploys &amp;
         ticks enter the pool. Each paid action ={" "}
+        <b className="text-white/55">1 interaction</b>
+        {" · "}
+        each successful <b className="text-white/55">Oracast Alert</b> DM ={" "}
         <b className="text-white/55">1 interaction</b>. At{" "}
         <b className="text-[#c8ff4a]">{threshold}</b> interactions the pool{" "}
         <b className="text-white/55">auto-draws one random winner</b> (weighted by

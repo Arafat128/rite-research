@@ -320,6 +320,20 @@ export const bountyPoolAbi = [
       { name: "feeder", type: "address", indexed: true },
     ],
   },
+  {
+    type: "function",
+    name: "credit",
+    stateMutability: "payable",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "isFeeder",
+    stateMutability: "view",
+    inputs: [{ name: "feeder", type: "address" }],
+    outputs: [{ type: "bool" }],
+  },
 ] as const;
 
 export function addressUrl(addr: string) {

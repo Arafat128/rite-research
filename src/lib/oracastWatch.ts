@@ -849,6 +849,9 @@ export async function tickOracastWatches(opts?: {
     skipped?: string;
     error?: string;
     price?: number;
+    bountyOk?: boolean;
+    bountyReason?: string;
+    bountyTx?: string;
   }>;
   backend: string;
 }> {
@@ -867,6 +870,9 @@ export async function tickOracastWatches(opts?: {
     skipped?: string;
     error?: string;
     price?: number;
+    bountyOk?: boolean;
+    bountyReason?: string;
+    bountyTx?: string;
   }> = [];
   let notified = 0;
   let paused = 0;
@@ -939,7 +945,30 @@ export async function tickOracastWatches(opts?: {
       if (bal < cost) w.active = false;
       await saveWatch(w);
       notified += 1;
-      results.push({ id: w.id, ok: true, price: quote.price });
+
+      // Bounty poll: 1 successful Oracast alert = 1 interaction (never blocks DM)
+      let bounty: { ok: boolean; reason?: string; txHash?: string } | undefined;
+      try {
+        const { creditOracastBountyInteraction } = await import(
+          "@/lib/oracastBounty"
+        );
+        bounty = await creditOracastBountyInteraction(w.owner);
+      } catch (be) {
+        console.warn(
+          "[oracastWatch] bounty credit error",
+          be instanceof Error ? be.message : be
+        );
+        bounty = { ok: false, reason: "bounty_error" };
+      }
+
+      results.push({
+        id: w.id,
+        ok: true,
+        price: quote.price,
+        bountyOk: bounty?.ok,
+        bountyReason: bounty?.reason,
+        bountyTx: bounty?.txHash,
+      });
     } catch (e) {
       results.push({
         id: w.id,
