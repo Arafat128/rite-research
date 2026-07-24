@@ -41,18 +41,10 @@ export type DataKindDef = {
 /**
  * Streams offered at deploy. Keep this list short and reliable.
  * Deprecated kinds stay in the type + fetch switch for old agents only.
+ * Token price was removed from deploy UI — use Oracast Markets Alert instead.
+ * Existing Radar agents with market_price still tick via DEPRECATED_DATA_KINDS.
  */
 export const DATA_KINDS: DataKindDef[] = [
-  {
-    id: "market_price",
-    label: "Token price",
-    short: "Price",
-    description: "Last ~5 series price points for one symbol (Surf market).",
-    targetLabel: "Symbol",
-    targetPlaceholder: "BTC",
-    defaultTarget: "BTC",
-    path: (t) => `/market/price?symbol=${encodeURIComponent(t.toUpperCase())}`,
-  },
   {
     id: "fear_greed",
     label: "Fear & Greed",
@@ -132,6 +124,17 @@ const LEGACY_KIND_MAP: Record<string, DataKindId> = {
 
 /** Full defs for deprecated kinds (old agents still ticking). Not shown at deploy. */
 const DEPRECATED_DATA_KINDS: DataKindDef[] = [
+  {
+    id: "market_price",
+    label: "Token price (legacy)",
+    short: "Price",
+    description:
+      "Legacy stream — still ticks for existing agents. New price alerts: Oracast Markets Alert tab.",
+    targetLabel: "Symbol",
+    targetPlaceholder: "BTC",
+    defaultTarget: "BTC",
+    path: (t) => `/market/price?symbol=${encodeURIComponent(t.toUpperCase())}`,
+  },
   {
     id: "open_interest_skew",
     label: "OI + long/short skew (legacy)",

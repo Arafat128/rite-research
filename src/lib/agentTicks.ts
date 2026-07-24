@@ -11,8 +11,8 @@ import {
 } from "viem";
 import { RADAR_CONTRACT, ritualChain, RPC_URL, radarAgentAbi } from "@/lib/ritual";
 import {
-  DATA_KINDS,
   decodeAgentTrack,
+  getDataKind,
   type DataKindId,
   type SurfDataSnapshot,
 } from "@/lib/surfData";
@@ -60,8 +60,8 @@ export function snapshotFromTopic(
   opts?: { summary?: string; source?: string }
 ): SurfDataSnapshot {
   const track = decodeAgentTrack(topic ? [topic] : []);
-  const kind: DataKindId = track?.kind || "market_price";
-  const def = DATA_KINDS.find((k) => k.id === kind);
+  const kind: DataKindId = track?.kind || "fear_greed";
+  const def = getDataKind(kind);
   const target = track?.target || "_";
   return {
     kind,

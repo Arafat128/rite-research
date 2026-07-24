@@ -36,6 +36,7 @@ import {
 } from "@/lib/ritual";
 import {
   DATA_KINDS,
+  getDataKind,
   decodeAgentTrack,
   encodeAgentTrack,
   snapshotCellHref,
@@ -235,9 +236,9 @@ export function AgentTab({
 
   // deploy form
   const [agentKind, setAgentKind] = useState<AgentKindId>(AGENT_KIND.Persistent);
-  const [name, setName] = useState("Price Radar");
-  const [dataKind, setDataKind] = useState<DataKindId>("market_price");
-  const [target, setTarget] = useState("BTC");
+  const [name, setName] = useState("Data Radar");
+  const [dataKind, setDataKind] = useState<DataKindId>("fear_greed");
+  const [target, setTarget] = useState("_");
   const [extraFund, setExtraFund] = useState("0.02");
   const [schedValue, setSchedValue] = useState("15");
   const [schedUnit, setSchedUnit] = useState<ScheduleUnit>("minutes");
@@ -320,7 +321,7 @@ export function AgentTab({
     setErrorReport(null);
   }, []);
 
-  const dataDef = DATA_KINDS.find((k) => k.id === dataKind)!;
+  const dataDef = getDataKind(dataKind) ?? DATA_KINDS[0]!;
   const track = useMemo(() => decodeAgentTrack(watchlist), [watchlist]);
   const deployFee = deployFeeForKind(agentKind);
   const extraFundWei = useMemo(() => {
@@ -936,7 +937,7 @@ export function AgentTab({
   }, [mode, isConnected, address]);
 
   useEffect(() => {
-    const d = DATA_KINDS.find((k) => k.id === dataKind);
+    const d = getDataKind(dataKind);
     if (d && d.targetLabel) setTarget(d.defaultTarget);
     else setTarget("_");
   }, [dataKind]);
@@ -1059,7 +1060,8 @@ export function AgentTab({
       setMsg("");
       await ensureWallet();
 
-      const def = DATA_KINDS.find((k) => k.id === dataKind)!;
+      const def = getDataKind(dataKind);
+      if (!def) throw new Error("Select a data stream");
       const tgt = def.targetLabel
         ? (target || def.defaultTarget).trim()
         : def.defaultTarget;
@@ -1926,9 +1928,9 @@ export function AgentTab({
               2 · Data stream (locked at deploy)
             </h3>
             <p className="mb-3 text-[11px] text-white/40">
-              One locked stream per agent. Hard data via Surf / RPC;{" "}
-              <b className="text-white/55">Custom</b> uses Ritual LLM (TEE) —
-              not Chat research.
+              One locked stream per agent (Surf / RPC). Token price alerts live
+              under <b className="text-white/55">Oracast Alert</b> — not
+              deployed as a data agent stream.
             </p>
             <div className="mb-4 grid gap-2 sm:grid-cols-2">
               {DATA_KINDS.map((k) => (
@@ -2089,7 +2091,7 @@ export function AgentTab({
                     #{key}
                     {reg
                       ? ` · ${AGENT_KIND_LABELS[reg.agentKind] || "?"} · ${
-                          DATA_KINDS.find((k) => k.id === reg.dataKind)?.short ||
+                          getDataKind(reg.dataKind)?.short ||
                           reg.dataKind
                         }`
                       : meta
@@ -2176,8 +2178,7 @@ export function AgentTab({
                       <>
                         {" "}
                         ·{" "}
-                        {DATA_KINDS.find((k) => k.id === track.kind)?.label ||
-                          track.kind}
+                        {getDataKind(track.kind)?.label || track.kind}
                         {track.target && track.target !== "_"
                           ? ` · ${track.target}`
                           : ""}
@@ -2239,8 +2240,7 @@ export function AgentTab({
                       <>
                         {" "}
                         ·{" "}
-                        {DATA_KINDS.find((k) => k.id === track.kind)?.label ||
-                          track.kind}
+                        {getDataKind(track.kind)?.label || track.kind}
                         {track.target && track.target !== "_"
                           ? ` · ${track.target}`
                           : ""}
