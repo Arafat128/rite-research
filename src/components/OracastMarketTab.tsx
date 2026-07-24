@@ -112,6 +112,12 @@ export function OracastMarketTab() {
   const [err, setErr] = useState("");
   const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [loadingList, setLoadingList] = useState(false);
+  const [serverStatus, setServerStatus] = useState<{
+    closedTabReady?: boolean;
+    upstash?: boolean;
+    activeWatches?: number;
+    hint?: string;
+  } | null>(null);
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
 
@@ -198,6 +204,22 @@ export function OracastMarketTab() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    void fetch("/api/oracast/status", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setServerStatus({
+            closedTabReady: d.closedTabReady,
+            upstash: d.upstash,
+            activeWatches: d.activeWatches,
+            hint: d.hint,
+          });
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   // In-app poke so notifications fire while Markets tab is open
   useEffect(() => {
@@ -500,6 +522,32 @@ export function OracastMarketTab() {
       </div>
 
       {address && <TelegramNotifyCard owner={address} />}
+
+      {serverStatus && (
+        <div
+          className={`rounded-2xl border px-4 py-3 text-[12px] leading-relaxed ${
+            serverStatus.closedTabReady
+              ? "border-[#c8ff4a]/25 bg-[#c8ff4a]/5 text-white/60"
+              : "border-amber-400/35 bg-amber-950/40 text-amber-100"
+          }`}
+        >
+          <b className="text-white/80">Closed-tab alerts: </b>
+          {serverStatus.closedTabReady
+            ? `ready (Upstash on · ${serverStatus.activeWatches ?? 0} active watch(es) on server). `
+            : "not ready — "}
+          {serverStatus.hint}
+          {!serverStatus.upstash && (
+            <span className="mt-1 block text-[11px] opacity-90">
+              Vercel → Settings → Env: UPSTASH_REDIS_REST_URL +
+              UPSTASH_REDIS_REST_TOKEN (Production) → Redeploy.
+            </span>
+          )}
+          <span className="mt-1 block text-[11px] opacity-80">
+            With the site closed, GitHub Action <b>Agent keeper</b> must run
+            (repo Secrets: APP_URL + CRON_SECRET matching Vercel).
+          </span>
+        </div>
+      )}
 
       <div className="glass space-y-4 rounded-2xl p-5">
         <div className="flex flex-wrap gap-2">

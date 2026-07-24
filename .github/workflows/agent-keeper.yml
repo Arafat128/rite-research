@@ -86,11 +86,27 @@ jobs:
               --max-time 90 \
               -X POST \
               -H "Authorization: Bearer ${CRON_SECRET}" \
-              -H "User-Agent: rite-agent-keeper/1.2" \
+              -H "User-Agent: rite-agent-keeper/1.3" \
               -H "Content-Type: application/json" \
               "${BASE}/api/agent/cron?max=40${Q}" || echo "000")
             echo "cron HTTP $code"
             cat /tmp/cron.json; echo
+
+            # Explicit Oracast poke (Telegram price alerts with tab closed)
+            OTICK="${BASE}/api/oracast/tick"
+            if [ -n "${BYPASS:-}" ]; then
+              OTICK="${OTICK}?x-vercel-protection-bypass=${BYPASS}"
+            fi
+            ocode=$(curl -sS -o /tmp/oracast.json -w "%{http_code}" \
+              --max-time 90 \
+              -X POST \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "User-Agent: rite-agent-keeper/1.3" \
+              -H "Content-Type: application/json" \
+              -d '{}' \
+              "${OTICK}" || echo "000")
+            echo "oracast tick HTTP $ocode"
+            cat /tmp/oracast.json 2>/dev/null; echo
 
             if [ "$code" != "200" ]; then
               return 1

@@ -54,6 +54,13 @@ async function handle(req: NextRequest) {
     if (req.nextUrl.searchParams.get("health") === "1") {
       const addr = keeperAddress();
       const onChain = await isKeeperOnChain(addr);
+      let oracastStatus = null;
+      try {
+        const { getOracastRuntimeStatus } = await import("@/lib/oracastWatch");
+        oracastStatus = await getOracastRuntimeStatus();
+      } catch {
+        /* ignore */
+      }
       return NextResponse.json({
         ok: true,
         autoWakeReady:
@@ -65,8 +72,14 @@ async function handle(req: NextRequest) {
         hasKeeperKey: Boolean(process.env.KEEPER_PRIVATE_KEY),
         hasRadar: Boolean(process.env.NEXT_PUBLIC_RADAR_CONTRACT),
         hasSurf: Boolean(process.env.SURF_API_KEY),
+        hasUpstash: Boolean(
+          process.env.UPSTASH_REDIS_REST_URL?.trim() &&
+            process.env.UPSTASH_REDIS_REST_TOKEN?.trim()
+        ),
+        hasTelegram: Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim()),
         keeper: addr,
         keeperOnChain: onChain,
+        oracast: oracastStatus,
         hint:
           onChain === false
             ? "Call setKeeper(keeperAddress, true) as Radar admin or auto runTick will NotAuthorized"

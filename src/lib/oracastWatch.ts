@@ -83,6 +83,8 @@ export type OracastWatch = {
 const KEY_PREFIX = "rite:oracast:watch:";
 const INDEX_KEY = "rite:oracast:watch_index";
 const TX_KEY_PREFIX = "rite:oracast:tx:";
+/** Single blob — more reliable than SADD indexes across cold starts */
+const ALL_BLOB_KEY = "rite:oracast:all_v2";
 const WATCH_VERSION = 2;
 
 type G = typeof globalThis & {
@@ -248,8 +250,58 @@ export function alertsRemaining(
   }
 }
 
+type AllBlob = {
+  watches: Record<string, OracastWatch>;
+  usedTx?: string[];
+  updatedAt?: number;
+};
+
+async function loadAllBlobFromUpstash(): Promise<void> {
+  if (!upstashConfigured()) return;
+  try {
+    const raw = await upstashCmd(["GET", ALL_BLOB_KEY]);
+    if (raw == null || raw === "") return;
+    const blob =
+      typeof raw === "string"
+        ? (JSON.parse(raw) as AllBlob)
+        : (raw as AllBlob);
+    if (!blob?.watches) return;
+    for (const w of Object.values(blob.watches)) {
+      if (w?.id && w?.owner) mem().set(w.id, migrateWatch(w));
+    }
+    if (Array.isArray(blob.usedTx)) {
+      for (const t of blob.usedTx) memTx().add(String(t).toLowerCase());
+    }
+  } catch (e) {
+    console.warn("[oracastWatch] load all blob failed", e);
+  }
+}
+
+async function saveAllBlobToUpstash(): Promise<void> {
+  if (!upstashConfigured()) return;
+  const watches: Record<string, OracastWatch> = {};
+  mem().forEach((w, id) => {
+    watches[id] = w;
+  });
+  const blob: AllBlob = {
+    watches,
+    usedTx: Array.from(memTx()).slice(-500),
+    updatedAt: Date.now(),
+  };
+  await upstashCmd(["SET", ALL_BLOB_KEY, JSON.stringify(blob)]);
+}
+
+function assertDurableOnVercel(): void {
+  if (process.env.VERCEL && !upstashConfigured()) {
+    throw new Error(
+      "Closed-tab Oracast needs Upstash. On Vercel set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (Production), then Redeploy."
+    );
+  }
+}
+
 export async function getWatch(id: string): Promise<OracastWatch | null> {
   loadDurableFile();
+  await loadAllBlobFromUpstash();
   if (upstashConfigured()) {
     try {
       const raw = await upstashCmd(["GET", `${KEY_PREFIX}${id}`]);
@@ -272,12 +324,14 @@ export async function getWatch(id: string): Promise<OracastWatch | null> {
 
 export async function saveWatch(w: OracastWatch): Promise<void> {
   loadDurableFile();
+  await loadAllBlobFromUpstash();
   const next = migrateWatch({ ...w, v: WATCH_VERSION });
   mem().set(next.id, next);
   saveDurableFile();
 
   if (upstashConfigured()) {
     try {
+      // Per-key + full blob (blob is source of truth for cron listAll)
       await upstashCmd([
         "SET",
         `${KEY_PREFIX}${next.id}`,
@@ -289,18 +343,16 @@ export async function saveWatch(w: OracastWatch): Promise<void> {
         next.id,
       ]);
       await upstashCmd(["SADD", INDEX_KEY, next.id]);
+      await saveAllBlobToUpstash();
     } catch (e) {
       console.error("[oracastWatch] CRITICAL remote save failed", e);
-      // Still have file + memory — throw only if neither path durable on multi-instance
-      if (process.env.VERCEL && !durablePath()) {
-        throw new Error(
-          "Could not persist watch (configure UPSTASH_REDIS_REST_URL + TOKEN)"
-        );
-      }
+      throw new Error(
+        "Could not save watch to Upstash. Check UPSTASH_REDIS_REST_URL/TOKEN on Vercel Production and redeploy."
+      );
     }
   } else if (process.env.VERCEL) {
-    console.warn(
-      "[oracastWatch] No Upstash on Vercel — watches may not survive cold starts. Set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN."
+    throw new Error(
+      "UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN required on Vercel for Oracast (closed-tab alerts)."
     );
   }
 }
@@ -309,6 +361,7 @@ export async function listWatchesByOwner(
   owner: string
 ): Promise<OracastWatch[]> {
   loadDurableFile();
+  await loadAllBlobFromUpstash();
   const o = owner.toLowerCase();
   const byId = new Map<string, OracastWatch>();
 
@@ -338,6 +391,7 @@ export async function listWatchesByOwner(
 
 export async function listAllActiveWatches(): Promise<OracastWatch[]> {
   loadDurableFile();
+  await loadAllBlobFromUpstash();
   const byId = new Map<string, OracastWatch>();
 
   if (upstashConfigured()) {
@@ -366,6 +420,69 @@ export async function listAllActiveWatches(): Promise<OracastWatch[]> {
   }
 
   return Array.from(byId.values());
+}
+
+/** Diagnostics for UI / health (no secrets). */
+export async function getOracastRuntimeStatus(): Promise<{
+  upstash: boolean;
+  telegramBot: boolean;
+  storage: string;
+  activeWatches: number;
+  totalWatches: number;
+  vercel: boolean;
+  closedTabReady: boolean;
+  hint: string;
+}> {
+  loadDurableFile();
+  await loadAllBlobFromUpstash();
+  const all = Array.from(mem().values());
+  const active = all.filter(
+    (w) => w.active && BigInt(w.depositWei || "0") > BigInt(0)
+  );
+  // Prefer remote count if upstash
+  let activeCount = active.length;
+  let totalCount = all.length;
+  try {
+    const remote = await listAllActiveWatches();
+    activeCount = remote.length;
+    if (upstashConfigured()) {
+      const raw = await upstashCmd(["GET", ALL_BLOB_KEY]);
+      if (raw) {
+        const blob =
+          typeof raw === "string"
+            ? (JSON.parse(raw) as AllBlob)
+            : (raw as AllBlob);
+        totalCount = Object.keys(blob.watches || {}).length;
+      }
+    }
+  } catch {
+    /* keep mem counts */
+  }
+
+  const upstash = upstashConfigured();
+  const telegramBot = Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
+  const closedTabReady = upstash && telegramBot;
+  let hint = "OK — closed-tab alerts need GitHub Agent keeper or external cron poking /api/oracast/tick";
+  if (!upstash) {
+    hint =
+      "Set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN on Vercel Production and Redeploy";
+  } else if (!telegramBot) {
+    hint = "Set TELEGRAM_BOT_TOKEN on Vercel";
+  } else {
+    hint =
+      "Storage OK. Enable GitHub Action “Agent keeper” (APP_URL + CRON_SECRET) so ticks run with the tab closed. Re-open Oracast once after deploy to restore watches.";
+  }
+
+  return {
+    upstash,
+    telegramBot,
+    storage: storageHint(),
+    activeWatches: activeCount,
+    totalWatches: totalCount,
+    vercel: Boolean(process.env.VERCEL),
+    closedTabReady,
+    hint,
+  };
 }
 
 export type CreateWatchInput = {
@@ -458,7 +575,9 @@ export async function verifyDepositTx(opts: {
 export async function createWatch(
   input: CreateWatchInput
 ): Promise<OracastWatch> {
+  assertDurableOnVercel();
   loadDurableFile();
+  await loadAllBlobFromUpstash();
   const owner = input.owner.toLowerCase();
   if (!/^0x[a-fA-F0-9]{40}$/.test(owner)) {
     throw new Error("Invalid wallet");
