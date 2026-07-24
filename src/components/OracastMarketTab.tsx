@@ -16,7 +16,6 @@ import {
   ORACAST_RATE_RIT_PER_HOUR,
 } from "@/lib/oracastConstants";
 import { ORACAST_TOKEN_LIST } from "@/lib/oracastPrice";
-import { TelegramNotifyCard } from "@/components/TelegramNotifyCard";
 import { useToast } from "@/components/ToastProvider";
 import {
   buildErrorReport,
@@ -503,7 +502,7 @@ export function OracastMarketTab() {
     <div className="mx-auto max-w-3xl space-y-5">
       <div>
         <h2 className="font-[family-name:var(--font-display)] text-3xl text-[#c8ff4a]">
-          Oracast Markets
+          Oracast Markets Alert
         </h2>
         <p className="mt-1 text-sm text-white/50">
           Token price alerts via Telegram · charged{" "}
@@ -515,13 +514,11 @@ export function OracastMarketTab() {
             rel="noreferrer"
             className="text-[#c8ff4a]/80 underline-offset-2 hover:underline"
           >
-            Oracast
+            Oracast Markets
           </a>
-          .
+          . Link Telegram above if you have not already.
         </p>
       </div>
-
-      {address && <TelegramNotifyCard owner={address} />}
 
       {serverStatus && (
         <div

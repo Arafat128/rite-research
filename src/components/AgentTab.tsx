@@ -88,7 +88,7 @@ import {
   supportsKillAgent,
 } from "@/lib/radarWrite";
 import { useToast } from "@/components/ToastProvider";
-import { TelegramNotifyCard } from "@/components/TelegramNotifyCard";
+
 import { ErrorFeedback } from "@/components/ErrorFeedback";
 import {
   buildErrorReport,
@@ -2066,8 +2066,6 @@ export function AgentTab({
 
           {mode === "manage" && (
           <>
-          {address && <TelegramNotifyCard owner={address} />}
-
           {/* Live agent chips */}
           {liveAgentIds.length > 0 ? (
             <div className="flex flex-wrap items-center gap-2">

@@ -470,7 +470,7 @@ export async function getOracastRuntimeStatus(): Promise<{
     hint = "Set TELEGRAM_BOT_TOKEN on Vercel";
   } else {
     hint =
-      "Storage OK. Enable GitHub Action “Agent keeper” (APP_URL + CRON_SECRET) so ticks run with the tab closed. Re-open Oracast once after deploy to restore watches.";
+      "Storage OK. Enable GitHub Action “Agent keeper” (APP_URL + CRON_SECRET) so ticks run with the tab closed. Re-open Oracast Alert once after deploy to restore watches.";
   }
 
   return {
@@ -920,7 +920,7 @@ export async function tickOracastWatches(opts?: {
           : "";
       const left = alertsRemaining(w.depositWei, w.frequencyMin);
       const html =
-        `<b>Oracast · ${escapeHtml(w.symbol)}</b>\n` +
+        `<b>Oracast Alert · ${escapeHtml(w.symbol)}</b>\n` +
         `${escapeHtml(w.name)}\n` +
         `Price: <b>$${escapeHtml(formatUsdPrice(quote.price))}</b>` +
         (ch ? ` · ${escapeHtml(ch)}` : "") +

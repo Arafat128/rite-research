@@ -52,13 +52,20 @@ const OracastMarketTab = dynamic(
     ssr: false,
     loading: () => (
       <p className="py-12 text-center text-sm text-white/40">
-        Loading Oracast…
+        Loading Oracast Alert…
       </p>
     ),
   }
 );
 const BountyBanner = dynamic(
   () => import("./BountyBanner").then((m) => ({ default: m.BountyBanner })),
+  { ssr: false }
+);
+const TelegramNotifyCard = dynamic(
+  () =>
+    import("./TelegramNotifyCard").then((m) => ({
+      default: m.TelegramNotifyCard,
+    })),
   { ssr: false }
 );
 
@@ -100,7 +107,7 @@ export function AppShell() {
                 ["records", "Records"],
                 ["deploy", "Deploy"],
                 ["agents", "My Agents"],
-                ["markets", "Oracast"],
+                ["markets", "Oracast Alert"],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -161,6 +168,13 @@ export function AppShell() {
         )}
 
         <BountyBanner />
+
+        {/* One Telegram connect for the whole app (research DMs, agent ticks, Oracast alerts) */}
+        {isConnected && address && (
+          <div className="mb-6 mx-auto max-w-3xl">
+            <TelegramNotifyCard owner={address} />
+          </div>
+        )}
 
         {tab === "research" && <ResearchTab />}
         {tab === "records" && <RecordsTab />}
