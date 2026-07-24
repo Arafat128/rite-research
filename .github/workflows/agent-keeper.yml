@@ -108,6 +108,22 @@ jobs:
             echo "oracast tick HTTP $ocode"
             cat /tmp/oracast.json 2>/dev/null; echo
 
+            # Official TEE agent activity → Telegram
+            OTICK_OFF="${BASE}/api/official/tick"
+            if [ -n "${BYPASS:-}" ]; then
+              OTICK_OFF="${OTICK_OFF}?x-vercel-protection-bypass=${BYPASS}"
+            fi
+            ofcode=$(curl -sS -o /tmp/official.json -w "%{http_code}" \
+              --max-time 90 \
+              -X POST \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "User-Agent: rite-agent-keeper/1.4" \
+              -H "Content-Type: application/json" \
+              -d '{}' \
+              "${OTICK_OFF}" || echo "000")
+            echo "official tick HTTP $ofcode"
+            cat /tmp/official.json 2>/dev/null; echo
+
             if [ "$code" != "200" ]; then
               return 1
             fi

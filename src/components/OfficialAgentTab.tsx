@@ -83,17 +83,74 @@ export function OfficialAgentTab({ mode }: Props) {
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
 
+  /** Push browser registry → server so cron can Telegram activity alerts. */
+  const syncOfficialToServer = useCallback(
+    async (
+      rec: OfficialAgentRecord | OfficialAgentRecord[],
+      opts?: { notifyLaunch?: boolean }
+    ) => {
+      if (!address) return;
+      const list = Array.isArray(rec) ? rec : [rec];
+      try {
+        await fetch("/api/official/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: list.length > 1 ? "sync" : "register",
+            owner: address,
+            notifyLaunch: Boolean(opts?.notifyLaunch && list.length === 1),
+            agents: list,
+            agent: list[0],
+          }),
+        });
+      } catch {
+        /* non-blocking — launch already succeeded */
+      }
+    },
+    [address]
+  );
+
   const refreshList = useCallback(() => {
     if (!address) {
       setRows([]);
       return;
     }
-    setRows(listOfficialAgents(address));
-  }, [address]);
+    const local = listOfficialAgents(address);
+    setRows(local);
+    // Keep server registry in sync for closed-tab Telegram
+    if (local.length) void syncOfficialToServer(local);
+  }, [address, syncOfficialToServer]);
 
   useEffect(() => {
     refreshList();
   }, [refreshList, mode]);
+
+  // Poll official agent activity → Telegram while My Agents / Ritual AI is open
+  useEffect(() => {
+    if (mode !== "manage" || !address || !isConnected) return;
+    let cancelled = false;
+    const poke = async () => {
+      try {
+        await fetch("/api/official/tick", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ owner: address, max: 20 }),
+          cache: "no-store",
+        });
+      } catch {
+        /* ignore */
+      }
+      if (!cancelled) {
+        /* list is local-only */
+      }
+    };
+    void poke();
+    const t = setInterval(() => void poke(), 45_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [mode, address, isConnected]);
 
   useEffect(() => {
     if (kind === "persistent") {
@@ -196,8 +253,8 @@ export function OfficialAgentTab({ mode }: Props) {
               );
             }
           }
-          registerOfficialAgent({
-            kind: "sovereign",
+          const recOneShot = {
+            kind: "sovereign" as const,
             name: name.trim(),
             owner: address,
             childAddress: built.harness,
@@ -208,9 +265,15 @@ export function OfficialAgentTab({ mode }: Props) {
             model: built.model,
             executor: built.executor.teeAddress,
             status: "armed via compressed rolling",
-          });
+          };
+          registerOfficialAgent(recOneShot);
+          void syncOfficialToServer(recOneShot, { notifyLaunch: true });
+          setLastLaunched(built.harness);
           toast.success("Official Sovereign launched", built.harness.slice(0, 12));
-          setMsg(`Sovereign ready · ${built.harness}\nTx ${hash}`);
+          setMsg(
+            `Sovereign ready · ${built.harness}\nTx ${hash}` +
+              `\nTelegram: activity alerts if linked above.`
+          );
         } else {
           // Two-step: deployHarness → configureFundAndStart
           const built = await buildSovereignTwoStepLaunch({
@@ -408,8 +471,8 @@ export function OfficialAgentTab({ mode }: Props) {
             }
           }
 
-          registerOfficialAgent({
-            kind: "sovereign",
+          const rec = {
+            kind: "sovereign" as const,
             name: name.trim(),
             owner: address,
             childAddress: built.harness,
@@ -420,14 +483,17 @@ export function OfficialAgentTab({ mode }: Props) {
             model: built.model,
             executor: built.executor.teeAddress,
             status: "armed · open on Ritual explorer",
-          });
+          };
+          registerOfficialAgent(rec);
+          void syncOfficialToServer(rec, { notifyLaunch: true });
           setLastLaunched(built.harness);
           toast.success(
             "Sovereign launched",
             `Open on Ritual · ${built.harness.slice(0, 10)}…`
           );
           setMsg(
-            `Sovereign ready · ${built.harness}`
+            `Sovereign ready · ${built.harness}` +
+              `\nTelegram: activity alerts if linked above.`
           );
         }
       } else {
@@ -477,8 +543,8 @@ export function OfficialAgentTab({ mode }: Props) {
           }
         }
 
-        registerOfficialAgent({
-          kind: "persistent",
+        const rec = {
+          kind: "persistent" as const,
           name: name.trim(),
           owner: address,
           childAddress: built.launcher,
@@ -488,13 +554,18 @@ export function OfficialAgentTab({ mode }: Props) {
           model: model.trim() || "provider default",
           executor: built.executor.teeAddress,
           status: "launched · open on Ritual explorer",
-        });
+        };
+        registerOfficialAgent(rec);
+        void syncOfficialToServer(rec, { notifyLaunch: true });
         setLastLaunched(built.launcher);
         toast.success(
           "Persistent launched",
           `Open on Ritual · ${built.launcher.slice(0, 10)}…`
         );
-        setMsg(`Persistent ready · ${built.launcher}`);
+        setMsg(
+          `Persistent ready · ${built.launcher}` +
+            `\nTelegram: heartbeat/activity alerts if linked above.`
+        );
       }
 
       refreshList();
@@ -594,11 +665,13 @@ export function OfficialAgentTab({ mode }: Props) {
             One-click style launch with minimal funding.{" "}
             <b className="text-white/75">Sovereign</b> ≈ {totalFundingLabel} RIT
             + gas (Ritual LLM). <b className="text-white/75">Persistent</b> needs
-            LLM + HF keys and a bit more RIT for heartbeats.
+            LLM + HF keys and a bit more RIT for heartbeats. Link Telegram above
+            for launch + activity DMs.
           </>
         ) : (
           <>
-            Your launched agents — open each on Ritual explorer with one click.
+            Your launched agents — open each on Ritual explorer. Telegram DMs on
+            new heartbeats / activity (same Connect Telegram as the rest of Rite).
           </>
         )}
       </p>

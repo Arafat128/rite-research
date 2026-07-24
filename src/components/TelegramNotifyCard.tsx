@@ -346,7 +346,9 @@ export function TelegramNotifyCard({ owner }: { owner: Address }) {
         )}
       </div>
       <p className="mb-3 text-[11px] leading-relaxed text-white/45">
-        One link for the whole app: research unlocks, agent tick seals, and{" "}
+        One link for the whole app: research unlocks, Radar agent ticks,{" "}
+        <b className="text-white/70">official Ritual agents</b> (Persistent /
+        Sovereign activity), and{" "}
         <b className="text-white/70">Oracast Markets Alert</b> price DMs. Tap{" "}
         <b className="text-white/70">Connect Telegram</b> to link your wallet.
       </p>

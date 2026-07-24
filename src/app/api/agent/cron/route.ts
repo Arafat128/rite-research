@@ -6,6 +6,7 @@ import {
   runDueAgentTicks,
 } from "@/lib/agentKeeper";
 import { tickOracastWatches } from "@/lib/oracastWatch";
+import { tickOfficialAgentAlerts } from "@/lib/officialAgentRegistry";
 import { publicErrorMessage } from "@/lib/security";
 
 export const runtime = "nodejs";
@@ -89,13 +90,19 @@ async function handle(req: NextRequest) {
       });
     }
 
-    // Oracast price watches always run (no keeper key required) so Telegram
-    // alerts continue when the browser is closed.
+    // Oracast price watches + official TEE agent activity (no keeper key required)
     let oracast: Awaited<ReturnType<typeof tickOracastWatches>> | null = null;
+    let official: Awaited<ReturnType<typeof tickOfficialAgentAlerts>> | null =
+      null;
     try {
       oracast = await tickOracastWatches({ max: 40 });
     } catch (e) {
       console.error("[api/agent/cron] oracast", e);
+    }
+    try {
+      official = await tickOfficialAgentAlerts({ max: 40 });
+    } catch (e) {
+      console.error("[api/agent/cron] official", e);
     }
 
     // Radar agent ticks need keeper + Surf
@@ -108,8 +115,9 @@ async function handle(req: NextRequest) {
         scanned: 0,
         results: [],
         oracast,
+        official,
         hint:
-          "Oracast watches ticked. Radar auto-wake needs KEEPER_PRIVATE_KEY.",
+          "Oracast + official agents ticked. Radar auto-wake needs KEEPER_PRIVATE_KEY.",
       });
     }
     if (!process.env.SURF_API_KEY) {
@@ -121,6 +129,7 @@ async function handle(req: NextRequest) {
         scanned: 0,
         results: [],
         oracast,
+        official,
         error: "SURF_API_KEY not configured (Radar ticks skipped)",
       });
     }
@@ -139,6 +148,7 @@ async function handle(req: NextRequest) {
       at: new Date().toISOString(),
       ...out,
       oracast,
+      official,
     });
   } catch (e: unknown) {
     console.error("[api/agent/cron]", e);

@@ -16,6 +16,12 @@
     },
     "src/app/api/oracast/tick/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/official/tick/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/official/register/route.ts": {
+      "maxDuration": 30
     }
   },
   "crons": [

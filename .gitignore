@@ -52,3 +52,6 @@ contracts/lib/
 .idea/
 .vscode/
 *.swp
+
+.vercel
+.env*
