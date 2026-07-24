@@ -1,11 +1,11 @@
 /**
- * Credit Oracast Telegram alerts as BountyPool interactions (1 per successful DM).
+ * Credit BountyPool interactions from Oracast prepaid consumption.
  *
- * BountyPool.credit is only callable by feeders (ResearchDesk / Radar / keeper EOA).
- * Uses KEEPER_PRIVATE_KEY with a small RIT value so the poll counter advances.
- * Failures never block Telegram delivery.
+ * Rule: every 0.005 RIT burned from an Oracast watch → 1 poll interaction
+ * (caller invokes this once per full unit). Value attached is a small dust
+ * credit for lottery weight; interactionCount += 1 per successful credit().
  *
- * Admin (once): BountyPool.setFeeder(keeperAddress, true) if NotFeeder reverts.
+ * Uses KEEPER_PRIVATE_KEY. Failures never block Telegram delivery.
  */
 
 import {
@@ -105,7 +105,8 @@ async function setKeeperAsFeeder(
 }
 
 /**
- * One successful Oracast price alert → 1 BountyPool interaction for `user`.
+ * Credit exactly 1 BountyPool interaction for `user`
+ * (called once per full 0.005 RIT of Oracast consumption).
  */
 export async function creditOracastBountyInteraction(
   user: string
@@ -143,7 +144,7 @@ export async function creditOracastBountyInteraction(
       transport: http(RPC_URL, { timeout: 45_000 }),
     });
 
-    // Ensure keeper is a feeder (once). Owner key optional on Vercel.
+    // If owner key is configured, ensure keeper is a feeder (one-time).
     try {
       const allowed = await client.readContract({
         address: BOUNTY_CONTRACT as Address,
@@ -156,21 +157,11 @@ export async function creditOracastBountyInteraction(
           process.env.BOUNTY_OWNER_PRIVATE_KEY?.trim() ||
           process.env.RITE_OWNER_PRIVATE_KEY?.trim();
         if (ownerPk) {
-          const setOk = await setKeeperAsFeeder(ownerPk, account.address);
-          if (!setOk) {
-            return { ok: false, reason: "set_feeder_failed" };
-          }
-        } else {
-          console.warn(
-            `[oracastBounty] keeper ${account.address} is not a BountyPool feeder. ` +
-              `Pool owner must: cast send ${BOUNTY_CONTRACT} "setFeeder(address,bool)" ${account.address} true ` +
-              `— or set BOUNTY_OWNER_PRIVATE_KEY on Vercel.`
-          );
-          return { ok: false, reason: "keeper_not_feeder" };
+          await setKeeperAsFeeder(ownerPk, account.address);
         }
       }
     } catch {
-      /* proceed; credit will revert if not feeder */
+      /* proceed — credit() will fail clearly if not feeder */
     }
 
     const bal = await client.getBalance({ address: account.address });

@@ -301,7 +301,8 @@ export function BountyBanner() {
         ticks enter the pool. Each paid action ={" "}
         <b className="text-white/55">1 interaction</b>
         {" · "}
-        each successful <b className="text-white/55">Oracast Alert</b> DM ={" "}
+        every <b className="text-white/55">0.005 RIT</b> consumed by{" "}
+        <b className="text-white/55">Oracast Alert</b> ={" "}
         <b className="text-white/55">1 interaction</b>. At{" "}
         <b className="text-[#c8ff4a]">{threshold}</b> interactions the pool{" "}
         <b className="text-white/55">auto-draws one random winner</b> (weighted by

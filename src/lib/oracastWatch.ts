@@ -58,6 +58,10 @@ export const ORACAST_MIN_DEPOSIT_WEI = parseEther(
   String(ORACAST_MIN_DEPOSIT_RIT)
 );
 
+/** Full units of this = 1 bounty poll interaction (matches hourly Oracast rate). */
+export const ORACAST_INTERACTION_RIT = ORACAST_RATE_RIT_PER_HOUR;
+export const ORACAST_INTERACTION_WEI = ORACAST_RATE_WEI;
+
 export type OracastWatch = {
   id: string;
   owner: string;
@@ -76,6 +80,10 @@ export type OracastWatch = {
   createdAt: number;
   fundedTxs: string[];
   notifyCount: number;
+  /** Total RIT charged from this watch (wei) — bounty poll uses 0.005 RIT units */
+  consumedWei?: string;
+  /** How many full 0.005 RIT bounty interactions already credited on-chain */
+  bountyCreditsIssued?: number;
   /** Schema version for migrations */
   v?: number;
 };
@@ -830,6 +838,22 @@ export function publicWatch(w: OracastWatch) {
     rateRitPerHour: ORACAST_RATE_RIT_PER_HOUR,
     fundedTxs: w.fundedTxs,
     durable: upstashConfigured() || Boolean(durablePath()),
+    consumedRit: (() => {
+      try {
+        return formatEther(BigInt(w.consumedWei || "0"));
+      } catch {
+        return "0";
+      }
+    })(),
+    bountyCreditsIssued: Number(w.bountyCreditsIssued || 0),
+    /** Full 0.005 RIT units toward next bounty interaction */
+    bountyUnitsEarned: (() => {
+      try {
+        return Number(BigInt(w.consumedWei || "0") / ORACAST_INTERACTION_WEI);
+      } catch {
+        return 0;
+      }
+    })(),
   };
 }
 
@@ -852,6 +876,7 @@ export async function tickOracastWatches(opts?: {
     bountyOk?: boolean;
     bountyReason?: string;
     bountyTx?: string;
+    bountyCreditsThisTick?: number;
   }>;
   backend: string;
 }> {
@@ -873,6 +898,7 @@ export async function tickOracastWatches(opts?: {
     bountyOk?: boolean;
     bountyReason?: string;
     bountyTx?: string;
+    bountyCreditsThisTick?: number;
   }> = [];
   let notified = 0;
   let paused = 0;
@@ -943,31 +969,72 @@ export async function tickOracastWatches(opts?: {
       w.lastNotifyAt = now;
       w.notifyCount = (w.notifyCount || 0) + 1;
       if (bal < cost) w.active = false;
+
+      // Accrue consumption → 1 bounty interaction per 0.005 RIT burned
+      let consumed = BigInt(0);
+      try {
+        consumed = BigInt(w.consumedWei || "0") + cost;
+      } catch {
+        consumed = cost;
+      }
+      w.consumedWei = consumed.toString();
+
+      let bountyCredits = Number(w.bountyCreditsIssued || 0);
+      if (!Number.isFinite(bountyCredits) || bountyCredits < 0) bountyCredits = 0;
+      const earned = Number(consumed / ORACAST_INTERACTION_WEI);
+      const due = Math.max(0, earned - bountyCredits);
+
+      let bountyOk = true;
+      let bountyReason: string | undefined;
+      let bountyTx: string | undefined;
+      let bountyCreditsThisTick = 0;
+
+      if (due > 0) {
+        try {
+          const { creditOracastBountyInteraction } = await import(
+            "@/lib/oracastBounty"
+          );
+          // Cap per tick so one long backlog cannot spam the chain
+          const toCredit = Math.min(due, 5);
+          for (let i = 0; i < toCredit; i++) {
+            const bounty = await creditOracastBountyInteraction(w.owner);
+            if (bounty.ok) {
+              bountyCredits += 1;
+              bountyCreditsThisTick += 1;
+              if (bounty.txHash) bountyTx = bounty.txHash;
+            } else {
+              bountyOk = false;
+              bountyReason = bounty.reason || "credit_failed";
+              // Stop; remaining units stay uncredited and retry next tick
+              break;
+            }
+          }
+          if (due > toCredit && bountyOk) {
+            bountyReason = "partial_cap";
+          }
+        } catch (be) {
+          bountyOk = false;
+          bountyReason =
+            be instanceof Error ? be.message.slice(0, 80) : "bounty_error";
+          console.warn("[oracastWatch] bounty credit error", bountyReason);
+        }
+      }
+      w.bountyCreditsIssued = bountyCredits;
+
       await saveWatch(w);
       notified += 1;
-
-      // Bounty poll: 1 successful Oracast alert = 1 interaction (never blocks DM)
-      let bounty: { ok: boolean; reason?: string; txHash?: string } | undefined;
-      try {
-        const { creditOracastBountyInteraction } = await import(
-          "@/lib/oracastBounty"
-        );
-        bounty = await creditOracastBountyInteraction(w.owner);
-      } catch (be) {
-        console.warn(
-          "[oracastWatch] bounty credit error",
-          be instanceof Error ? be.message : be
-        );
-        bounty = { ok: false, reason: "bounty_error" };
-      }
 
       results.push({
         id: w.id,
         ok: true,
         price: quote.price,
-        bountyOk: bounty?.ok,
-        bountyReason: bounty?.reason,
-        bountyTx: bounty?.txHash,
+        bountyOk: due === 0 ? true : bountyOk,
+        bountyReason:
+          due === 0
+            ? `need_${ORACAST_INTERACTION_RIT}_rit_consumed`
+            : bountyReason,
+        bountyTx,
+        bountyCreditsThisTick,
       });
     } catch (e) {
       results.push({

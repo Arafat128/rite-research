@@ -49,7 +49,7 @@ Do **not** set `PRIVATE_KEY` on Vercel.
 |--|--|
 | Address | `0xbc4bc83298950cbda52837cd806d41ad7c3c36bf` |
 | Share | **50%** of all research + agent fees |
-| Trigger | **Auto-finalize at 20 interactions** (research pay / agent deploy / tick / **Oracast Alert DM**) |
+| Trigger | **Auto-finalize at 20 interactions** (research pay / agent deploy / tick / **every 0.005 RIT Oracast Alert consumption**) |
 | Winner | **One** random weighted winner takes full pool (no manual finalize needed) |
 | Explorer | https://explorer.ritualfoundation.org/address/0xbc4bc83298950cbda52837cd806d41ad7c3c36bf |
 
