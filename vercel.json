@@ -22,10 +22,6 @@
     {
       "path": "/api/agent/cron",
       "schedule": "0 0 * * *"
-    },
-    {
-      "path": "/api/oracast/tick",
-      "schedule": "0 * * * *"
     }
   ]
 }
