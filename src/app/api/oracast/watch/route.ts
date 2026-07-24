@@ -5,9 +5,12 @@ import {
   createWatch,
   depositAddress,
   fundWatch,
+  importWatchBackup,
   listWatchesByOwner,
   publicWatch,
+  storageHint,
   updateWatchPrefs,
+  type OracastWatch,
 } from "@/lib/oracastWatch";
 import { clientIp, rateLimit } from "@/lib/security";
 
@@ -24,6 +27,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       rateRitPerHour: ORACAST_RATE_RIT_PER_HOUR,
       depositTo: depositAddress(),
+      storage: storageHint(),
       watches: watches.map(publicWatch),
     });
   } catch (e) {
@@ -56,6 +60,7 @@ export async function POST(req: NextRequest) {
       depositRit?: string;
       txHash?: string;
       active?: boolean;
+      watches?: OracastWatch[];
     };
 
     const owner = (body.owner || "").toLowerCase();
@@ -110,6 +115,36 @@ export async function POST(req: NextRequest) {
         active: body.active,
       });
       return NextResponse.json({ ok: true, watch: publicWatch(w) });
+    }
+
+    /** Restore watches after serverless cold start (client localStorage backup). */
+    if (body.action === "import") {
+      const list = (body as { watches?: OracastWatch[] }).watches;
+      if (!Array.isArray(list) || list.length === 0) {
+        return NextResponse.json(
+          { error: "watches[] required for import" },
+          { status: 400 }
+        );
+      }
+      const restored = [];
+      for (const raw of list.slice(0, 20)) {
+        try {
+          const w = await importWatchBackup({ owner, watch: raw });
+          restored.push(publicWatch(w));
+        } catch (e) {
+          console.warn(
+            "[oracast/watch import]",
+            raw?.id,
+            e instanceof Error ? e.message : e
+          );
+        }
+      }
+      return NextResponse.json({
+        ok: true,
+        restored: restored.length,
+        watches: restored,
+        storage: storageHint(),
+      });
     }
 
     return NextResponse.json({ error: "unknown action" }, { status: 400 });

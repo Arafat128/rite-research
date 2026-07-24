@@ -10,13 +10,17 @@ export const maxDuration = 120;
 /**
  * Process Oracast price watches → Telegram.
  * - Owner poke (browser): POST { owner } (rate limited)
- * - Cron: Authorization: Bearer CRON_SECRET
+ * - Cron: Authorization: Bearer CRON_SECRET (Vercel cron + GitHub keeper)
  */
-export async function POST(req: NextRequest) {
+async function handle(req: NextRequest) {
   try {
     const auth = req.headers.get("authorization") || "";
     const secret = process.env.CRON_SECRET;
-    const isCron = Boolean(secret && auth === `Bearer ${secret}`);
+    // Vercel Cron also sends x-vercel-cron: 1
+    const isVercelCron = req.headers.get("x-vercel-cron") === "1";
+    const isCron = Boolean(
+      (secret && auth === `Bearer ${secret}`) || isVercelCron
+    );
 
     let onlyOwner: string | undefined;
     let max = 40;
@@ -41,16 +45,21 @@ export async function POST(req: NextRequest) {
         onlyOwner = body.owner.toLowerCase();
         if (body.max != null) max = Math.min(20, Number(body.max) || 12);
       } catch {
-        return NextResponse.json({ error: "JSON body required" }, { status: 400 });
+        return NextResponse.json(
+          { error: "JSON body required" },
+          { status: 400 }
+        );
       }
     } else {
       try {
-        const body = (await req.json().catch(() => ({}))) as {
-          owner?: string;
-          max?: number;
-        };
-        if (body.owner && isAddress(body.owner)) onlyOwner = body.owner;
-        if (body.max != null) max = Math.min(80, Number(body.max) || 40);
+        if (req.method === "POST") {
+          const body = (await req.json().catch(() => ({}))) as {
+            owner?: string;
+            max?: number;
+          };
+          if (body.owner && isAddress(body.owner)) onlyOwner = body.owner;
+          if (body.max != null) max = Math.min(80, Number(body.max) || 40);
+        }
       } catch {
         /* empty */
       }
@@ -72,8 +81,11 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET() {
-  return NextResponse.json({
-    hint: "POST with { owner } or Authorization: Bearer CRON_SECRET",
-  });
+export async function POST(req: NextRequest) {
+  return handle(req);
+}
+
+export async function GET(req: NextRequest) {
+  // Vercel Cron may GET the path
+  return handle(req);
 }

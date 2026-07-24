@@ -105,6 +105,8 @@ jobs:
               print("parse err", e)
               raise SystemExit(0)
           print("ticked=", d.get("ticked"), "scanned=", d.get("scanned"))
+          oc=d.get("oracast") or {}
+          print("oracast notified=", oc.get("notified"), "scanned=", oc.get("scanned"), "backend=", oc.get("backend"))
           for r in d.get("results") or []:
               if r.get("ok"):
                   print("OK agent", r.get("agentId"), str(r.get("txHash") or "")[:18], r.get("telegram"))
@@ -112,6 +114,11 @@ jobs:
                   print("ERR", r.get("agentId"), str(r.get("error"))[:140])
               else:
                   print("skip", r.get("agentId"), r.get("skipped"))
+          for r in oc.get("results") or []:
+              if r.get("ok"):
+                  print("OK oracast", r.get("id"), r.get("price"))
+              elif r.get("error"):
+                  print("ERR oracast", r.get("id"), str(r.get("error"))[:120])
           PY
             fi
             return 0

@@ -13,12 +13,19 @@
     },
     "src/app/api/agent/auto-wake/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/oracast/tick/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
     {
       "path": "/api/agent/cron",
       "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/oracast/tick",
+      "schedule": "0 * * * *"
     }
   ]
 }

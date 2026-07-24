@@ -35,11 +35,42 @@ type PublicWatch = {
   frequencyMin: number;
   depositRit: string;
   hoursRemaining: number;
+  alertsRemaining?: number;
+  costPerAlertRit?: string;
   active: boolean;
   lastPrice?: number;
   lastSource?: string;
   notifyCount: number;
+  fundedTxs?: string[];
+  createdAt?: number;
+  lastNotifyAt?: number;
 };
+
+const LS_WATCH_PREFIX = "rite_oracast_watches_v2:";
+
+function loadLocalWatches(owner: string): PublicWatch[] {
+  try {
+    const raw = localStorage.getItem(
+      `${LS_WATCH_PREFIX}${owner.toLowerCase()}`
+    );
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as PublicWatch[];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalWatches(owner: string, watches: PublicWatch[]) {
+  try {
+    localStorage.setItem(
+      `${LS_WATCH_PREFIX}${owner.toLowerCase()}`,
+      JSON.stringify(watches.slice(0, 40))
+    );
+  } catch {
+    /* quota */
+  }
+}
 
 const FREQ_LABELS: Record<number, string> = {
   5: "Every 5 min",
@@ -103,9 +134,60 @@ export function OracastMarketTab() {
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "load failed");
-      setWatches(data.watches || []);
+      let list = (data.watches || []) as PublicWatch[];
+
+      // Server empty after cold start → restore from this browser + re-verify txs
+      if (list.length === 0) {
+        const local = loadLocalWatches(address);
+        if (local.length > 0) {
+          const imp = await fetch("/api/oracast/watch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "import",
+              owner: address,
+              watches: local.map((w) => ({
+                id: w.id,
+                owner: address,
+                symbol: w.symbol,
+                name: w.name,
+                coinId: w.coinId,
+                contractAddress: w.contractAddress,
+                frequencyMin: w.frequencyMin,
+                depositRit: w.depositRit,
+                depositWei: undefined,
+                fundedTxs: w.fundedTxs || [],
+                active: w.active,
+                lastNotifyAt: w.lastNotifyAt || 0,
+                lastPrice: w.lastPrice,
+                lastSource: w.lastSource,
+                notifyCount: w.notifyCount || 0,
+                createdAt: w.createdAt || Date.now(),
+              })),
+            }),
+          });
+          const impData = await imp.json();
+          if (imp.ok && Array.isArray(impData.watches) && impData.watches.length) {
+            list = impData.watches;
+            setMsg(
+              `Restored ${impData.restored} watch(es) after server restart`
+            );
+          }
+        }
+      }
+
+      setWatches(list);
+      saveLocalWatches(address, list);
       if (data.depositTo) setDepositTo(data.depositTo);
       if (data.rateRitPerHour != null) setRate(Number(data.rateRitPerHour));
+      if (
+        data.storage &&
+        String(data.storage).includes("ephemeral")
+      ) {
+        setErr(
+          "Server storage is ephemeral — set Upstash Redis on Vercel so alerts keep working with the tab closed."
+        );
+      }
     } catch (e) {
       console.warn(e);
     } finally {
@@ -239,12 +321,22 @@ export function OracastMarketTab() {
       if (!res.ok) throw new Error(data.error || "create failed");
 
       setMsg(
-        `Watching ${data.watch.symbol} · ~${data.watch.hoursRemaining}h · TG every ${frequencyMin}m`
+        `Watching ${data.watch.symbol} · ~${data.watch.alertsRemaining ?? "?"} alerts · every ${frequencyMin}m`
       );
       toast.success(
         `Watching ${data.watch.symbol}`,
-        `${data.watch.hoursRemaining}h prepaid · Telegram`
+        `${data.watch.alertsRemaining ?? "?"} alerts left · Telegram`
       );
+      // Backup immediately so funds survive serverless restarts
+      try {
+        const prev = loadLocalWatches(address);
+        saveLocalWatches(address, [
+          data.watch,
+          ...prev.filter((p) => p.id !== data.watch.id),
+        ]);
+      } catch {
+        /* ignore */
+      }
       await refresh();
     } catch (e: unknown) {
       if (isUserRejection(String((e as Error)?.message || e))) {
@@ -392,9 +484,9 @@ export function OracastMarketTab() {
           Oracast Markets
         </h2>
         <p className="mt-1 text-sm text-white/50">
-          Token price alerts via Telegram ·{" "}
-          <b className="text-white/70">{rate} RIT / hour</b> prepaid · Ritual
-          deposit. Powered by{" "}
+          Token price alerts via Telegram · charged{" "}
+          <b className="text-white/70">only when a DM is sent</b> (
+          {rate} RIT/hour × frequency). Ritual deposit. Powered by{" "}
           <a
             href="https://github.com/RitualChain/oracast-markets"
             target="_blank"
@@ -595,11 +687,20 @@ export function OracastMarketTab() {
               </div>
               <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-white/50 sm:grid-cols-4">
                 <div>
-                  Left · <b className="text-white/80">{w.hoursRemaining}h</b>
+                  Alerts left ·{" "}
+                  <b className="text-white/80">
+                    {w.alertsRemaining ?? "—"}
+                  </b>
                 </div>
                 <div>
                   Balance ·{" "}
                   <b className="text-white/80">{w.depositRit} RIT</b>
+                </div>
+                <div>
+                  Per alert ·{" "}
+                  <b className="text-white/80">
+                    {w.costPerAlertRit ?? "—"} RIT
+                  </b>
                 </div>
                 <div className="col-span-2 sm:col-span-2">
                   <label className="mr-2">Freq</label>

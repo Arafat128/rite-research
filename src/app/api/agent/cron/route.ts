@@ -5,6 +5,7 @@ import {
   keeperConfigured,
   runDueAgentTicks,
 } from "@/lib/agentKeeper";
+import { tickOracastWatches } from "@/lib/oracastWatch";
 import { publicErrorMessage } from "@/lib/security";
 
 export const runtime = "nodejs";
@@ -75,21 +76,40 @@ async function handle(req: NextRequest) {
       });
     }
 
+    // Oracast price watches always run (no keeper key required) so Telegram
+    // alerts continue when the browser is closed.
+    let oracast: Awaited<ReturnType<typeof tickOracastWatches>> | null = null;
+    try {
+      oracast = await tickOracastWatches({ max: 40 });
+    } catch (e) {
+      console.error("[api/agent/cron] oracast", e);
+    }
+
+    // Radar agent ticks need keeper + Surf
     if (!keeperConfigured()) {
-      return NextResponse.json(
-        {
-          error:
-            "Keeper not configured. Set KEEPER_PRIVATE_KEY (gas wallet) on Vercel Production.",
-          autoWake: false,
-        },
-        { status: 503 }
-      );
+      return NextResponse.json({
+        ok: true,
+        autoWake: false,
+        at: new Date().toISOString(),
+        ticked: 0,
+        scanned: 0,
+        results: [],
+        oracast,
+        hint:
+          "Oracast watches ticked. Radar auto-wake needs KEEPER_PRIVATE_KEY.",
+      });
     }
     if (!process.env.SURF_API_KEY) {
-      return NextResponse.json(
-        { error: "SURF_API_KEY not configured" },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        ok: true,
+        autoWake: false,
+        at: new Date().toISOString(),
+        ticked: 0,
+        scanned: 0,
+        results: [],
+        oracast,
+        error: "SURF_API_KEY not configured (Radar ticks skipped)",
+      });
     }
 
     const only = req.nextUrl.searchParams.get("agentId") || undefined;
@@ -105,6 +125,7 @@ async function handle(req: NextRequest) {
       autoWake: true,
       at: new Date().toISOString(),
       ...out,
+      oracast,
     });
   } catch (e: unknown) {
     console.error("[api/agent/cron]", e);
