@@ -17,16 +17,14 @@ name: Agent keeper (unattended)
 
 on:
   schedule:
-    # Multiple entries improve odds under Actions schedule load.
-    - cron: "0 * * * *"
-    - cron: "15 * * * *"
-    - cron: "30 * * * *"
-    - cron: "45 * * * *"
+    # 10-minute cadence: free GH schedule is approximate; denser crons reduce
+    # gaps when a prior loop ends and the next start is delayed.
+    - cron: "0,10,20,30,40,50 * * * *"
   workflow_dispatch:
 
 concurrency:
   # One keeper at a time. Cancel stale loop when a fresh schedule fires so
-  # jobs don't queue for hours (each loop is ~50m).
+  # jobs don't queue for hours.
   group: agent-keeper
   cancel-in-progress: true
 
@@ -34,8 +32,8 @@ jobs:
   wake:
     name: Poke /api/agent/cron (1m loop)
     runs-on: ubuntu-latest
-    # ~50 pokes × ~1m + curl margin
-    timeout-minutes: 55
+    # ~12 pokes × ~1m — fits under 10m schedule handoff with margin
+    timeout-minutes: 14
     steps:
       - name: Check secrets
         env:
@@ -158,16 +156,16 @@ jobs:
 
           # First poke immediately; fail the job only if the first call is bad
           # (misconfigured secrets / protection). Later pokes may fail transiently.
-          if ! poke "1/50"; then
+          if ! poke "1/12"; then
             echo "::error::First keeper poke failed — check APP_URL, CRON_SECRET, Vercel Deployment Protection"
             exit 1
           fi
 
-          # 49 more pokes ~1 minute apart → ~50 minutes of closed-tab coverage.
-          # Overlaps with the next :00/:15/:30/:45 schedule keep gaps small.
-          for i in $(seq 2 50); do
+          # 11 more pokes ~1 minute apart → ~12 minutes. Next schedule at +10m
+          # should take over; shorter loops avoid 55m timeout leaving long dead zones.
+          for i in $(seq 2 12); do
             sleep 60
-            poke "${i}/50" || echo "::warning::poke ${i} failed (will retry next minute)"
+            poke "${i}/12" || echo "::warning::poke ${i} failed (will retry next minute)"
           done
 
           echo "Keeper loop finished"

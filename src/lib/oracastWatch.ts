@@ -287,13 +287,33 @@ async function loadAllBlobFromUpstash(): Promise<void> {
 
 async function saveAllBlobToUpstash(): Promise<void> {
   if (!upstashConfigured()) return;
-  const watches: Record<string, OracastWatch> = {};
+  // Merge remote blob so concurrent serverless saves cannot drop other watches
+  let remoteWatches: Record<string, OracastWatch> = {};
+  let remoteTx: string[] = [];
+  try {
+    const raw = await upstashCmd(["GET", ALL_BLOB_KEY]);
+    if (raw != null && raw !== "") {
+      const prev =
+        typeof raw === "string"
+          ? (JSON.parse(raw) as AllBlob)
+          : (raw as AllBlob);
+      if (prev?.watches) remoteWatches = { ...prev.watches };
+      if (Array.isArray(prev?.usedTx)) remoteTx = prev.usedTx.map(String);
+    }
+  } catch {
+    /* use mem only */
+  }
+  const watches: Record<string, OracastWatch> = { ...remoteWatches };
   mem().forEach((w, id) => {
     watches[id] = w;
   });
+  const used = new Set<string>([
+    ...remoteTx.map((t) => t.toLowerCase()),
+    ...Array.from(memTx()).map((t) => t.toLowerCase()),
+  ]);
   const blob: AllBlob = {
     watches,
-    usedTx: Array.from(memTx()).slice(-500),
+    usedTx: Array.from(used).slice(-500),
     updatedAt: Date.now(),
   };
   await upstashCmd(["SET", ALL_BLOB_KEY, JSON.stringify(blob)]);
@@ -817,6 +837,24 @@ export function publicWatch(w: OracastWatch) {
   const hrs = hoursRemaining(w.depositWei);
   const alerts = alertsRemaining(w.depositWei, w.frequencyMin);
   const bal = BigInt(w.depositWei || "0");
+  const last = Number(w.lastNotifyAt || 0);
+  const dueMs = Math.max(1, Number(w.frequencyMin) || 60) * 60_000;
+  const nextNotifyAt =
+    last > 0 ? last + dueMs : w.active && bal >= cost ? Date.now() : 0;
+  const now = Date.now();
+  let nextLabel = "—";
+  if (!w.active || bal < cost) {
+    nextLabel = bal < cost ? "fund to resume" : "paused";
+  } else if (last <= 0) {
+    nextLabel = "due now";
+  } else if (now >= nextNotifyAt) {
+    nextLabel = "due now";
+  } else {
+    const sec = Math.ceil((nextNotifyAt - now) / 1000);
+    if (sec < 60) nextLabel = `in ${sec}s`;
+    else if (sec < 3600) nextLabel = `in ${Math.ceil(sec / 60)}m`;
+    else nextLabel = `in ${Math.ceil(sec / 3600)}h`;
+  }
   return {
     id: w.id,
     owner: w.owner,
@@ -831,6 +869,8 @@ export function publicWatch(w: OracastWatch) {
     costPerAlertRit: formatEther(cost),
     active: w.active && bal >= cost,
     lastNotifyAt: w.lastNotifyAt,
+    nextNotifyAt,
+    nextLabel,
     lastPrice: w.lastPrice,
     lastSource: w.lastSource,
     notifyCount: w.notifyCount,
@@ -962,7 +1002,8 @@ export async function tickOracastWatches(opts?: {
 
       await sendTelegramMessage(pref.chatId, html);
 
-      // Charge only after successful send
+      // Charge + persist IMMEDIATELY after successful send so frequency /
+      // balance survive even if bounty chain work times out later.
       bal = BigInt(w.depositWei || "0") - cost;
       if (bal < BigInt(0)) bal = BigInt(0);
       w.depositWei = bal.toString();
@@ -970,7 +1011,6 @@ export async function tickOracastWatches(opts?: {
       w.notifyCount = (w.notifyCount || 0) + 1;
       if (bal < cost) w.active = false;
 
-      // Accrue consumption → 1 bounty interaction per 0.005 RIT burned
       let consumed = BigInt(0);
       try {
         consumed = BigInt(w.consumedWei || "0") + cost;
@@ -979,38 +1019,54 @@ export async function tickOracastWatches(opts?: {
       }
       w.consumedWei = consumed.toString();
 
+      // Critical path: durable lastNotifyAt before any on-chain bounty
+      await saveWatch(w);
+      notified += 1;
+
       let bountyCredits = Number(w.bountyCreditsIssued || 0);
       if (!Number.isFinite(bountyCredits) || bountyCredits < 0) bountyCredits = 0;
       const earned = Number(consumed / ORACAST_INTERACTION_WEI);
-      const due = Math.max(0, earned - bountyCredits);
+      const dueCredits = Math.max(0, earned - bountyCredits);
 
       let bountyOk = true;
       let bountyReason: string | undefined;
       let bountyTx: string | undefined;
       let bountyCreditsThisTick = 0;
 
-      if (due > 0) {
+      if (dueCredits > 0) {
         try {
           const { creditOracastBountyInteraction } = await import(
             "@/lib/oracastBounty"
           );
-          // Cap per tick so one long backlog cannot spam the chain
-          const toCredit = Math.min(due, 5);
+          // Cap 1 per tick — chain credit must never delay next price DMs
+          const toCredit = Math.min(dueCredits, 1);
           for (let i = 0; i < toCredit; i++) {
-            const bounty = await creditOracastBountyInteraction(w.owner);
+            const bounty = await Promise.race([
+              creditOracastBountyInteraction(w.owner),
+              new Promise<{ ok: false; reason: string }>((resolve) =>
+                setTimeout(
+                  () => resolve({ ok: false, reason: "bounty_timeout" }),
+                  12_000
+                )
+              ),
+            ]);
             if (bounty.ok) {
               bountyCredits += 1;
               bountyCreditsThisTick += 1;
-              if (bounty.txHash) bountyTx = bounty.txHash;
+              if ("txHash" in bounty && bounty.txHash) bountyTx = bounty.txHash;
             } else {
               bountyOk = false;
-              bountyReason = bounty.reason || "credit_failed";
-              // Stop; remaining units stay uncredited and retry next tick
+              bountyReason =
+                ("reason" in bounty && bounty.reason) || "credit_failed";
               break;
             }
           }
-          if (due > toCredit && bountyOk) {
-            bountyReason = "partial_cap";
+          if (dueCredits > toCredit && bountyOk) {
+            bountyReason = "deferred_remaining";
+          }
+          if (bountyCreditsThisTick > 0) {
+            w.bountyCreditsIssued = bountyCredits;
+            await saveWatch(w);
           }
         } catch (be) {
           bountyOk = false;
@@ -1019,18 +1075,14 @@ export async function tickOracastWatches(opts?: {
           console.warn("[oracastWatch] bounty credit error", bountyReason);
         }
       }
-      w.bountyCreditsIssued = bountyCredits;
-
-      await saveWatch(w);
-      notified += 1;
 
       results.push({
         id: w.id,
         ok: true,
         price: quote.price,
-        bountyOk: due === 0 ? true : bountyOk,
+        bountyOk: dueCredits === 0 ? true : bountyOk,
         bountyReason:
-          due === 0
+          dueCredits === 0
             ? `need_${ORACAST_INTERACTION_RIT}_rit_consumed`
             : bountyReason,
         bountyTx,

@@ -43,6 +43,8 @@ type PublicWatch = {
   fundedTxs?: string[];
   createdAt?: number;
   lastNotifyAt?: number;
+  nextNotifyAt?: number;
+  nextLabel?: string;
 };
 
 const LS_WATCH_PREFIX = "rite_oracast_watches_v2:";
@@ -220,29 +222,11 @@ export function OracastMarketTab() {
       .catch(() => undefined);
   }, []);
 
-  // In-app poke so notifications fire while Markets tab is open
+  // Refresh list while Oracast tab is open (global AppShell already ticks)
   useEffect(() => {
     if (!address || !isConnected) return;
-    let cancelled = false;
-    const poke = async () => {
-      try {
-        await fetch("/api/oracast/tick", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ owner: address, max: 12 }),
-          cache: "no-store",
-        });
-        if (!cancelled) void refresh();
-      } catch {
-        /* ignore */
-      }
-    };
-    void poke();
-    const t = setInterval(() => void poke(), 60_000);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
+    const t = setInterval(() => void refresh(), 60_000);
+    return () => clearInterval(t);
   }, [address, isConnected, refresh]);
 
   async function loadPreview() {
@@ -718,7 +702,19 @@ export function OracastMarketTab() {
                       ? `$${w.lastPrice} · ${w.lastSource || "—"}`
                       : "Awaiting first tick"}{" "}
                     · {w.notifyCount} alerts
+                    {w.nextLabel ? ` · next ${w.nextLabel}` : ""}
                   </div>
+                  {w.lastNotifyAt ? (
+                    <div className="text-[10px] text-white/30">
+                      Last DM{" "}
+                      {new Date(w.lastNotifyAt).toLocaleString(undefined, {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        month: "short",
+                        day: "numeric",
+                      })}
+                    </div>
+                  ) : null}
                 </div>
                 <span
                   className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${

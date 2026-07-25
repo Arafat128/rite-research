@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import {
   useAccount,
@@ -80,6 +80,34 @@ export function AppShell() {
   const { data: bal } = useBalance({ address });
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
+
+  /**
+   * Keep Oracast 15m (etc.) price DMs alive on ANY open Rite tab — not only
+   * when Oracast Alert is focused. Closed-tab still needs Agent keeper / cron.
+   */
+  useEffect(() => {
+    if (!address || !isConnected) return;
+    let cancelled = false;
+    const poke = async () => {
+      try {
+        await fetch("/api/oracast/tick", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ owner: address, max: 12 }),
+          cache: "no-store",
+        });
+      } catch {
+        /* non-blocking */
+      }
+      if (cancelled) return;
+    };
+    void poke();
+    const t = setInterval(() => void poke(), 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [address, isConnected]);
 
   async function onConnect() {
     const injected = connectors.find((c) => c.id === "injected") || connectors[0];
