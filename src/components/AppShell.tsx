@@ -82,30 +82,32 @@ export function AppShell() {
   const wrongChain = isConnected && chainId !== ritualChain.id;
 
   /**
-   * Keep Oracast 15m (etc.) price DMs alive on ANY open Rite tab — not only
-   * when Oracast Alert is focused. Closed-tab still needs Agent keeper / cron.
+   * Oracast price DMs: poke while any Rite tab is open + wallet connected.
+   * Also poke when the tab becomes visible again (browsers throttle timers
+   * in background tabs — that was skipping 15m windows).
+   * Closed tab → Agent keeper / external cron.
    */
   useEffect(() => {
     if (!address || !isConnected) return;
-    let cancelled = false;
-    const poke = async () => {
-      try {
-        await fetch("/api/oracast/tick", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ owner: address, max: 12 }),
-          cache: "no-store",
-        });
-      } catch {
-        /* non-blocking */
-      }
-      if (cancelled) return;
+    const poke = () => {
+      void fetch("/api/oracast/tick", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner: address, max: 12 }),
+        cache: "no-store",
+      }).catch(() => undefined);
     };
-    void poke();
-    const t = setInterval(() => void poke(), 60_000);
+    poke();
+    const t = setInterval(poke, 30_000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") poke();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
     return () => {
-      cancelled = true;
       clearInterval(t);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
     };
   }, [address, isConnected]);
 

@@ -1,39 +1,29 @@
-# Unattended agent auto-wake (closed-tab ticks)
+# Closed-tab pokes: Radar auto-wake + Oracast price DMs + official agents.
 #
-# GitHub free/public schedule often drops `*/1` to ~hourly. We compensate with
-# a long runner that pokes /api/agent/cron every 60s for ~50 minutes so LIVE
-# agents still wake without the browser open.
+# Simple design: one short job every ~5 minutes (no long sleep loops).
+# Long loops left dead zones when GitHub delayed/cancelled the next run —
+# that skipped Oracast 15m Telegram windows after the first DM.
 #
-# Secrets (repo → Settings → Secrets → Actions):
-#   APP_URL      https://your-app.vercel.app  (no trailing slash)
-#   CRON_SECRET  same as Vercel CRON_SECRET
-# Optional:
-#   VERCEL_AUTOMATION_BYPASS_SECRET
-#
-# Optional extra reliability: QStash / cron-job.org → same URL+Bearer
-# (see scripts/setup-qstash-cron.mjs).
+# Secrets: APP_URL (https://rite-woad.vercel.app), CRON_SECRET
+# Optional: VERCEL_AUTOMATION_BYPASS_SECRET
+# Best reliability: Upstash QStash 1m (scripts/setup-qstash-cron.mjs)
 
 name: Agent keeper (unattended)
 
 on:
   schedule:
-    # 10-minute cadence: free GH schedule is approximate; denser crons reduce
-    # gaps when a prior loop ends and the next start is delayed.
-    - cron: "0,10,20,30,40,50 * * * *"
+    - cron: "0,5,10,15,20,25,30,35,40,45,50,55 * * * *"
   workflow_dispatch:
 
 concurrency:
-  # One keeper at a time. Cancel stale loop when a fresh schedule fires so
-  # jobs don't queue for hours.
   group: agent-keeper
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  wake:
-    name: Poke /api/agent/cron (1m loop)
+  poke:
+    name: Single poke
     runs-on: ubuntu-latest
-    # ~12 pokes × ~1m — fits under 10m schedule handoff with margin
-    timeout-minutes: 14
+    timeout-minutes: 5
     steps:
       - name: Check secrets
         env:
@@ -41,16 +31,16 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           if [ -z "$APP_URL" ]; then
-            echo "::error::Missing secret APP_URL"
+            echo "::error::Missing secret APP_URL (use https://rite-woad.vercel.app)"
             exit 1
           fi
           if [ -z "$CRON_SECRET" ]; then
             echo "::error::Missing secret CRON_SECRET"
             exit 1
           fi
-          echo "APP_URL configured"
+          echo "APP_URL=${APP_URL}"
 
-      - name: Keeper loop (every 60s × 50)
+      - name: Poke cron + oracast + official
         env:
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -58,114 +48,74 @@ jobs:
         run: |
           set -u
           BASE="${APP_URL%/}"
-          Q=""
+          BP=""
           if [ -n "${BYPASS:-}" ]; then
-            Q="&x-vercel-protection-bypass=${BYPASS}"
+            BP="x-vercel-protection-bypass=${BYPASS}"
           fi
 
-          poke() {
-            local label="$1"
-            echo ""
-            echo "=== ${label} $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-
-            code=$(curl -sS -o /tmp/health.json -w "%{http_code}" \
-              --max-time 45 \
-              -H "Authorization: Bearer ${CRON_SECRET}" \
-              -H "User-Agent: rite-agent-keeper/1.2" \
-              "${BASE}/api/agent/cron?health=1${Q}" || echo "000")
-            echo "health HTTP $code"
-            if [ "$code" != "200" ]; then
-              cat /tmp/health.json 2>/dev/null || true
-              echo
-              return 1
+          curl_auth() {
+            # usage: curl_auth METHOD OUTFILE URL_PATH [extra curl args...]
+            # URL_PATH like /api/oracast/tick  (leading slash)
+            local method="$1" out="$2" path="$3"
+            shift 3
+            local url="${BASE}${path}"
+            if [ -n "$BP" ]; then
+              case "$url" in
+                *\?*) url="${url}&${BP}" ;;
+                *)    url="${url}?${BP}" ;;
+              esac
             fi
-
-            code=$(curl -sS -o /tmp/cron.json -w "%{http_code}" \
+            curl -sS -o "$out" -w "%{http_code}" \
               --max-time 90 \
-              -X POST \
+              -X "$method" \
               -H "Authorization: Bearer ${CRON_SECRET}" \
-              -H "User-Agent: rite-agent-keeper/1.3" \
               -H "Content-Type: application/json" \
-              "${BASE}/api/agent/cron?max=40${Q}" || echo "000")
-            echo "cron HTTP $code"
-            cat /tmp/cron.json; echo
-
-            # Explicit Oracast poke (Telegram price alerts with tab closed)
-            OTICK="${BASE}/api/oracast/tick"
-            if [ -n "${BYPASS:-}" ]; then
-              OTICK="${OTICK}?x-vercel-protection-bypass=${BYPASS}"
-            fi
-            ocode=$(curl -sS -o /tmp/oracast.json -w "%{http_code}" \
-              --max-time 90 \
-              -X POST \
-              -H "Authorization: Bearer ${CRON_SECRET}" \
-              -H "User-Agent: rite-agent-keeper/1.3" \
-              -H "Content-Type: application/json" \
-              -d '{}' \
-              "${OTICK}" || echo "000")
-            echo "oracast tick HTTP $ocode"
-            cat /tmp/oracast.json 2>/dev/null; echo
-
-            # Official TEE agent activity → Telegram
-            OTICK_OFF="${BASE}/api/official/tick"
-            if [ -n "${BYPASS:-}" ]; then
-              OTICK_OFF="${OTICK_OFF}?x-vercel-protection-bypass=${BYPASS}"
-            fi
-            ofcode=$(curl -sS -o /tmp/official.json -w "%{http_code}" \
-              --max-time 90 \
-              -X POST \
-              -H "Authorization: Bearer ${CRON_SECRET}" \
-              -H "User-Agent: rite-agent-keeper/1.4" \
-              -H "Content-Type: application/json" \
-              -d '{}' \
-              "${OTICK_OFF}" || echo "000")
-            echo "official tick HTTP $ofcode"
-            cat /tmp/official.json 2>/dev/null; echo
-
-            if [ "$code" != "200" ]; then
-              return 1
-            fi
-
-            if command -v python3 >/dev/null 2>&1; then
-              python3 - <<'PY'
-          import json
-          try:
-              d=json.load(open("/tmp/cron.json"))
-          except Exception as e:
-              print("parse err", e)
-              raise SystemExit(0)
-          print("ticked=", d.get("ticked"), "scanned=", d.get("scanned"))
-          oc=d.get("oracast") or {}
-          print("oracast notified=", oc.get("notified"), "scanned=", oc.get("scanned"), "backend=", oc.get("backend"))
-          for r in d.get("results") or []:
-              if r.get("ok"):
-                  print("OK agent", r.get("agentId"), str(r.get("txHash") or "")[:18], r.get("telegram"))
-              elif r.get("error"):
-                  print("ERR", r.get("agentId"), str(r.get("error"))[:140])
-              else:
-                  print("skip", r.get("agentId"), r.get("skipped"))
-          for r in oc.get("results") or []:
-              if r.get("ok"):
-                  print("OK oracast", r.get("id"), r.get("price"))
-              elif r.get("error"):
-                  print("ERR oracast", r.get("id"), str(r.get("error"))[:120])
-          PY
-            fi
-            return 0
+              -H "User-Agent: rite-agent-keeper/2.0" \
+              "$@" \
+              "$url" || echo "000"
           }
 
-          # First poke immediately; fail the job only if the first call is bad
-          # (misconfigured secrets / protection). Later pokes may fail transiently.
-          if ! poke "1/12"; then
-            echo "::error::First keeper poke failed — check APP_URL, CRON_SECRET, Vercel Deployment Protection"
-            exit 1
+          fail=0
+          echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) BASE=$BASE ==="
+
+          code=$(curl_auth GET /tmp/health.json "/api/agent/cron?health=1")
+          echo "health HTTP $code"
+          cat /tmp/health.json 2>/dev/null; echo
+          [ "$code" = "200" ] || fail=1
+
+          code=$(curl_auth POST /tmp/cron.json "/api/agent/cron?max=40" -d '{}')
+          echo "cron HTTP $code"
+          cat /tmp/cron.json 2>/dev/null; echo
+          [ "$code" = "200" ] || fail=1
+
+          ocode=$(curl_auth POST /tmp/oracast.json "/api/oracast/tick" -d '{}')
+          echo "oracast HTTP $ocode"
+          cat /tmp/oracast.json 2>/dev/null; echo
+          [ "$ocode" = "200" ] || fail=1
+
+          ofcode=$(curl_auth POST /tmp/official.json "/api/official/tick" -d '{}')
+          echo "official HTTP $ofcode"
+          cat /tmp/official.json 2>/dev/null; echo
+
+          if command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PY'
+          import json
+          try:
+              d=json.load(open("/tmp/oracast.json"))
+              print("oracast notified=", d.get("notified"), "scanned=", d.get("scanned"), "results=", d.get("results"))
+          except Exception as e:
+              print("oracast parse", e)
+          try:
+              d=json.load(open("/tmp/cron.json"))
+              oc=d.get("oracast") or {}
+              print("cron.oracast notified=", oc.get("notified"), "scanned=", oc.get("scanned"))
+          except Exception as e:
+              print("cron parse", e)
+          PY
           fi
 
-          # 11 more pokes ~1 minute apart → ~12 minutes. Next schedule at +10m
-          # should take over; shorter loops avoid 55m timeout leaving long dead zones.
-          for i in $(seq 2 12); do
-            sleep 60
-            poke "${i}/12" || echo "::warning::poke ${i} failed (will retry next minute)"
-          done
-
-          echo "Keeper loop finished"
+          if [ "$fail" != "0" ]; then
+            echo "::error::Keeper poke failed — set APP_URL=https://rite-woad.vercel.app and matching CRON_SECRET"
+            exit 1
+          fi
+          echo "OK"
