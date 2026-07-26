@@ -9,6 +9,7 @@ import {
   importWatchBackup,
   listWatchesByOwner,
   oracastRefundConfigured,
+  oracastRefundPublicStatus,
   publicWatch,
   storageHint,
   updateWatchPrefs,
@@ -27,11 +28,21 @@ export async function GET(req: NextRequest) {
   }
   try {
     const watches = await listWatchesByOwner(owner);
+    const refund = oracastRefundPublicStatus();
     return NextResponse.json({
       rateRitPerHour: ORACAST_RATE_RIT_PER_HOUR,
       depositTo: depositAddress(),
       storage: storageHint(),
-      refundsReady: oracastRefundConfigured(),
+      refundsReady:
+        refund.configured && refund.matchesFeeRecipient !== false,
+      refund: {
+        configured: refund.configured,
+        matchesFeeRecipient: refund.matchesFeeRecipient ?? null,
+        // never expose full key or full wallet if not needed — last 4 of fee only
+        feeRecipient: refund.feeRecipient
+          ? `${refund.feeRecipient.slice(0, 6)}…${refund.feeRecipient.slice(-4)}`
+          : "",
+      },
       watches: watches.map(publicWatch),
     });
   } catch (e) {
@@ -66,6 +77,24 @@ export async function POST(req: NextRequest) {
       active?: boolean;
       watches?: OracastWatch[];
     };
+
+    // Stricter limit on money-moving cancel/withdraw
+    if (
+      body.action === "withdraw" ||
+      body.action === "cancel" ||
+      body.action === "delete"
+    ) {
+      const rlW = rateLimit(`oracast-withdraw:${ip}`, 6, 60_000);
+      if (!rlW.ok) {
+        return NextResponse.json(
+          { error: "Too many withdraw attempts — try again shortly" },
+          {
+            status: 429,
+            headers: { "Retry-After": String(rlW.retryAfterSec) },
+          }
+        );
+      }
+    }
 
     const owner = (body.owner || "").toLowerCase();
     if (!owner || !isAddress(owner)) {

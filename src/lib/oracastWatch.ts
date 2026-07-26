@@ -30,6 +30,7 @@ import {
   parseEther,
   type Hex,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import {
   FEE_RECIPIENT,
   RPC_URL,
@@ -875,8 +876,10 @@ function normalizeRefundPk(raw: string): `0x${string}` {
 }
 
 /**
- * Private key that holds prepaid Oracast deposits (usually fee recipient).
- * Env: ORACAST_REFUND_PRIVATE_KEY or FEE_RECIPIENT_PRIVATE_KEY
+ * Private key that holds prepaid Oracast deposits (must be fee recipient).
+ * Env (server-only, never NEXT_PUBLIC_):
+ *   ORACAST_REFUND_PRIVATE_KEY  preferred
+ *   FEE_RECIPIENT_PRIVATE_KEY   alias
  */
 export function oracastRefundConfigured(): boolean {
   return Boolean(
@@ -885,10 +888,37 @@ export function oracastRefundConfigured(): boolean {
   );
 }
 
+/** Public diagnostics — no secrets / no full addresses required. */
+export function oracastRefundPublicStatus(): {
+  configured: boolean;
+  feeRecipient: string;
+  matchesFeeRecipient?: boolean;
+} {
+  const fee = (FEE_RECIPIENT || "").toLowerCase();
+  const base = {
+    configured: oracastRefundConfigured(),
+    feeRecipient: fee,
+  };
+  if (!base.configured) return base;
+  try {
+    const pk =
+      process.env.ORACAST_REFUND_PRIVATE_KEY?.trim() ||
+      process.env.FEE_RECIPIENT_PRIVATE_KEY?.trim() ||
+      "";
+    const acc = privateKeyToAccount(normalizeRefundPk(pk));
+    return {
+      ...base,
+      matchesFeeRecipient: acc.address.toLowerCase() === fee,
+    };
+  } catch {
+    return { ...base, matchesFeeRecipient: false };
+  }
+}
+
 /**
  * Cancel live alert and refund remaining prepaid RIT to the owner.
- * Deposits were native transfers to fee recipient — refund is sent from
- * ORACAST_REFUND_PRIVATE_KEY / FEE_RECIPIENT_PRIVATE_KEY.
+ * Deposits were native transfers to fee recipient — refunds MUST be signed
+ * by the same fee-recipient key (ORACAST_REFUND_PRIVATE_KEY).
  */
 export async function cancelAndWithdrawWatch(opts: {
   watchId: string;
@@ -901,10 +931,17 @@ export async function cancelAndWithdrawWatch(opts: {
   skippedRefund?: string;
 }> {
   const owner = opts.owner.toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(owner)) {
+    throw new Error("Invalid owner");
+  }
   const w = await getWatch(opts.watchId);
   if (!w) throw new Error("Watch not found");
   if (w.owner.toLowerCase() !== owner) {
     throw new Error("Not your watch");
+  }
+  // Guard watch id shape (prevent odd store keys)
+  if (!/^ow_[a-z0-9]+_[a-z0-9]+$/i.test(opts.watchId)) {
+    throw new Error("Invalid watch id");
   }
 
   let bal = BigInt(0);
@@ -936,18 +973,20 @@ export async function cancelAndWithdrawWatch(opts: {
   if (!pkRaw) {
     // Leave paused with balance so admin can configure key + user retries
     throw new Error(
-      "Refunds not configured. Set ORACAST_REFUND_PRIVATE_KEY (or FEE_RECIPIENT_PRIVATE_KEY) on Vercel to the wallet that received Oracast deposits, then retry Cancel & withdraw. Alert is paused."
+      "Refunds not configured. Set ORACAST_REFUND_PRIVATE_KEY on Vercel to the fee-recipient wallet private key, then Redeploy and retry Cancel & withdraw. Alert is paused."
     );
   }
 
-  const { privateKeyToAccount } = await import("viem/accounts");
-  const {
-    createPublicClient,
-    createWalletClient,
-    formatEther,
-    http,
-  } = await import("viem");
+  const { createWalletClient } = await import("viem");
   const account = privateKeyToAccount(normalizeRefundPk(pkRaw));
+  const fee = feeRecipient().toLowerCase();
+  // Hard security: never send from a key that is not the deposit treasury
+  if (account.address.toLowerCase() !== fee) {
+    throw new Error(
+      `Refund key address ${account.address.slice(0, 10)}… does not match fee recipient ${fee.slice(0, 10)}… — refusing to send. Fix ORACAST_REFUND_PRIVATE_KEY.`
+    );
+  }
+
   const client = createPublicClient({
     chain: ritualChain,
     transport: http(RPC_URL, { timeout: 25_000, retryCount: 2 }),
@@ -968,10 +1007,11 @@ export async function cancelAndWithdrawWatch(opts: {
 
   const gasCost = gasLimit * maxFeePerGas;
   const walletBal = await client.getBalance({ address: account.address });
-  if (walletBal < bal + gasCost) {
+  // Keep a small gas reserve on treasury so the key remains usable
+  const gasReserve = parseEther("0.02");
+  if (walletBal < bal + gasCost + gasReserve) {
     throw new Error(
-      `Refund wallet ${account.address.slice(0, 10)}… has insufficient RIT ` +
-        `(need ~${formatEther(bal + gasCost)} for refund + gas). Fund it or top up treasury.`
+      `Treasury refund wallet low on RIT (have ${formatEther(walletBal)}, need ~${formatEther(bal + gasCost + gasReserve)} incl. 0.02 gas reserve). Top up fee recipient.`
     );
   }
 
