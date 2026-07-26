@@ -985,6 +985,10 @@ export async function tickOracastWatches(opts?: {
         results.push({ id: w.id, ok: false, skipped: "telegram_not_linked" });
         continue;
       }
+      if (pref.enabled === false) {
+        results.push({ id: w.id, ok: false, skipped: "telegram_disabled" });
+        continue;
+      }
 
       const ch =
         quote.change24h != null

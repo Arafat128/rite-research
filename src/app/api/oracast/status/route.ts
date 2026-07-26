@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOracastRuntimeStatus } from "@/lib/oracastWatch";
+import {
+  getOracastRuntimeStatus,
+  listAllActiveWatches,
+  publicWatch,
+} from "@/lib/oracastWatch";
 import { telegramConfigured } from "@/lib/telegram";
 
 export const runtime = "nodejs";
@@ -7,6 +11,7 @@ export const dynamic = "force-dynamic";
 
 /**
  * Public diagnostics (no secrets) so we can see why closed-tab alerts fail.
+ * Bearer CRON_SECRET adds active-watch summary (no private keys).
  */
 export async function GET(req: NextRequest) {
   try {
@@ -14,6 +19,16 @@ export async function GET(req: NextRequest) {
     const auth = req.headers.get("authorization") || "";
     const secret = process.env.CRON_SECRET;
     const detailed = Boolean(secret && auth === `Bearer ${secret}`);
+
+    let watches: ReturnType<typeof publicWatch>[] | undefined;
+    if (detailed) {
+      try {
+        const rows = await listAllActiveWatches();
+        watches = rows.slice(0, 20).map(publicWatch);
+      } catch {
+        watches = [];
+      }
+    }
 
     return NextResponse.json({
       ok: true,
@@ -32,7 +47,7 @@ export async function GET(req: NextRequest) {
         githubAction: "Agent keeper (unattended) — needs APP_URL + CRON_SECRET secrets",
       },
       ...(detailed
-        ? { detailed: true }
+        ? { detailed: true, watches }
         : { note: "Add Authorization: Bearer CRON_SECRET for detailed mode" }),
     });
   } catch (e) {

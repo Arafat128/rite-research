@@ -524,8 +524,10 @@ export function OracastMarketTab() {
             </span>
           )}
           <span className="mt-1 block text-[11px] opacity-80">
-            With the site closed, GitHub Action <b>Agent keeper</b> must run
-            (repo Secrets: APP_URL + CRON_SECRET matching Vercel).
+            Exact frequency (e.g. 15m) while <b>Rite is open</b> with wallet
+            connected. Tab closed: Agent keeper still pokes (free GitHub
+            schedule is often ~hourly, not every minute). Keep Telegram linked
+            above.
           </span>
         </div>
       )}
