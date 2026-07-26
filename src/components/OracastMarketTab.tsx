@@ -584,10 +584,9 @@ export function OracastMarketTab() {
             </span>
           )}
           <span className="mt-1 block text-[11px] opacity-80">
-            Exact frequency (e.g. 15m) while <b>Rite is open</b> with wallet
-            connected. Tab closed: Agent keeper still pokes (free GitHub
-            schedule is often ~hourly, not every minute). Keep Telegram linked
-            above.
+            Frequency is honored while <b>any Rite tab is open</b> (wallet
+            connected). Fully closed: Agent keeper runs a ~1m loop for ~50m after
+            each schedule fire. Keep Telegram linked above.
           </span>
         </div>
       )}

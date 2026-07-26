@@ -1,29 +1,35 @@
-# Closed-tab pokes: Radar auto-wake + Oracast price DMs + official agents.
+# Closed-tab coverage for Radar auto-wake + Oracast DMs + official agents.
 #
-# Simple design: one short job every ~5 minutes (no long sleep loops).
-# Long loops left dead zones when GitHub delayed/cancelled the next run —
-# that skipped Oracast 15m Telegram windows after the first DM.
+# Free GitHub "*/5" schedules often collapse to ~hourly. A single short poke
+# then leaves long dead zones (missed 5m Oracast + agent ticks).
+#
+# Design: on each schedule fire, run a ~50-minute loop that pokes every 60s.
+# Overlapping schedules cancel the prior loop and start a fresh one so coverage
+# stays continuous when Actions does fire.
 #
 # Secrets: APP_URL (https://rite-woad.vercel.app), CRON_SECRET
 # Optional: VERCEL_AUTOMATION_BYPASS_SECRET
-# Best reliability: Upstash QStash 1m (scripts/setup-qstash-cron.mjs)
+# Best: Upstash QStash 1m (scripts/setup-qstash-cron.mjs)
 
 name: Agent keeper (unattended)
 
 on:
   schedule:
-    - cron: "0,5,10,15,20,25,30,35,40,45,50,55 * * * *"
+    - cron: "0 * * * *"
+    - cron: "15 * * * *"
+    - cron: "30 * * * *"
+    - cron: "45 * * * *"
   workflow_dispatch:
 
 concurrency:
   group: agent-keeper
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  poke:
-    name: Single poke
+  wake:
+    name: Keeper loop (1m × 50)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 55
     steps:
       - name: Check secrets
         env:
@@ -38,9 +44,9 @@ jobs:
             echo "::error::Missing secret CRON_SECRET"
             exit 1
           fi
-          echo "APP_URL=${APP_URL}"
+          echo "APP_URL configured"
 
-      - name: Poke cron + oracast + official
+      - name: Poke loop
         env:
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -48,21 +54,15 @@ jobs:
         run: |
           set -u
           BASE="${APP_URL%/}"
-          BP=""
-          if [ -n "${BYPASS:-}" ]; then
-            BP="x-vercel-protection-bypass=${BYPASS}"
-          fi
 
           curl_auth() {
-            # usage: curl_auth METHOD OUTFILE URL_PATH [extra curl args...]
-            # URL_PATH like /api/oracast/tick  (leading slash)
             local method="$1" out="$2" path="$3"
             shift 3
             local url="${BASE}${path}"
-            if [ -n "$BP" ]; then
+            if [ -n "${BYPASS:-}" ]; then
               case "$url" in
-                *\?*) url="${url}&${BP}" ;;
-                *)    url="${url}?${BP}" ;;
+                *\?*) url="${url}&x-vercel-protection-bypass=${BYPASS}" ;;
+                *)    url="${url}?x-vercel-protection-bypass=${BYPASS}" ;;
               esac
             fi
             curl -sS -o "$out" -w "%{http_code}" \
@@ -70,52 +70,72 @@ jobs:
               -X "$method" \
               -H "Authorization: Bearer ${CRON_SECRET}" \
               -H "Content-Type: application/json" \
-              -H "User-Agent: rite-agent-keeper/2.0" \
+              -H "User-Agent: rite-agent-keeper/2.1" \
               "$@" \
               "$url" || echo "000"
           }
 
-          fail=0
-          echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) BASE=$BASE ==="
+          poke() {
+            local label="$1"
+            echo ""
+            echo "=== ${label} $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
-          code=$(curl_auth GET /tmp/health.json "/api/agent/cron?health=1")
-          echo "health HTTP $code"
-          cat /tmp/health.json 2>/dev/null; echo
-          [ "$code" = "200" ] || fail=1
+            code=$(curl_auth GET /tmp/health.json "/api/agent/cron?health=1")
+            echo "health HTTP $code"
+            if [ "$code" != "200" ]; then
+              cat /tmp/health.json 2>/dev/null || true
+              echo
+              return 1
+            fi
 
-          code=$(curl_auth POST /tmp/cron.json "/api/agent/cron?max=40" -d '{}')
-          echo "cron HTTP $code"
-          cat /tmp/cron.json 2>/dev/null; echo
-          [ "$code" = "200" ] || fail=1
+            code=$(curl_auth POST /tmp/cron.json "/api/agent/cron?max=40" -d '{}')
+            echo "cron HTTP $code"
+            cat /tmp/cron.json 2>/dev/null; echo
 
-          ocode=$(curl_auth POST /tmp/oracast.json "/api/oracast/tick" -d '{}')
-          echo "oracast HTTP $ocode"
-          cat /tmp/oracast.json 2>/dev/null; echo
-          [ "$ocode" = "200" ] || fail=1
+            ocode=$(curl_auth POST /tmp/oracast.json "/api/oracast/tick" -d '{}')
+            echo "oracast HTTP $ocode"
+            cat /tmp/oracast.json 2>/dev/null; echo
 
-          ofcode=$(curl_auth POST /tmp/official.json "/api/official/tick" -d '{}')
-          echo "official HTTP $ofcode"
-          cat /tmp/official.json 2>/dev/null; echo
+            ofcode=$(curl_auth POST /tmp/official.json "/api/official/tick" -d '{}')
+            echo "official HTTP $ofcode"
+            cat /tmp/official.json 2>/dev/null; echo
 
-          if command -v python3 >/dev/null 2>&1; then
-            python3 - <<'PY'
+            if command -v python3 >/dev/null 2>&1; then
+              python3 - <<'PY'
           import json
           try:
-              d=json.load(open("/tmp/oracast.json"))
-              print("oracast notified=", d.get("notified"), "scanned=", d.get("scanned"), "results=", d.get("results"))
-          except Exception as e:
-              print("oracast parse", e)
-          try:
               d=json.load(open("/tmp/cron.json"))
+              print("ticked=", d.get("ticked"), "scanned=", d.get("scanned"))
               oc=d.get("oracast") or {}
               print("cron.oracast notified=", oc.get("notified"), "scanned=", oc.get("scanned"))
+              for r in d.get("results") or []:
+                  if r.get("ok"):
+                      print("OK agent", r.get("agentId"), str(r.get("txHash") or "")[:18], r.get("telegram"))
+                  elif r.get("error"):
+                      print("ERR agent", r.get("agentId"), str(r.get("error"))[:120])
           except Exception as e:
               print("cron parse", e)
+          try:
+              d=json.load(open("/tmp/oracast.json"))
+              print("oracast notified=", d.get("notified"), "results=", d.get("results"))
+          except Exception as e:
+              print("oracast parse", e)
           PY
-          fi
+            fi
 
-          if [ "$fail" != "0" ]; then
-            echo "::error::Keeper poke failed — set APP_URL=https://rite-woad.vercel.app and matching CRON_SECRET"
+            [ "$code" = "200" ] || return 1
+            [ "$ocode" = "200" ] || return 1
+            return 0
+          }
+
+          if ! poke "1/50"; then
+            echo "::error::First keeper poke failed — check APP_URL, CRON_SECRET, Deployment Protection"
             exit 1
           fi
-          echo "OK"
+
+          for i in $(seq 2 50); do
+            sleep 60
+            poke "${i}/50" || echo "::warning::poke ${i} failed (retry next minute)"
+          done
+
+          echo "Keeper loop finished"

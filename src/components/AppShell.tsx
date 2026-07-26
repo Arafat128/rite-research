@@ -82,23 +82,35 @@ export function AppShell() {
   const wrongChain = isConnected && chainId !== ritualChain.id;
 
   /**
-   * Oracast price DMs: poke while any Rite tab is open + wallet connected.
-   * Also poke when the tab becomes visible again (browsers throttle timers
-   * in background tabs — that was skipping 15m windows).
-   * Closed tab → Agent keeper / external cron.
+   * Keepalive while ANY Rite tab is open (wallet connected):
+   * - Oracast 5m/15m price DMs
+   * - Radar data-agent auto-wake (was only on My Agents — switching tabs
+   *   stopped the 3rd+ tick)
+   * Visibility/focus re-poke (background tabs throttle timers).
+   * Fully closed tab → Agent keeper GH Action long loop.
    */
   useEffect(() => {
     if (!address || !isConnected) return;
+    const headers = { "Content-Type": "application/json" };
+    const bodyOracast = JSON.stringify({ owner: address, max: 12 });
+    const bodyWake = JSON.stringify({ owner: address, max: 20 });
     const poke = () => {
       void fetch("/api/oracast/tick", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ owner: address, max: 12 }),
+        headers,
+        body: bodyOracast,
+        cache: "no-store",
+      }).catch(() => undefined);
+      void fetch("/api/agent/auto-wake", {
+        method: "POST",
+        headers,
+        body: bodyWake,
         cache: "no-store",
       }).catch(() => undefined);
     };
     poke();
-    const t = setInterval(poke, 30_000);
+    // 25s: under auto-wake rate limit (8/min) even if My Agents also pokes
+    const t = setInterval(poke, 25_000);
     const onVis = () => {
       if (document.visibilityState === "visible") poke();
     };
