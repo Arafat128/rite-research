@@ -95,6 +95,7 @@ export function OracastMarketTab() {
 
   const [depositTo, setDepositTo] = useState("");
   const [rate, setRate] = useState(ORACAST_RATE_RIT_PER_HOUR);
+  const [refundsReady, setRefundsReady] = useState(false);
   const [watches, setWatches] = useState<PublicWatch[]>([]);
   const [mode, setMode] = useState<"pick" | "contract">("pick");
   const [coinId, setCoinId] = useState("bitcoin");
@@ -187,6 +188,9 @@ export function OracastMarketTab() {
       saveLocalWatches(address, list);
       if (data.depositTo) setDepositTo(data.depositTo);
       if (data.rateRitPerHour != null) setRate(Number(data.rateRitPerHour));
+      if (typeof data.refundsReady === "boolean") {
+        setRefundsReady(data.refundsReady);
+      }
       if (
         data.storage &&
         String(data.storage).includes("ephemeral")
@@ -439,6 +443,62 @@ export function OracastMarketTab() {
       await refresh();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "top up failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Stop alerts and refund remaining prepaid RIT to this wallet. */
+  async function cancelAndWithdraw(w: PublicWatch) {
+    if (!address) return;
+    const left = w.depositRit || "0";
+    const ok = window.confirm(
+      `Cancel ${w.symbol} alert and withdraw remaining ~${left} RIT to your wallet?\n\nThis stops Telegram DMs for this watch permanently.`
+    );
+    if (!ok) return;
+    setBusy(true);
+    setErr("");
+    setMsg("Cancelling alert and refunding remaining RIT…");
+    try {
+      const res = await fetch("/api/oracast/watch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "withdraw",
+          owner: address,
+          watchId: w.id,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "withdraw failed");
+
+      // Drop from local backup immediately
+      try {
+        const next = loadLocalWatches(address).filter((x) => x.id !== w.id);
+        saveLocalWatches(address, next);
+      } catch {
+        /* ignore */
+      }
+
+      const refunded = data.refundedRit || "0";
+      if (data.txHash) {
+        toast.success(
+          "Withdrawn",
+          `${refunded} RIT returned · ${String(data.txHash).slice(0, 12)}…`
+        );
+        setMsg(
+          `Cancelled ${w.symbol}. Refunded ${refunded} RIT.\nTx ${data.txHash}`
+        );
+      } else {
+        toast.success("Alert removed", `Refund ${refunded} RIT (${data.skippedRefund || "ok"})`);
+        setMsg(`Cancelled ${w.symbol}. Remaining prepaid: ${refunded} RIT.`);
+      }
+      await refresh();
+    } catch (e) {
+      const m = e instanceof Error ? e.message : "withdraw failed";
+      setErr(m);
+      toast.error("Cancel / withdraw failed", m);
+      await refresh();
     } finally {
       setBusy(false);
     }
@@ -779,7 +839,22 @@ export function OracastMarketTab() {
                 >
                   Top up {depositRit} RIT
                 </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void cancelAndWithdraw(w)}
+                  className="rounded-lg border border-rose-400/35 bg-rose-500/10 px-3 py-1.5 text-[11px] font-semibold text-rose-100 hover:bg-rose-500/20"
+                >
+                  Cancel &amp; withdraw {w.depositRit} RIT
+                </button>
               </div>
+              {!refundsReady && Number(w.depositRit) > 0 && (
+                <p className="mt-2 text-[10px] text-amber-100/80">
+                  Withdraw needs server env{" "}
+                  <code className="text-amber-50/90">ORACAST_REFUND_PRIVATE_KEY</code>{" "}
+                  (fee-recipient wallet). Alert can still be paused above.
+                </p>
+              )}
             </div>
           ))
         )}

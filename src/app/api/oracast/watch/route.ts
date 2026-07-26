@@ -3,10 +3,12 @@ import { isAddress, type Hex } from "viem";
 import {
   ORACAST_RATE_RIT_PER_HOUR,
   createWatch,
+  deleteOracastWatch,
   depositAddress,
   fundWatch,
   importWatchBackup,
   listWatchesByOwner,
+  oracastRefundConfigured,
   publicWatch,
   storageHint,
   updateWatchPrefs,
@@ -16,6 +18,7 @@ import { clientIp, rateLimit } from "@/lib/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
   const owner = (req.nextUrl.searchParams.get("owner") || "").toLowerCase();
@@ -28,6 +31,7 @@ export async function GET(req: NextRequest) {
       rateRitPerHour: ORACAST_RATE_RIT_PER_HOUR,
       depositTo: depositAddress(),
       storage: storageHint(),
+      refundsReady: oracastRefundConfigured(),
       watches: watches.map(publicWatch),
     });
   } catch (e) {
@@ -115,6 +119,30 @@ export async function POST(req: NextRequest) {
         active: body.active,
       });
       return NextResponse.json({ ok: true, watch: publicWatch(w) });
+    }
+
+    /** Cancel live alert + refund remaining prepaid RIT to the owner wallet. */
+    if (
+      body.action === "withdraw" ||
+      body.action === "cancel" ||
+      body.action === "delete"
+    ) {
+      if (!body.watchId) {
+        return NextResponse.json(
+          { error: "watchId required" },
+          { status: 400 }
+        );
+      }
+      const out = await deleteOracastWatch({
+        watchId: body.watchId,
+        owner,
+        withdraw: true,
+      });
+      return NextResponse.json({
+        ok: true,
+        ...out,
+        refundsReady: oracastRefundConfigured(),
+      });
     }
 
     /** Restore watches after serverless cold start (client localStorage backup). */

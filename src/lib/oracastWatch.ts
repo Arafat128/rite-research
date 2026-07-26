@@ -285,7 +285,10 @@ async function loadAllBlobFromUpstash(): Promise<void> {
   }
 }
 
-async function saveAllBlobToUpstash(): Promise<void> {
+async function saveAllBlobToUpstash(opts?: {
+  /** Ids to drop even if still present on remote (cancel / withdraw). */
+  removeIds?: string[];
+}): Promise<void> {
   if (!upstashConfigured()) return;
   // Merge remote blob so concurrent serverless saves cannot drop other watches
   let remoteWatches: Record<string, OracastWatch> = {};
@@ -307,6 +310,9 @@ async function saveAllBlobToUpstash(): Promise<void> {
   mem().forEach((w, id) => {
     watches[id] = w;
   });
+  for (const id of opts?.removeIds || []) {
+    delete watches[id];
+  }
   const used = new Set<string>([
     ...remoteTx.map((t) => t.toLowerCase()),
     ...Array.from(memTx()).map((t) => t.toLowerCase()),
@@ -830,6 +836,247 @@ export async function updateWatchPrefs(opts: {
   }
   await saveWatch(w);
   return w;
+}
+
+/** Fully remove a watch from memory + Upstash (stops alerts). */
+export async function deleteWatchRecord(
+  watchId: string,
+  owner: string
+): Promise<void> {
+  loadDurableFile();
+  await loadAllBlobFromUpstash();
+  const w = mem().get(watchId) || (await getWatch(watchId));
+  if (!w) return;
+  if (w.owner.toLowerCase() !== owner.toLowerCase()) {
+    throw new Error("Not your watch");
+  }
+  mem().delete(watchId);
+  saveDurableFile();
+  if (upstashConfigured()) {
+    try {
+      await upstashCmd(["DEL", `${KEY_PREFIX}${watchId}`]);
+      await upstashCmd(["SREM", INDEX_KEY, watchId]);
+      await upstashCmd([
+        "SREM",
+        `${INDEX_KEY}:${owner.toLowerCase()}`,
+        watchId,
+      ]);
+      await saveAllBlobToUpstash({ removeIds: [watchId] });
+    } catch (e) {
+      console.error("[oracastWatch] delete remote failed", e);
+      throw new Error("Could not delete watch from storage");
+    }
+  }
+}
+
+function normalizeRefundPk(raw: string): `0x${string}` {
+  const t = raw.trim();
+  return (t.startsWith("0x") ? t : `0x${t}`) as `0x${string}`;
+}
+
+/**
+ * Private key that holds prepaid Oracast deposits (usually fee recipient).
+ * Env: ORACAST_REFUND_PRIVATE_KEY or FEE_RECIPIENT_PRIVATE_KEY
+ */
+export function oracastRefundConfigured(): boolean {
+  return Boolean(
+    process.env.ORACAST_REFUND_PRIVATE_KEY?.trim() ||
+      process.env.FEE_RECIPIENT_PRIVATE_KEY?.trim()
+  );
+}
+
+/**
+ * Cancel live alert and refund remaining prepaid RIT to the owner.
+ * Deposits were native transfers to fee recipient — refund is sent from
+ * ORACAST_REFUND_PRIVATE_KEY / FEE_RECIPIENT_PRIVATE_KEY.
+ */
+export async function cancelAndWithdrawWatch(opts: {
+  watchId: string;
+  owner: string;
+}): Promise<{
+  deleted: boolean;
+  refundedRit: string;
+  refundedWei: string;
+  txHash?: string;
+  skippedRefund?: string;
+}> {
+  const owner = opts.owner.toLowerCase();
+  const w = await getWatch(opts.watchId);
+  if (!w) throw new Error("Watch not found");
+  if (w.owner.toLowerCase() !== owner) {
+    throw new Error("Not your watch");
+  }
+
+  let bal = BigInt(0);
+  try {
+    bal = BigInt(w.depositWei || "0");
+  } catch {
+    bal = BigInt(0);
+  }
+
+  // Stop ticks immediately so balance cannot be spent during refund
+  w.active = false;
+  await saveWatch(w);
+
+  // Dust below ~1e12 wei (~0.000001 RIT) — just delete, no chain send
+  const dust = BigInt(1_000_000_000_000);
+  if (bal <= dust) {
+    await deleteWatchRecord(opts.watchId, owner);
+    return {
+      deleted: true,
+      refundedRit: "0",
+      refundedWei: "0",
+      skippedRefund: bal > BigInt(0) ? "dust" : "empty",
+    };
+  }
+
+  const pkRaw =
+    process.env.ORACAST_REFUND_PRIVATE_KEY?.trim() ||
+    process.env.FEE_RECIPIENT_PRIVATE_KEY?.trim();
+  if (!pkRaw) {
+    // Leave paused with balance so admin can configure key + user retries
+    throw new Error(
+      "Refunds not configured. Set ORACAST_REFUND_PRIVATE_KEY (or FEE_RECIPIENT_PRIVATE_KEY) on Vercel to the wallet that received Oracast deposits, then retry Cancel & withdraw. Alert is paused."
+    );
+  }
+
+  const { privateKeyToAccount } = await import("viem/accounts");
+  const {
+    createPublicClient,
+    createWalletClient,
+    formatEther,
+    http,
+  } = await import("viem");
+  const account = privateKeyToAccount(normalizeRefundPk(pkRaw));
+  const client = createPublicClient({
+    chain: ritualChain,
+    transport: http(RPC_URL, { timeout: 25_000, retryCount: 2 }),
+  });
+  const wallet = createWalletClient({
+    account,
+    chain: ritualChain,
+    transport: http(RPC_URL, { timeout: 60_000 }),
+  });
+
+  const gasLimit = BigInt(35_000);
+  const block = await client.getBlock({ blockTag: "latest" });
+  const base = block.baseFeePerGas ?? BigInt(1);
+  const maxPriorityFeePerGas = BigInt(1_000_000);
+  let maxFeePerGas = base * BigInt(3) + maxPriorityFeePerGas;
+  if (maxFeePerGas < BigInt(10_000_000)) maxFeePerGas = BigInt(10_000_000);
+  if (maxFeePerGas > BigInt(5_000_000_000)) maxFeePerGas = BigInt(5_000_000_000);
+
+  const gasCost = gasLimit * maxFeePerGas;
+  const walletBal = await client.getBalance({ address: account.address });
+  if (walletBal < bal + gasCost) {
+    throw new Error(
+      `Refund wallet ${account.address.slice(0, 10)}… has insufficient RIT ` +
+        `(need ~${formatEther(bal + gasCost)} for refund + gas). Fund it or top up treasury.`
+    );
+  }
+
+  // Zero ledger before send so a double-click cannot double-pay
+  const refundWei = bal;
+  w.depositWei = "0";
+  await saveWatch(w);
+
+  let txHash: `0x${string}`;
+  try {
+    const nonce = await client.getTransactionCount({
+      address: account.address,
+      blockTag: "pending",
+    });
+    txHash = await wallet.sendTransaction({
+      account,
+      chain: ritualChain,
+      to: owner as `0x${string}`,
+      value: refundWei,
+      gas: gasLimit,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      nonce,
+      type: "eip1559",
+    });
+    const receipt = await client.waitForTransactionReceipt({
+      hash: txHash,
+      timeout: 120_000,
+    });
+    if (receipt.status !== "success") {
+      // Restore balance so user can retry
+      w.depositWei = refundWei.toString();
+      w.active = false;
+      await saveWatch(w);
+      throw new Error("Refund transaction reverted on-chain");
+    }
+  } catch (e) {
+    // Restore prepaid balance if we zeroed but send failed
+    try {
+      const cur = await getWatch(opts.watchId);
+      if (cur && BigInt(cur.depositWei || "0") === BigInt(0)) {
+        cur.depositWei = refundWei.toString();
+        cur.active = false;
+        await saveWatch(cur);
+      }
+    } catch {
+      /* best effort */
+    }
+    throw e instanceof Error
+      ? e
+      : new Error("Refund send failed");
+  }
+
+  await deleteWatchRecord(opts.watchId, owner);
+
+  return {
+    deleted: true,
+    refundedRit: formatEther(refundWei),
+    refundedWei: refundWei.toString(),
+    txHash,
+  };
+}
+
+/**
+ * Delete alert only. Remaining prepaid balance is refunded when possible;
+ * if refund key missing and balance remains, rejects (use cancelAndWithdraw).
+ */
+export async function deleteOracastWatch(opts: {
+  watchId: string;
+  owner: string;
+  /** When true (default), refund remaining then delete. */
+  withdraw?: boolean;
+}): Promise<{
+  deleted: boolean;
+  refundedRit: string;
+  refundedWei: string;
+  txHash?: string;
+  skippedRefund?: string;
+}> {
+  if (opts.withdraw === false) {
+    const w = await getWatch(opts.watchId);
+    if (!w) throw new Error("Watch not found");
+    if (w.owner.toLowerCase() !== opts.owner.toLowerCase()) {
+      throw new Error("Not your watch");
+    }
+    let bal = BigInt(0);
+    try {
+      bal = BigInt(w.depositWei || "0");
+    } catch {
+      bal = BigInt(0);
+    }
+    if (bal > BigInt(1_000_000_000_000)) {
+      throw new Error(
+        "This watch still has prepaid RIT. Use Cancel & withdraw to refund and remove it."
+      );
+    }
+    await deleteWatchRecord(opts.watchId, opts.owner);
+    return {
+      deleted: true,
+      refundedRit: "0",
+      refundedWei: "0",
+      skippedRefund: "empty",
+    };
+  }
+  return cancelAndWithdrawWatch(opts);
 }
 
 export function publicWatch(w: OracastWatch) {
