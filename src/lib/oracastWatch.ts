@@ -94,11 +94,16 @@ const INDEX_KEY = "rite:oracast:watch_index";
 const TX_KEY_PREFIX = "rite:oracast:tx:";
 /** Single blob — more reliable than SADD indexes across cold starts */
 const ALL_BLOB_KEY = "rite:oracast:all_v2";
+/** Forever tombstones so deleted watches cannot be re-imported or tick-saved back */
+const DELETED_IDS_KEY = "rite:oracast:deleted_ids";
+const DELETED_TX_KEY = "rite:oracast:deleted_txs";
 const WATCH_VERSION = 2;
 
 type G = typeof globalThis & {
   __riteOracastWatches?: Map<string, OracastWatch>;
   __riteOracastTx?: Set<string>;
+  __riteOracastDeletedIds?: Set<string>;
+  __riteOracastDeletedTxs?: Set<string>;
   __riteOracastFileLoaded?: boolean;
 };
 
@@ -112,6 +117,73 @@ function memTx(): Set<string> {
   const g = globalThis as G;
   if (!g.__riteOracastTx) g.__riteOracastTx = new Set();
   return g.__riteOracastTx;
+}
+
+function memDeletedIds(): Set<string> {
+  const g = globalThis as G;
+  if (!g.__riteOracastDeletedIds) g.__riteOracastDeletedIds = new Set();
+  return g.__riteOracastDeletedIds;
+}
+
+function memDeletedTxs(): Set<string> {
+  const g = globalThis as G;
+  if (!g.__riteOracastDeletedTxs) g.__riteOracastDeletedTxs = new Set();
+  return g.__riteOracastDeletedTxs;
+}
+
+/** True if this watch id or any of its deposit txs was cancelled/withdrawn. */
+export async function isOracastDeleted(
+  watchId: string,
+  fundedTxs?: string[]
+): Promise<boolean> {
+  const id = (watchId || "").toLowerCase();
+  if (id && memDeletedIds().has(id)) return true;
+  for (const t of fundedTxs || []) {
+    if (memDeletedTxs().has(t.toLowerCase())) return true;
+  }
+  if (!upstashConfigured()) return false;
+  try {
+    if (id) {
+      const hit = await upstashCmd(["SISMEMBER", DELETED_IDS_KEY, id]);
+      if (hit === 1 || hit === true || hit === "1") {
+        memDeletedIds().add(id);
+        return true;
+      }
+    }
+    for (const raw of fundedTxs || []) {
+      const t = raw.toLowerCase();
+      const hit = await upstashCmd(["SISMEMBER", DELETED_TX_KEY, t]);
+      if (hit === 1 || hit === true || hit === "1") {
+        memDeletedTxs().add(t);
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn("[oracastWatch] isOracastDeleted", e);
+  }
+  return false;
+}
+
+async function markOracastDeleted(
+  watchId: string,
+  fundedTxs: string[] = []
+): Promise<void> {
+  const id = watchId.toLowerCase();
+  memDeletedIds().add(id);
+  for (const t of fundedTxs) memDeletedTxs().add(t.toLowerCase());
+  if (!upstashConfigured()) return;
+  try {
+    await upstashCmd(["SADD", DELETED_IDS_KEY, id]);
+    for (const t of fundedTxs) {
+      const tx = t.toLowerCase();
+      if (/^0x[a-f0-9]{64}$/.test(tx)) {
+        await upstashCmd(["SADD", DELETED_TX_KEY, tx]);
+      }
+    }
+  } catch (e) {
+    console.error("[oracastWatch] markOracastDeleted failed", e);
+    throw new Error("Could not tombstone deleted watch");
+  }
 }
 
 function upstashConfigured(): boolean {
@@ -358,8 +430,19 @@ export async function getWatch(id: string): Promise<OracastWatch | null> {
 }
 
 export async function saveWatch(w: OracastWatch): Promise<void> {
+  // Never resurrect a cancelled/withdrawn watch (tick race after delete)
+  if (await isOracastDeleted(w.id, w.fundedTxs)) {
+    mem().delete(w.id);
+    console.warn("[oracastWatch] save blocked — watch tombstoned", w.id);
+    return;
+  }
   loadDurableFile();
   await loadAllBlobFromUpstash();
+  // Re-check after load (remote tombstone)
+  if (await isOracastDeleted(w.id, w.fundedTxs)) {
+    mem().delete(w.id);
+    return;
+  }
   const next = migrateWatch({ ...w, v: WATCH_VERSION });
   mem().set(next.id, next);
   saveDurableFile();
@@ -421,7 +504,15 @@ export async function listWatchesByOwner(
     if (w.owner.toLowerCase() === o) byId.set(w.id, migrateWatch(w));
   }
 
-  return Array.from(byId.values()).sort((a, b) => b.createdAt - a.createdAt);
+  const out: OracastWatch[] = [];
+  for (const w of Array.from(byId.values())) {
+    if (await isOracastDeleted(w.id, w.fundedTxs)) {
+      mem().delete(w.id);
+      continue;
+    }
+    out.push(w);
+  }
+  return out.sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function listAllActiveWatches(): Promise<OracastWatch[]> {
@@ -454,7 +545,15 @@ export async function listAllActiveWatches(): Promise<OracastWatch[]> {
     }
   }
 
-  return Array.from(byId.values());
+  const out: OracastWatch[] = [];
+  for (const w of Array.from(byId.values())) {
+    if (await isOracastDeleted(w.id, w.fundedTxs)) {
+      mem().delete(w.id);
+      continue;
+    }
+    out.push(w);
+  }
+  return out;
 }
 
 /** Diagnostics for UI / health (no secrets). */
@@ -701,8 +800,19 @@ export async function importWatchBackup(opts: {
     throw new Error("Watch owner mismatch");
   }
 
+  // Cancel & withdraw must stay dead — never restore from localStorage/backup
+  if (await isOracastDeleted(opts.watch.id, opts.watch.fundedTxs || [])) {
+    throw new Error(
+      "Watch was cancelled/withdrawn and cannot be restored"
+    );
+  }
+
   const existing = await getWatch(opts.watch.id);
   if (existing && existing.owner.toLowerCase() === owner) {
+    if (await isOracastDeleted(existing.id, existing.fundedTxs)) {
+      await deleteWatchRecord(existing.id, owner);
+      throw new Error("Watch was cancelled/withdrawn and cannot be restored");
+    }
     return existing;
   }
 
@@ -710,7 +820,14 @@ export async function importWatchBackup(opts: {
   const mine = await listWatchesByOwner(owner);
   for (const m of mine) {
     for (const tx of opts.watch.fundedTxs || []) {
-      if (m.fundedTxs?.includes(tx.toLowerCase())) return m;
+      if (m.fundedTxs?.includes(tx.toLowerCase())) {
+        if (await isOracastDeleted(m.id, m.fundedTxs)) {
+          throw new Error(
+            "Watch was cancelled/withdrawn and cannot be restored"
+          );
+        }
+        return m;
+      }
     }
   }
 
@@ -718,6 +835,12 @@ export async function importWatchBackup(opts: {
   const txs: string[] = [];
   for (const raw of opts.watch.fundedTxs || []) {
     if (!/^0x[a-fA-F0-9]{64}$/.test(raw)) continue;
+    const tx = raw.toLowerCase();
+    if (await isOracastDeleted("", [tx])) {
+      throw new Error(
+        "Deposit was used on a cancelled watch and cannot be restored"
+      );
+    }
     try {
       const { valueWei } = await verifyDepositTx({
         txHash: raw as Hex,
@@ -726,7 +849,7 @@ export async function importWatchBackup(opts: {
         allowUsed: true,
       });
       total += valueWei;
-      txs.push(raw.toLowerCase());
+      txs.push(tx);
       await markTxUsed(raw);
     } catch (e) {
       console.warn("[oracastWatch] import tx skip", raw.slice(0, 12), e);
@@ -839,7 +962,7 @@ export async function updateWatchPrefs(opts: {
   return w;
 }
 
-/** Fully remove a watch from memory + Upstash (stops alerts). */
+/** Fully remove a watch from memory + Upstash (stops alerts). Tombstones forever. */
 export async function deleteWatchRecord(
   watchId: string,
   owner: string
@@ -847,10 +970,12 @@ export async function deleteWatchRecord(
   loadDurableFile();
   await loadAllBlobFromUpstash();
   const w = mem().get(watchId) || (await getWatch(watchId));
-  if (!w) return;
-  if (w.owner.toLowerCase() !== owner.toLowerCase()) {
+  // Even if already gone from store, still tombstone id so import cannot revive
+  const funded = w?.fundedTxs || [];
+  if (w && w.owner.toLowerCase() !== owner.toLowerCase()) {
     throw new Error("Not your watch");
   }
+  await markOracastDeleted(watchId, funded);
   mem().delete(watchId);
   saveDurableFile();
   if (upstashConfigured()) {
@@ -1234,6 +1359,12 @@ export async function tickOracastWatches(opts?: {
   for (const raw of slice) {
     const w = migrateWatch({ ...raw });
     try {
+      // Cancelled/withdrawn watches must never Telegram or re-save
+      if (await isOracastDeleted(w.id, w.fundedTxs)) {
+        mem().delete(w.id);
+        results.push({ id: w.id, ok: false, skipped: "deleted" });
+        continue;
+      }
       if (!w.active) {
         results.push({ id: w.id, ok: false, skipped: "paused" });
         continue;
@@ -1274,6 +1405,13 @@ export async function tickOracastWatches(opts?: {
       }
       if (pref.enabled === false) {
         results.push({ id: w.id, ok: false, skipped: "telegram_disabled" });
+        continue;
+      }
+
+      // Re-check tombstone right before DM (cancel may have raced this tick)
+      if (await isOracastDeleted(w.id, w.fundedTxs)) {
+        mem().delete(w.id);
+        results.push({ id: w.id, ok: false, skipped: "deleted" });
         continue;
       }
 

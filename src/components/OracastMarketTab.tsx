@@ -48,6 +48,8 @@ type PublicWatch = {
 };
 
 const LS_WATCH_PREFIX = "rite_oracast_watches_v2:";
+/** Local tombstones — prevent browser backup from resurrecting cancelled watches */
+const LS_DELETED_PREFIX = "rite_oracast_deleted_v1:";
 
 function loadLocalWatches(owner: string): PublicWatch[] {
   try {
@@ -56,7 +58,13 @@ function loadLocalWatches(owner: string): PublicWatch[] {
     );
     if (!raw) return [];
     const arr = JSON.parse(raw) as PublicWatch[];
-    return Array.isArray(arr) ? arr : [];
+    if (!Array.isArray(arr)) return [];
+    const dead = loadLocalDeleted(owner);
+    return arr.filter(
+      (w) =>
+        !dead.ids.has(w.id) &&
+        !(w.fundedTxs || []).some((t) => dead.txs.has(t.toLowerCase()))
+    );
   } catch {
     return [];
   }
@@ -64,12 +72,58 @@ function loadLocalWatches(owner: string): PublicWatch[] {
 
 function saveLocalWatches(owner: string, watches: PublicWatch[]) {
   try {
+    const dead = loadLocalDeleted(owner);
+    const clean = watches.filter(
+      (w) =>
+        !dead.ids.has(w.id) &&
+        !(w.fundedTxs || []).some((t) => dead.txs.has(t.toLowerCase()))
+    );
     localStorage.setItem(
       `${LS_WATCH_PREFIX}${owner.toLowerCase()}`,
-      JSON.stringify(watches.slice(0, 40))
+      JSON.stringify(clean.slice(0, 40))
     );
   } catch {
     /* quota */
+  }
+}
+
+function loadLocalDeleted(owner: string): {
+  ids: Set<string>;
+  txs: Set<string>;
+} {
+  try {
+    const raw = localStorage.getItem(
+      `${LS_DELETED_PREFIX}${owner.toLowerCase()}`
+    );
+    if (!raw) return { ids: new Set(), txs: new Set() };
+    const p = JSON.parse(raw) as { ids?: string[]; txs?: string[] };
+    return {
+      ids: new Set((p.ids || []).map((x) => x.toLowerCase())),
+      txs: new Set((p.txs || []).map((x) => x.toLowerCase())),
+    };
+  } catch {
+    return { ids: new Set(), txs: new Set() };
+  }
+}
+
+function markLocalDeleted(
+  owner: string,
+  watchId: string,
+  fundedTxs: string[] = []
+) {
+  try {
+    const cur = loadLocalDeleted(owner);
+    cur.ids.add(watchId.toLowerCase());
+    for (const t of fundedTxs) cur.txs.add(t.toLowerCase());
+    localStorage.setItem(
+      `${LS_DELETED_PREFIX}${owner.toLowerCase()}`,
+      JSON.stringify({
+        ids: Array.from(cur.ids).slice(-200),
+        txs: Array.from(cur.txs).slice(-200),
+      })
+    );
+  } catch {
+    /* ignore */
   }
 }
 
@@ -143,8 +197,16 @@ export function OracastMarketTab() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "load failed");
       let list = (data.watches || []) as PublicWatch[];
+      const dead = loadLocalDeleted(address);
+      // Drop anything this browser already cancelled (stale server race)
+      list = list.filter(
+        (w) =>
+          !dead.ids.has(w.id.toLowerCase()) &&
+          !(w.fundedTxs || []).some((t) => dead.txs.has(t.toLowerCase()))
+      );
 
       // Server empty after cold start → restore from this browser + re-verify txs
+      // Never re-import tombstoned (cancelled/withdrawn) watches.
       if (list.length === 0) {
         const local = loadLocalWatches(address);
         if (local.length > 0) {
@@ -176,10 +238,18 @@ export function OracastMarketTab() {
           });
           const impData = await imp.json();
           if (imp.ok && Array.isArray(impData.watches) && impData.watches.length) {
-            list = impData.watches;
-            setMsg(
-              `Restored ${impData.restored} watch(es) after server restart`
+            list = (impData.watches as PublicWatch[]).filter(
+              (w) =>
+                !dead.ids.has(w.id.toLowerCase()) &&
+                !(w.fundedTxs || []).some((t) =>
+                  dead.txs.has(t.toLowerCase())
+                )
             );
+            if (list.length) {
+              setMsg(
+                `Restored ${list.length} watch(es) after server restart`
+              );
+            }
           }
         }
       }
@@ -472,12 +542,14 @@ export function OracastMarketTab() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "withdraw failed");
 
-      // Drop from local backup immediately
+      // Tombstone + drop local backup so refresh cannot resurrect
+      markLocalDeleted(address, w.id, w.fundedTxs || []);
       try {
         const next = loadLocalWatches(address).filter((x) => x.id !== w.id);
         saveLocalWatches(address, next);
+        setWatches(next);
       } catch {
-        /* ignore */
+        setWatches((prev) => prev.filter((x) => x.id !== w.id));
       }
 
       const refunded = data.refundedRit || "0";
