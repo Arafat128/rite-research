@@ -474,8 +474,17 @@ export async function runDueAgentTicks(opts?: {
   const results: KeeperTickResult[] = [];
   let ticked = 0;
   let scanned = 0;
-  /** Soft budget: stop after this many successful ticks (keep request under maxDuration) */
-  const maxTicked = Math.min(12, Math.max(3, maxAgents));
+  /**
+   * Drip successful ticks per request — do NOT dump every due agent in one
+   * shot (that is why Telegram goes quiet then floods when cron/fix runs).
+   * Keeper / AppShell call often (~25s–1m); 1–2 ticks per call spreads DMs.
+   * onlyAgentId: always 1.
+   */
+  const maxTicked = opts?.onlyAgentId
+    ? 1
+    : ownerFilter
+      ? Math.min(2, Math.max(1, maxAgents))
+      : Math.min(3, Math.max(1, maxAgents));
 
   for (const i of idsToScan) {
     if (ticked >= maxTicked) {
@@ -726,6 +735,10 @@ export async function runDueAgentTicks(opts?: {
       });
 
       ticked += 1;
+      // Space multi-agent ticks so Telegram is not a single burst
+      if (ticked < maxTicked) {
+        await new Promise((r) => setTimeout(r, 1_500));
+      }
       results.push({
         agentId: String(i),
         ok: true,
