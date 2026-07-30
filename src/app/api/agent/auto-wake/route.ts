@@ -26,7 +26,8 @@ export const maxDuration = 120;
 async function handle(req: NextRequest) {
   try {
     const ip = clientIp(req);
-    const rl = rateLimit(`auto-wake:${ip}`, 8, 60_000);
+    // Slightly higher: AppShell + My Agents both poke; multi-agent owners need room
+    const rl = rateLimit(`auto-wake:${ip}`, 14, 60_000);
     if (!rl.ok) {
       return NextResponse.json(
         { error: "Too many auto-wake requests — try again shortly" },
@@ -96,7 +97,8 @@ async function handle(req: NextRequest) {
     }
 
     const out = await runDueAgentTicks({
-      maxAgents: Math.min(15, Math.max(1, max || 12)),
+      // Owner-scoped: process more of *their* agents (not just last 12 global ids)
+      maxAgents: Math.min(30, Math.max(1, max || 20)),
       onlyAgentId: agentId,
       onlyOwner: owner,
     });

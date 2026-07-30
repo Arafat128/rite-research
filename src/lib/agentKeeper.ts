@@ -439,12 +439,53 @@ export async function runDueAgentTicks(opts?: {
   const start = Math.max(1, total - maxAgents + 1);
   const ownerFilter = opts?.onlyOwner?.toLowerCase();
 
+  /**
+   * Build id list to scan:
+   * - onlyAgentId → that id
+   * - onlyOwner → ownerAgentIds (all of user's agents, newest first) — critical so
+   *   early-created agents aren't skipped when nextAgentId is high and maxAgents is small
+   * - else → trailing window [start..total]
+   */
+  let idsToScan: number[] = [];
+  if (opts?.onlyAgentId && /^\d{1,12}$/.test(opts.onlyAgentId)) {
+    idsToScan = [Number(opts.onlyAgentId)];
+  } else if (ownerFilter) {
+    try {
+      const owned = (await client.readContract({
+        address: RADAR_CONTRACT as Address,
+        abi: radarAgentAbi,
+        functionName: "ownerAgentIds",
+        args: [ownerFilter as Address],
+      })) as bigint[];
+      idsToScan = owned
+        .map((x) => Number(x))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      idsToScan.sort((a, b) => b - a); // newest first
+      // Cap work per request (auto-wake / serverless time)
+      const cap = Math.min(40, Math.max(maxAgents, 20));
+      idsToScan = idsToScan.slice(0, cap);
+    } catch {
+      for (let i = start; i <= total; i++) idsToScan.push(i);
+    }
+  } else {
+    for (let i = start; i <= total; i++) idsToScan.push(i);
+  }
+
   const results: KeeperTickResult[] = [];
   let ticked = 0;
   let scanned = 0;
+  /** Soft budget: stop after this many successful ticks (keep request under maxDuration) */
+  const maxTicked = Math.min(12, Math.max(3, maxAgents));
 
-  for (let i = start; i <= total; i++) {
-    if (opts?.onlyAgentId && opts.onlyAgentId !== String(i)) continue;
+  for (const i of idsToScan) {
+    if (ticked >= maxTicked) {
+      results.push({
+        agentId: String(i),
+        ok: false,
+        skipped: "tick_budget",
+      });
+      continue;
+    }
     scanned += 1;
     const id = BigInt(i);
 

@@ -93,7 +93,7 @@ export function AppShell() {
     if (!address || !isConnected) return;
     const headers = { "Content-Type": "application/json" };
     const bodyOracast = JSON.stringify({ owner: address, max: 12 });
-    const bodyWake = JSON.stringify({ owner: address, max: 20 });
+    const bodyWake = JSON.stringify({ owner: address, max: 30 });
     const poke = () => {
       void fetch("/api/oracast/tick", {
         method: "POST",
