@@ -186,6 +186,72 @@ async function markOracastDeleted(
   }
 }
 
+const NOTIFY_LOCK_PREFIX = "rite:oracast:notify_lock:";
+
+type GLock = typeof globalThis & {
+  __riteOracastNotifyLocks?: Map<string, number>;
+};
+
+function memNotifyLocks(): Map<string, number> {
+  const g = globalThis as GLock;
+  if (!g.__riteOracastNotifyLocks) g.__riteOracastNotifyLocks = new Map();
+  return g.__riteOracastNotifyLocks;
+}
+
+/**
+ * Claim exclusive right to send one Oracast Telegram for this watch window.
+ * Prevents triple DMs when AppShell + keeper + /api/agent/cron all tick at once.
+ * @returns true if this caller should send
+ */
+async function claimOracastNotify(
+  watchId: string,
+  frequencyMin: number
+): Promise<boolean> {
+  const id = watchId.toLowerCase();
+  const ttlSec = Math.max(55, Math.min(86_400, Math.floor(frequencyMin * 60)));
+  const until = Date.now() + ttlSec * 1000;
+  const locks = memNotifyLocks();
+  const existing = locks.get(id) || 0;
+  if (existing > Date.now()) return false;
+  locks.set(id, until);
+
+  if (!upstashConfigured()) return true;
+  try {
+    // SET key 1 NX EX ttl — only first concurrent tick wins
+    const result = await upstashCmd([
+      "SET",
+      `${NOTIFY_LOCK_PREFIX}${id}`,
+      String(Date.now()),
+      "NX",
+      "EX",
+      ttlSec,
+    ]);
+    const ok = result === "OK" || result === true;
+    if (!ok) {
+      // Another instance claimed — keep local lock short so we don't spin
+      locks.set(id, Date.now() + 5_000);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn("[oracastWatch] claim notify failed", e);
+    // Fail open only if Upstash error — still better than blocking all alerts;
+    // local lock above still dedupes same instance.
+    return true;
+  }
+}
+
+async function releaseOracastNotify(watchId: string): Promise<void> {
+  const id = watchId.toLowerCase();
+  memNotifyLocks().delete(id);
+  if (!upstashConfigured()) return;
+  try {
+    await upstashCmd(["DEL", `${NOTIFY_LOCK_PREFIX}${id}`]);
+  } catch {
+    /* ignore */
+  }
+}
+
 function upstashConfigured(): boolean {
   return Boolean(
     process.env.UPSTASH_REDIS_REST_URL?.trim() &&
@@ -1381,10 +1447,37 @@ export async function tickOracastWatches(opts?: {
       }
 
       const dueMs = w.frequencyMin * 60_000;
+      // Always re-load latest lastNotifyAt (other instances may have just sent)
+      const fresh = await getWatch(w.id);
+      if (fresh) {
+        w.lastNotifyAt = fresh.lastNotifyAt;
+        w.depositWei = fresh.depositWei;
+        w.notifyCount = fresh.notifyCount;
+        w.consumedWei = fresh.consumedWei;
+        w.bountyCreditsIssued = fresh.bountyCreditsIssued;
+        w.active = fresh.active;
+        bal = BigInt(w.depositWei || "0");
+      }
       const since = w.lastNotifyAt || 0;
       // First alert ASAP; then respect frequency
       if (since > 0 && now - since < dueMs) {
         results.push({ id: w.id, ok: false, skipped: "not_due" });
+        continue;
+      }
+      if (!w.active) {
+        results.push({ id: w.id, ok: false, skipped: "paused" });
+        continue;
+      }
+      if (bal < cost) {
+        results.push({ id: w.id, ok: false, skipped: "insufficient_balance" });
+        continue;
+      }
+
+      // Distributed lock: only ONE concurrent tick may Telegram this watch
+      // (AppShell + keeper + agent/cron often fire within the same second)
+      const claimed = await claimOracastNotify(w.id, w.frequencyMin);
+      if (!claimed) {
+        results.push({ id: w.id, ok: false, skipped: "notify_claimed" });
         continue;
       }
 
@@ -1398,18 +1491,21 @@ export async function tickOracastWatches(opts?: {
 
       const pref = await resolveTelegramPref(w.owner);
       if (!pref?.chatId) {
+        await releaseOracastNotify(w.id);
         // Do NOT burn balance when Telegram missing
         await saveWatch(w);
         results.push({ id: w.id, ok: false, skipped: "telegram_not_linked" });
         continue;
       }
       if (pref.enabled === false) {
+        await releaseOracastNotify(w.id);
         results.push({ id: w.id, ok: false, skipped: "telegram_disabled" });
         continue;
       }
 
       // Re-check tombstone right before DM (cancel may have raced this tick)
       if (await isOracastDeleted(w.id, w.fundedTxs)) {
+        await releaseOracastNotify(w.id);
         mem().delete(w.id);
         results.push({ id: w.id, ok: false, skipped: "deleted" });
         continue;
@@ -1429,10 +1525,16 @@ export async function tickOracastWatches(opts?: {
         `\nEvery ${w.frequencyMin}m · ~${left} alerts left` +
         `\n<code>${w.id}</code>`;
 
-      await sendTelegramMessage(pref.chatId, html);
+      try {
+        await sendTelegramMessage(pref.chatId, html);
+      } catch (sendErr) {
+        await releaseOracastNotify(w.id);
+        throw sendErr;
+      }
 
       // Charge + persist IMMEDIATELY after successful send so frequency /
       // balance survive even if bounty chain work times out later.
+      // Lock TTL covers the full frequency window — do not release on success.
       bal = BigInt(w.depositWei || "0") - cost;
       if (bal < BigInt(0)) bal = BigInt(0);
       w.depositWei = bal.toString();
