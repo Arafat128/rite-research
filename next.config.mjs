@@ -32,8 +32,11 @@ const nextConfig = {
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob: https:",
               "font-src 'self' data:",
-              // Wallet RPCs + Ritual + Surf + WalletConnect
-              "connect-src 'self' https://rpc.ritualfoundation.org https://*.ritualfoundation.org https://api.asksurf.ai https://*.upstash.io https://*.walletconnect.com https://*.walletconnect.org wss://*.walletconnect.com wss://*.walletconnect.org https://*.infura.io https://*.alchemy.com https://explorer.ritualfoundation.org",
+              // Wallet RPCs + Ritual + Surf + WalletConnect + Ritual Radar app
+              "connect-src 'self' https://rpc.ritualfoundation.org https://*.ritualfoundation.org https://api.asksurf.ai https://*.upstash.io https://*.walletconnect.com https://*.walletconnect.org wss://*.walletconnect.com wss://*.walletconnect.org https://*.infura.io https://*.alchemy.com https://explorer.ritualfoundation.org https://ritual-radar.vercel.app https://*.vercel.app",
+              // Embed Ritual Radar iframe (3D graph) inside My Agents / TEE panels
+              "frame-src 'self' https://ritual-radar.vercel.app https://*.vercel.app",
+              "child-src 'self' https://ritual-radar.vercel.app https://*.vercel.app",
               "frame-ancestors 'none'",
               "base-uri 'self'",
               "form-action 'self'",

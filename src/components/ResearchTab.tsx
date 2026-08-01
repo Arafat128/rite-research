@@ -31,6 +31,8 @@ import {
 import { buildClaimMessage } from "@/lib/researchClaim";
 import { ResearchReport } from "@/components/ResearchReport";
 import { ResearchLoading } from "@/components/ResearchLoading";
+import { ResearchAddressRadar } from "@/components/ResearchAddressRadar";
+import { OpenOnRadar } from "@/components/OpenOnRadar";
 import { useToast } from "@/components/ToastProvider";
 import { ErrorFeedback } from "@/components/ErrorFeedback";
 import {
@@ -813,6 +815,18 @@ export function ResearchTab() {
           <a className="text-[#c8ff4a] underline" href={addressUrl(FEE_RECIPIENT)} target="_blank" rel="noreferrer">
             treasury
           </a>
+          {FEE_RECIPIENT && (
+            <>
+              {" "}
+              <OpenOnRadar address={FEE_RECIPIENT} label="Radar" />
+            </>
+          )}
+          {RESEARCH_CONTRACT && (
+            <>
+              {" · desk "}
+              <OpenOnRadar address={RESEARCH_CONTRACT} label="Radar" />
+            </>
+          )}
           . If Surf times out after you pay, use <b className="text-white/70">Claim free report</b>{" "}
           (same wallet + exact prompt) — no second fee. Seal only runs after Surf returns a report.
         </p>
@@ -1038,7 +1052,29 @@ export function ResearchTab() {
       )}
 
       {report && phase !== "researching" && phase !== "settling" ? (
-        <ResearchReport content={report} />
+        <>
+          <ResearchReport content={report} />
+          <ResearchAddressRadar
+            className="mt-4 w-full max-w-2xl"
+            text={`${prompt}\n${report}`}
+          />
+          {address && (
+            <div className="mt-3 flex flex-wrap justify-center gap-2">
+              <OpenOnRadar
+                address={address}
+                label="Map your wallet on Radar"
+                size="md"
+              />
+              {RESEARCH_CONTRACT && (
+                <OpenOnRadar
+                  address={RESEARCH_CONTRACT}
+                  label="ResearchDesk graph"
+                  size="md"
+                />
+              )}
+            </div>
+          )}
+        </>
       ) : null}
       </div>
     </section>

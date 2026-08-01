@@ -10,6 +10,7 @@ import {
   txUrl,
   addressUrl,
 } from "@/lib/ritual";
+import { OpenOnRadar } from "@/components/OpenOnRadar";
 import { useToast } from "@/components/ToastProvider";
 
 type WinnerInfo = {
@@ -200,6 +201,11 @@ export function BountyBanner() {
               >
                 Winner ↗
               </a>
+              <OpenOnRadar
+                address={info!.winner}
+                label="Radar · winner"
+                title="Map bounty winner on Ritual Radar"
+              />
               {payoutTx && (
                 <a
                   href={txUrl(payoutTx)}
@@ -278,6 +284,11 @@ export function BountyBanner() {
             >
               Pool ↗
             </a>
+            <OpenOnRadar
+              address={BOUNTY_CONTRACT}
+              label="Radar · pool"
+              title="Map BountyPool contract graph"
+            />
           </div>
         </div>
 

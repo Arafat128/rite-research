@@ -10,6 +10,7 @@ import {
   EXPLORER_URL,
   ritualChain,
 } from "@/lib/ritual";
+import { OpenOnRadar } from "@/components/OpenOnRadar";
 import { ErrorFeedback } from "@/components/ErrorFeedback";
 import {
   buildErrorReport,
@@ -139,6 +140,26 @@ export function RecordsTab() {
         >
           View contract
         </a>
+        {RESEARCH_CONTRACT && (
+          <>
+            {" · "}
+            <OpenOnRadar
+              address={RESEARCH_CONTRACT}
+              label="Radar · desk"
+              className="align-middle"
+            />
+          </>
+        )}
+        {address && (
+          <>
+            {" · "}
+            <OpenOnRadar
+              address={address}
+              label="Radar · wallet"
+              className="align-middle"
+            />
+          </>
+        )}
       </p>
 
       {loading && <p className="text-sm text-white/50">Loading…</p>}
@@ -181,14 +202,22 @@ export function RecordsTab() {
                 "0x0000000000000000000000000000000000000000000000000000000000000000" && (
                 <div className="break-all">resultHash: {r.resultHash}</div>
               )}
-              <a
-                className="mt-1 text-[#c8ff4a]/80 underline"
-                href={`${EXPLORER_URL}/address/${RESEARCH_CONTRACT}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open explorer
-              </a>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <a
+                  className="text-[#c8ff4a]/80 underline"
+                  href={`${EXPLORER_URL}/address/${RESEARCH_CONTRACT}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open explorer
+                </a>
+                {address && (
+                  <OpenOnRadar
+                    address={address}
+                    label="Your wallet on Radar"
+                  />
+                )}
+              </div>
             </div>
           </div>
         ))}

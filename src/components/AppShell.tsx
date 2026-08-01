@@ -11,6 +11,8 @@ import {
 } from "wagmi";
 import { formatEther } from "viem";
 import { ritualChain } from "@/lib/ritual";
+import { OpenOnRadar } from "@/components/OpenOnRadar";
+import { RITUAL_RADAR_URL } from "@/lib/ritualRadar";
 
 /** Lazy-load heavy tabs so first paint stays fast */
 const ResearchTab = dynamic(
@@ -140,6 +142,15 @@ export function AppShell() {
           <div className="flex items-center gap-2">
             <span className="text-xl font-bold tracking-tight text-[#c8ff4a]">Rite</span>
             <span className="hidden text-xs text-white/40 sm:inline">Research Desk</span>
+            <a
+              href={RITUAL_RADAR_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hidden rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-100/90 transition hover:bg-cyan-500/20 sm:inline"
+              title="Open Ritual Radar — 3D address graph"
+            >
+              Radar ↗
+            </a>
           </div>
 
           <nav className="pill-nav order-3 flex w-full items-center justify-center gap-1 rounded-full px-1.5 py-1 text-[11px] font-medium sm:order-none sm:w-auto sm:text-sm">
@@ -178,9 +189,16 @@ export function AppShell() {
                     Switch to Ritual
                   </button>
                 )}
-                <div className="hidden rounded-full border border-white/10 bg-black/25 px-3 py-1.5 text-[11px] text-white/70 sm:block">
-                  {bal ? `${Number(formatEther(bal.value)).toFixed(4)} RIT` : "…"} ·{" "}
-                  {address.slice(0, 6)}…{address.slice(-4)}
+                <div className="hidden items-center gap-1.5 sm:flex">
+                  <div className="rounded-full border border-white/10 bg-black/25 px-3 py-1.5 text-[11px] text-white/70">
+                    {bal ? `${Number(formatEther(bal.value)).toFixed(4)} RIT` : "…"} ·{" "}
+                    {address.slice(0, 6)}…{address.slice(-4)}
+                  </div>
+                  <OpenOnRadar
+                    address={address}
+                    label="Radar"
+                    title="Map connected wallet on Ritual Radar"
+                  />
                 </div>
                 <button
                   type="button"
@@ -234,6 +252,14 @@ export function AppShell() {
             <span className="font-semibold text-[#c8ff4a]">mehidy</span>
           </p>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-3">
+            <a
+              href={RITUAL_RADAR_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-cyan-200/60 transition hover:text-cyan-100"
+            >
+              Ritual Radar
+            </a>
             <a
               href="https://github.com/Arafat128/rite-research"
               target="_blank"

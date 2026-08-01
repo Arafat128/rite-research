@@ -22,6 +22,8 @@ import {
   ritualChain,
   txUrl,
 } from "@/lib/ritual";
+import { OpenOnRadar } from "@/components/OpenOnRadar";
+import { RadarExplorerPanel } from "@/components/RadarExplorerPanel";
 import {
   buildPersistentCompressedLaunch,
   buildSovereignRollingCompressedLaunch,
@@ -947,6 +949,12 @@ export function OfficialAgentTab({ mode }: Props) {
                   >
                     Open on Ritual ↗
                   </a>
+                  <OpenOnRadar
+                    address={r.childAddress}
+                    label="Radar graph"
+                    size="md"
+                    title="3D relationship graph for this TEE agent"
+                  />
                   <a
                     href={addressUrl(r.childAddress as Address)}
                     target="_blank"
@@ -976,6 +984,28 @@ export function OfficialAgentTab({ mode }: Props) {
                 </div>
               </div>
             ))
+          )}
+
+          {rows.length > 0 && (
+            <RadarExplorerPanel
+              title="TEE agents on Ritual Radar"
+              subtitle="Map harness / launcher addresses — owner, heartbeat, factory links."
+              defaultOpen={false}
+              defaultAddress={
+                lastLaunched || rows[0]?.childAddress || address || undefined
+              }
+              targets={[
+                ...(address
+                  ? [{ address, label: "Your wallet", hint: "Deployer" }]
+                  : []),
+                ...rows.slice(0, 8).map((r) => ({
+                  address: r.childAddress,
+                  label: r.name.slice(0, 18) || "Agent",
+                  hint: r.kind,
+                })),
+              ]}
+              height={380}
+            />
           )}
         </div>
       )}

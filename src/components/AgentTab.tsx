@@ -89,6 +89,8 @@ import {
   supportsKillAgent,
 } from "@/lib/radarWrite";
 import { useToast } from "@/components/ToastProvider";
+import { OpenOnRadar } from "@/components/OpenOnRadar";
+import { RadarExplorerPanel } from "@/components/RadarExplorerPanel";
 
 import { ErrorFeedback } from "@/components/ErrorFeedback";
 import {
@@ -2185,6 +2187,22 @@ export function AgentTab({
                       </>
                     )}
                   </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {address && (
+                      <OpenOnRadar
+                        address={address}
+                        label="Radar · wallet"
+                        title="Map your wallet neighborhood"
+                      />
+                    )}
+                    {RADAR_CONTRACT && (
+                      <OpenOnRadar
+                        address={RADAR_CONTRACT}
+                        label="Radar · RadarAgent"
+                        title="Map Rite RadarAgent contract"
+                      />
+                    )}
+                  </div>
                 </div>
                 <span className="rounded-full border border-red-400/40 bg-red-500/15 px-3 py-1 text-[11px] font-semibold text-red-200">
                   {agent.kind === AGENT_KIND.Sovereign
@@ -2245,6 +2263,22 @@ export function AgentTab({
                           ? ` · ${track.target}`
                           : ""}
                       </>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {address && (
+                      <OpenOnRadar
+                        address={address}
+                        label="Radar · wallet"
+                        title="Map your wallet (owner) neighborhood"
+                      />
+                    )}
+                    {RADAR_CONTRACT && (
+                      <OpenOnRadar
+                        address={RADAR_CONTRACT}
+                        label="Radar · RadarAgent"
+                        title="Map Rite data-agent contract"
+                      />
                     )}
                   </div>
                 </div>
@@ -2683,8 +2717,39 @@ export function AgentTab({
           </>
           )}
 
+          {/* Ritual Radar — explore wallet + Rite RadarAgent contract in 3D */}
+          {(address || RADAR_CONTRACT) && (
+            <RadarExplorerPanel
+              title="Explore on Ritual Radar"
+              subtitle="Data agents live on RadarAgent — map your wallet and the Rite contract graph."
+              defaultOpen={false}
+              defaultAddress={address || RADAR_CONTRACT}
+              targets={[
+                ...(address
+                  ? [
+                      {
+                        address,
+                        label: "Your wallet",
+                        hint: "Owner of data agents",
+                      },
+                    ]
+                  : []),
+                ...(RADAR_CONTRACT
+                  ? [
+                      {
+                        address: RADAR_CONTRACT,
+                        label: "RadarAgent",
+                        hint: "Rite data-agent contract",
+                      },
+                    ]
+                  : []),
+              ]}
+              height={400}
+            />
+          )}
+
           {RADAR_CONTRACT && (
-            <p className="text-center text-[10px] text-white/30">
+            <p className="flex flex-wrap items-center justify-center gap-2 text-center text-[10px] text-white/30">
               <a
                 href={addressUrl(RADAR_CONTRACT)}
                 target="_blank"
@@ -2693,6 +2758,7 @@ export function AgentTab({
               >
                 View on explorer ↗
               </a>
+              <OpenOnRadar address={RADAR_CONTRACT} label="Radar · contract" />
             </p>
           )}
         </div>

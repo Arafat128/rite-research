@@ -74,6 +74,21 @@ Explorer: [explorer.ritualfoundation.org](https://explorer.ritualfoundation.org)
 
 ---
 
+## Ritual Radar integration
+
+Rite links into **[Ritual Radar](https://ritual-radar.vercel.app)** (3D address graph):
+
+| Surface | Integration |
+|---------|-------------|
+| Header / wallet | Open Radar for connected wallet |
+| My Agents (data) | Radar CTAs + embed panel (wallet + RadarAgent contract) |
+| Ritual AI agents | Radar for each TEE harness + embed fleet graph |
+| Research report | Detected `0x` addresses → Investigate on Radar |
+| Records / Bounty | Desk, wallet, winner, pool on Radar |
+
+Deep link: `https://ritual-radar.vercel.app/?address=0x…` · embed: `&embed=1`  
+Override URL: `NEXT_PUBLIC_RITUAL_RADAR_URL`
+
 ## Stack
 
 Next.js 14 · wagmi / viem · Surf API · Foundry · Vercel · Upstash (optional Telegram multi-user) · GitHub Actions / QStash (optional unattended ticks)
