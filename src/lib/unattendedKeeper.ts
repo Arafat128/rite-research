@@ -239,6 +239,14 @@ export async function sustainUnattendedCoverage(opts?: {
       onlyAgentId: opts.onlyAgentId,
       maxAgents: 20,
     });
+    console.info(
+      "[unattendedKeeper] kickNow ticked=",
+      kick.ticked,
+      "oracast=",
+      kick.oracastNotified,
+      opts.onlyAgentId ? `agent=${opts.onlyAgentId}` : "",
+      kick.error || "ok"
+    );
   }
 
   // Force re-arm so Activate always starts a fresh chain

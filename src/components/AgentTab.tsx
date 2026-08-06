@@ -691,12 +691,24 @@ export function AgentTab({
 
   /**
    * Auto-wake: no signature. While My Agents is open, poll keeper for due agents.
-   * AppShell also pokes auto-wake on any Rite tab. Tab closed → cron / GitHub Action.
+   * Marks session so AppShell skips its own auto-wake (avoids double POST at same ms).
+   * Tab closed → cron / GitHub Action / unattended waitUntil chain.
    */
   useEffect(() => {
     if (mode !== "manage" || !isConnected || !address) {
       setAutoWakeNote("");
+      try {
+        sessionStorage.removeItem("rite_my_agents_awake");
+      } catch {
+        /* ignore */
+      }
       return;
+    }
+
+    try {
+      sessionStorage.setItem("rite_my_agents_awake", "1");
+    } catch {
+      /* ignore */
     }
 
     let cancelled = false;
@@ -865,14 +877,17 @@ export function AgentTab({
             const serverSent = tg?.sent === true;
             const serverDup = tg?.reason === "duplicate";
             const serverFiltered = tg?.reason === "filtered";
-            if (serverSent || serverDup) {
+            // Server still finishing TG in background — do NOT client-backup
+            // or we send a second DM for the same runCount.
+            const serverPending = tg?.reason === "notify_pending";
+            if (serverSent || serverDup || serverPending) {
               try {
                 sessionStorage.setItem(runKey, "1");
               } catch {
                 /* ignore */
               }
             }
-            // Backup DM whenever server did not confirm send (timeout, not_linked, pending, …)
+            // Backup only when server definitely did not send (e.g. not_linked cold)
             const needClientBackup =
               Boolean(
                 chatId &&
@@ -880,6 +895,7 @@ export function AgentTab({
                   !serverSent &&
                   !serverDup &&
                   !serverFiltered &&
+                  !serverPending &&
                   !alreadyPushed
               );
             if (needClientBackup) {
@@ -1036,6 +1052,11 @@ export function AgentTab({
       if (timer) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
+      try {
+        sessionStorage.removeItem("rite_my_agents_awake");
+      } catch {
+        /* ignore */
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, isConnected, address]);

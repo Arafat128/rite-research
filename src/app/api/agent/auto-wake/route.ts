@@ -110,6 +110,16 @@ async function handle(req: NextRequest) {
       onlyOwner: owner,
     });
 
+    if (out.ticked > 0) {
+      console.info(
+        `[api/agent/auto-wake] owner=${owner.slice(0, 10)}… ticked=${out.ticked}`,
+        out.results
+          .filter((r) => r.ok)
+          .map((r) => `#${r.agentId}@${r.runCount}`)
+          .join(",")
+      );
+    }
+
     // Arm closed-tab chain (in-process waitUntil — no HTTP self-call)
     void sustainUnattendedCoverage({ kickNow: false }).catch(() => undefined);
 

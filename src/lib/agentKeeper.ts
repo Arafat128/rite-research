@@ -35,6 +35,7 @@ import { BLOCK_TIME_SEC, computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
 import { cacheKeeperTick } from "@/lib/keeperCache";
 import { notifyAgentTick } from "@/lib/telegram";
+import { kvDel, kvSetNx } from "@/lib/durableKv";
 
 export type KeeperTickResult = {
   agentId: string;
@@ -301,13 +302,24 @@ async function explainFailedRunTick(
   return `runTick receipt not successful (tx ${short}…). Often a race with another wake — check explorer; if run count increased, ignore.`;
 }
 
-/** Serialize ticks per agent on this instance (avoids double-fire races). */
+/**
+ * Serialize ticks per agent:
+ * 1) in-process Map (same isolate: auto-wake + arm-unattended kick)
+ * 2) Upstash SET NX (multi-instance: AppShell + AgentTab fire at once)
+ *
+ * Without (2), two serverless instances both see lastTickBlock=0 on a fresh
+ * Activate and can both send runTick before TooEarly applies — double Telegram.
+ */
 const agentTickLocks = new Map<string, Promise<unknown>>();
+
+type TickLockOutcome<T> =
+  | { kind: "busy"; skipped: string }
+  | { kind: "ran"; value: T };
 
 async function withAgentTickLock<T>(
   agentId: string,
   fn: () => Promise<T>
-): Promise<T> {
+): Promise<TickLockOutcome<T>> {
   const prev = agentTickLocks.get(agentId) || Promise.resolve();
   let release!: () => void;
   const gate = new Promise<void>((r) => {
@@ -316,8 +328,24 @@ async function withAgentTickLock<T>(
   const chained = prev.then(() => gate);
   agentTickLocks.set(agentId, chained);
   await prev.catch(() => undefined);
+
+  const distKey = `rite:agent:ticklock:${agentId}`;
   try {
-    return await fn();
+    // TTL covers Surf fetch + runTick + receipt (~45s) with headroom
+    const got = await kvSetNx(distKey, String(Date.now()), 90);
+    if (!got) {
+      return { kind: "busy", skipped: "tick_in_flight" };
+    }
+    try {
+      const value = await fn();
+      return { kind: "ran", value };
+    } finally {
+      try {
+        await kvDel(distKey);
+      } catch {
+        /* expire via TTL */
+      }
+    }
   } finally {
     release();
   }
@@ -668,7 +696,7 @@ export async function runDueAgentTicks(opts?: {
         continue;
       }
 
-      // Serialize per-agent ticks on this instance (auto-wake + cron race)
+      // Serialize per-agent ticks across instances (auto-wake + arm kick race)
       const locked = await withAgentTickLock(String(i), async () => {
         // Light re-check with fresh head (another wake may have just sealed)
         const due2 = await isAgentDueFast(
@@ -769,7 +797,7 @@ export async function runDueAgentTicks(opts?: {
         };
       });
 
-      if (locked.kind === "skip") {
+      if (locked.kind === "busy") {
         results.push({
           agentId: String(i),
           ok: false,
@@ -777,17 +805,30 @@ export async function runDueAgentTicks(opts?: {
         });
         continue;
       }
-      if (locked.kind === "fail") {
+
+      const inner = locked.value;
+      if (inner.kind === "skip") {
         results.push({
           agentId: String(i),
           ok: false,
-          error: locked.error,
-          txHash: locked.txHash,
+          skipped: inner.skipped,
+        });
+        continue;
+      }
+      if (inner.kind === "fail") {
+        results.push({
+          agentId: String(i),
+          ok: false,
+          error: inner.error,
+          txHash: inner.txHash,
         });
         continue;
       }
 
-      const { hash, snapshot, newCount, fresh } = locked;
+      const { hash, snapshot, newCount, fresh } = inner;
+      console.info(
+        `[agentKeeper] sealed agent=${i} run=${newCount.toString()} tx=${hash}`
+      );
       const died =
         fresh.maxRuns > BigInt(0) && newCount >= fresh.maxRuns;
       const digest = keccak256(

@@ -107,21 +107,34 @@ export function AppShell() {
         return;
       }
       inFlight = true;
+      // My Agents already runs a dedicated auto-wake poller — skip so Activate
+      // + dual pollers don't fire two runTicks/Telegram DMs in the same second.
+      let myAgentsAwake = false;
       try {
-        await Promise.all([
+        myAgentsAwake = sessionStorage.getItem("rite_my_agents_awake") === "1";
+      } catch {
+        /* ignore */
+      }
+      try {
+        const jobs: Promise<unknown>[] = [
           fetch("/api/oracast/tick", {
             method: "POST",
             headers,
             body: bodyOwner,
             cache: "no-store",
           }).catch(() => undefined),
-          fetch("/api/agent/auto-wake", {
-            method: "POST",
-            headers,
-            body: bodyOwner,
-            cache: "no-store",
-          }).catch(() => undefined),
-        ]);
+        ];
+        if (!myAgentsAwake) {
+          jobs.push(
+            fetch("/api/agent/auto-wake", {
+              method: "POST",
+              headers,
+              body: bodyOwner,
+              cache: "no-store",
+            }).catch(() => undefined)
+          );
+        }
+        await Promise.all(jobs);
       } finally {
         inFlight = false;
       }
