@@ -9,6 +9,7 @@ import {
   useSwitchChain,
   useWriteContract,
   useBalance,
+  useSignMessage,
 } from "wagmi";
 import {
   formatEther,
@@ -218,10 +219,17 @@ export function AgentTab({
     chainId: ritualChain.id,
   });
   const { writeContractAsync, isPending: writing } = useWriteContract();
+  const { signMessageAsync } = useSignMessage();
   const toast = useToast();
 
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  /**
+   * App-level write lock: true from before wallet prompt until receipt handling
+   * finishes. wagmi `writing` alone clears on hash return — too early.
+   */
+  const [actionPending, setActionPending] = useState(false);
+  const writeBusy = writing || actionPending;
   /** Last structured error for copy-to-support */
   const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [agentIds, setAgentIds] = useState<bigint[]>([]);
@@ -678,17 +686,24 @@ export function AgentTab({
     let inFlight = false;
 
     const poke = async (reason: string) => {
-      if (cancelled || inFlight || autoWakeBusy || ticking || writing) return;
+      if (cancelled || inFlight || autoWakeBusy || ticking || writeBusy) return;
       // Only when we have at least one non-dead agent (or none yet — still poke owner)
       inFlight = true;
       setAutoWakeBusy(true);
       try {
+        const { getAutoWakeAuth } = await import("@/lib/ownerWakeAuth");
+        const auth = await getAutoWakeAuth(address, async (message) =>
+          signMessageAsync({ message })
+        );
         const res = await fetch("/api/agent/auto-wake", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             owner: address,
             max: 20,
+            signature: auth.signature,
+            nonce: auth.nonce,
+            expiry: auth.expiry,
           }),
           cache: "no-store",
         });
@@ -1012,7 +1027,14 @@ export function AgentTab({
 
   async function waitTx(hash: `0x${string}`) {
     const client = publicClient ?? getRitualReadClient(true);
-    return client.waitForTransactionReceipt({ hash, confirmations: 1 });
+    const receipt = await client.waitForTransactionReceipt({
+      hash,
+      confirmations: 1,
+    });
+    if (receipt.status !== "success") {
+      throw new Error(`Transaction reverted (${hash.slice(0, 12)}…)`);
+    }
+    return receipt;
   }
 
   /**
@@ -1057,6 +1079,8 @@ export function AgentTab({
   }
 
   async function createAgent() {
+    if (actionPending) return;
+    setActionPending(true);
     try {
       setErr("");
       setMsg("");
@@ -1150,11 +1174,14 @@ export function AgentTab({
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.deploy", "Deploy failed");
+    } finally {
+      setActionPending(false);
     }
   }
 
   async function saveSchedule() {
-    if (selectedId == null) return;
+    if (selectedId == null || actionPending) return;
+    setActionPending(true);
     try {
       clearError();
       await ensureWallet();
@@ -1188,11 +1215,14 @@ export function AgentTab({
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.schedule", "Schedule save failed");
+    } finally {
+      setActionPending(false);
     }
   }
 
   async function fundSelected() {
-    if (selectedId == null) return;
+    if (selectedId == null || actionPending) return;
+    setActionPending(true);
     try {
       clearError();
       await ensureWallet();
@@ -1212,11 +1242,14 @@ export function AgentTab({
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.fund", "Fund failed");
+    } finally {
+      setActionPending(false);
     }
   }
 
   async function withdrawSelected(amountWei?: bigint) {
-    if (selectedId == null || !agent) return;
+    if (selectedId == null || !agent || actionPending) return;
+    setActionPending(true);
     try {
       setErr("");
       await ensureWallet();
@@ -1296,11 +1329,15 @@ export function AgentTab({
           }));
         });
       }
+    } finally {
+      // Must clear even on success — earlier partial fix only cleared in catch
+      setActionPending(false);
     }
   }
 
   async function killSelected() {
-    if (selectedId == null || !agent) return;
+    if (selectedId == null || !agent || actionPending) return;
+    setActionPending(true);
     try {
       setErr("");
       await ensureWallet();
@@ -1492,11 +1529,14 @@ export function AgentTab({
           }));
         });
       }
+    } finally {
+      setActionPending(false);
     }
   }
 
   async function setStatus(active: boolean) {
-    if (selectedId == null) return;
+    if (selectedId == null || actionPending) return;
+    setActionPending(true);
     try {
       setErr("");
       await ensureWallet();
@@ -1513,6 +1553,8 @@ export function AgentTab({
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.status", "Status update failed");
+    } finally {
+      setActionPending(false);
     }
   }
 
@@ -2052,11 +2094,11 @@ export function AgentTab({
 
             <button
               type="button"
-              disabled={writing || ticking}
+              disabled={writeBusy || ticking}
               onClick={createAgent}
               className="btn-primary mt-4 w-full rounded-xl py-3 text-sm"
             >
-              {writing
+              {writeBusy
                 ? "Confirm in wallet…"
                 : `Deploy ${AGENT_KIND_LABELS[agentKind]} · ${formatEther(totalDeployValue)} RIT`}
             </button>
@@ -2231,7 +2273,7 @@ export function AgentTab({
               {agent.balance > BigInt(0) && (
                 <button
                   type="button"
-                  disabled={writing}
+                  disabled={writeBusy}
                   onClick={() => void withdrawSelected(agent.balance)}
                   className="mt-3 w-full rounded-xl border border-[#c8ff4a]/30 bg-[#c8ff4a]/10 py-2 text-sm text-[#c8ff4a]"
                 >
@@ -2402,7 +2444,7 @@ export function AgentTab({
                       </select>
                       <button
                         type="button"
-                        disabled={writing || ticking}
+                        disabled={writeBusy || ticking}
                         onClick={() => void saveSchedule()}
                         className="btn-primary rounded-lg px-4 text-sm"
                       >
@@ -2443,7 +2485,7 @@ export function AgentTab({
                       />
                       <button
                         type="button"
-                        disabled={writing || ticking}
+                        disabled={writeBusy || ticking}
                         onClick={() => void fundSelected()}
                         className="btn-primary rounded-lg px-4 text-sm"
                       >
@@ -2496,7 +2538,7 @@ export function AgentTab({
                   <div className="grid gap-2 sm:grid-cols-3">
                     <button
                       type="button"
-                      disabled={writing || ticking}
+                      disabled={writeBusy || ticking}
                       onClick={() => setStatus(true)}
                       className="rounded-xl bg-emerald-400/90 py-2.5 text-sm font-semibold text-black"
                     >
@@ -2504,7 +2546,7 @@ export function AgentTab({
                     </button>
                     <button
                       type="button"
-                      disabled={writing || ticking}
+                      disabled={writeBusy || ticking}
                       onClick={() => setStatus(false)}
                       className="rounded-xl border border-white/15 bg-black/40 py-2.5 text-sm text-white"
                     >
@@ -2541,11 +2583,11 @@ export function AgentTab({
                     </p>
                     <button
                       type="button"
-                      disabled={writing || ticking}
+                      disabled={writeBusy || ticking}
                       onClick={() => void killSelected()}
                       className="w-full rounded-xl border border-red-400/50 bg-red-500/20 py-2.5 text-sm font-semibold text-red-200 hover:bg-red-500/30"
                     >
-                      {writing
+                      {writeBusy
                         ? "Confirm in wallet…"
                         : canKillOnChain === false
                           ? "Close agent · withdraw & pause"

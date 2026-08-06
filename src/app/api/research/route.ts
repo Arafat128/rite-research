@@ -94,11 +94,17 @@ async function verifyClaimSig(opts: {
   if (opts.nonce.length < 8 || opts.nonce.length > 128) {
     return "Invalid nonce";
   }
+  const { consumeResearchNonce } = await import("@/lib/researchSeal");
+  const consumed = await consumeResearchNonce(opts.researcher, opts.nonce);
+  if (!consumed) {
+    return "Nonce already used or invalid — request a new claim signature";
+  }
   const message = buildClaimMessage({
     researchId: opts.researchId,
     promptHash: opts.promptHash,
     nonce: opts.nonce,
     expiry: opts.expiry,
+    purpose: "claim",
   });
   try {
     const ok = await verifyMessage({
@@ -340,12 +346,13 @@ export async function POST(req: NextRequest) {
 
     // Idempotent Surf call per researchId (prevents concurrent double-spend of API)
     const payload = await withResearchLock(researchId!, async () => {
-      const cached = getCachedReport(researchId!);
+      const cached = await getCachedReport(researchId!);
       if (cached) {
         return {
           resultHash: cached.resultHash,
           report: cached.report,
           model: "cached",
+          sealed: cached.sealed,
         };
       }
       // Optional body.model (deep tier later); default = SURF_MODEL / instant
@@ -356,15 +363,25 @@ export async function POST(req: NextRequest) {
         depth: model === "surf-1.5-thinking" ? "deep" : "standard",
       });
       const resultHash = keccak256(stringToBytes(result.content));
-      cacheReport(researchId!, resultHash, result.content);
+      const sealed = sealReport(researchId!, result.content);
+      await cacheReport(researchId!, resultHash, result.content, sealed);
       return {
         resultHash,
         report: result.content,
         model: result.model,
+        sealed,
       };
     });
 
-    const sealedReport = sealReport(researchId!, payload.report);
+    const sealedReport =
+      payload.sealed || sealReport(researchId!, payload.report);
+    // Ensure durable sealed store even on cache-hit path
+    await cacheReport(
+      researchId!,
+      payload.resultHash,
+      payload.report,
+      sealedReport
+    );
 
     const explorerBase = (
       process.env.NEXT_PUBLIC_EXPLORER_URL ||

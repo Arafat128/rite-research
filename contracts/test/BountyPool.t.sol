@@ -98,4 +98,74 @@ contract BountyPoolTest is Test {
         BountyPool p2 = new BountyPool(0);
         assertEq(p2.interactionThreshold(), 20);
     }
+
+    /// @dev Unclaimed winner liability must not be re-credited to the next round.
+    function test_UnclaimedPayoutNotRecredited() public {
+        bytes32 h = keccak256("p");
+        // Round 1: 3 credits → auto finalize
+        vm.prank(alice);
+        desk.payForResearch{value: 0.005 ether}(h);
+        vm.prank(bob);
+        desk.payForResearch{value: 0.005 ether}(h);
+        vm.prank(alice);
+        desk.payForResearch{value: 0.005 ether}(h);
+
+        address w1 = pool.lastWinner();
+        uint256 pending1 = pool.pendingPayouts(w1);
+        assertGt(pending1, 0);
+        assertEq(pool.totalPendingPayouts(), pending1);
+        // Available pool is 0 while unclaimed (all balance reserved)
+        assertEq(pool.availablePool(), 0);
+        assertEq(pool.poolBalance(), 0);
+
+        // Round 2: only 1 credit → no finalize yet; available = new fee share only
+        vm.prank(bob);
+        desk.payForResearch{value: 0.005 ether}(h);
+        assertEq(pool.availablePool(), 0.0025 ether);
+        // Reserved still only round-1 winner
+        assertEq(pool.totalPendingPayouts(), pending1);
+        assertEq(pool.pendingPayouts(w1), pending1);
+
+        // Finish round 2
+        vm.prank(alice);
+        desk.payForResearch{value: 0.005 ether}(h);
+        vm.prank(bob);
+        desk.payForResearch{value: 0.005 ether}(h);
+
+        address w2 = pool.lastWinner();
+        uint256 pending2 = pool.pendingPayouts(w2);
+        // Second prize is only new-round available funds, not w1's reserved ETH
+        assertEq(pending2, 0.0075 ether); // 3 × 0.0025
+        if (w1 == w2) {
+            assertEq(pool.pendingPayouts(w1), pending1 + pending2);
+            assertEq(pool.totalPendingPayouts(), pending1 + pending2);
+        } else {
+            assertEq(pool.pendingPayouts(w1), pending1);
+            assertEq(pool.totalPendingPayouts(), pending1 + pending2);
+        }
+        // Invariant: balance covers all liabilities
+        assertEq(address(pool).balance, pool.totalPendingPayouts());
+
+        // Both can claim fully
+        uint256 b1 = w1.balance;
+        vm.prank(w1);
+        pool.claimPayout();
+        assertEq(w1.balance, b1 + (w1 == w2 ? pending1 + pending2 : pending1));
+
+        if (w1 != w2) {
+            uint256 b2 = w2.balance;
+            vm.prank(w2);
+            pool.claimPayout();
+            assertEq(w2.balance, b2 + pending2);
+        }
+        assertEq(pool.totalPendingPayouts(), 0);
+        assertEq(address(pool).balance, 0);
+    }
+
+    function test_ThresholdCap() public {
+        vm.expectRevert(BountyPool.BadThreshold.selector);
+        pool.setInteractionThreshold(101);
+        vm.expectRevert(BountyPool.BadThreshold.selector);
+        new BountyPool(101);
+    }
 }

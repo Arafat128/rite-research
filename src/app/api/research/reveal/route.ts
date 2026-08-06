@@ -16,7 +16,9 @@ import {
 } from "@/lib/security";
 import {
   buildClaimMessage,
+  consumeResearchNonce,
   getCachedReport,
+  getSealedReportStore,
   unsealReport,
 } from "@/lib/researchSeal";
 import { notifyResearchReport } from "@/lib/telegram";
@@ -139,11 +141,19 @@ export async function POST(req: NextRequest) {
     if (body.expiry < now || body.expiry > now + 30 * 60) {
       return NextResponse.json({ error: "Invalid signature expiry" }, { status: 401 });
     }
+    const consumed = await consumeResearchNonce(body.researcher, body.nonce);
+    if (!consumed) {
+      return NextResponse.json(
+        { error: "Nonce already used — sign a new reveal request" },
+        { status: 401 }
+      );
+    }
     const message = buildClaimMessage({
       researchId: id.toString(),
       promptHash: record.promptHash,
       nonce: body.nonce,
       expiry: body.expiry,
+      purpose: "reveal",
     });
     try {
       const ok = await verifyMessage({
@@ -158,37 +168,45 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Signature verification failed" }, { status: 401 });
     }
 
-    // Prefer cache; else unseal client blob
+    // Prefer durable cache; then client sealed; then durable sealed store
     let report: string | null = null;
-    const cached = getCachedReport(id.toString());
+    const cached = await getCachedReport(id.toString());
     if (cached && cached.resultHash === body.resultHash.toLowerCase()) {
       report = cached.report;
-    } else if (body.sealedReport && typeof body.sealedReport === "string") {
-      try {
-        report = unsealReport(id.toString(), body.sealedReport);
-        // Integrity: hash must match sealed result
-        const { keccak256, stringToBytes } = await import("viem");
-        const h = keccak256(stringToBytes(report));
-        if (h.toLowerCase() !== body.resultHash.toLowerCase()) {
+    } else {
+      let sealed = body.sealedReport;
+      if (!sealed) {
+        const store = await getSealedReportStore(id.toString());
+        if (store && store.resultHash === body.resultHash.toLowerCase()) {
+          sealed = store.sealed;
+        }
+      }
+      if (sealed && typeof sealed === "string") {
+        try {
+          report = unsealReport(id.toString(), sealed);
+          const { keccak256, stringToBytes } = await import("viem");
+          const h = keccak256(stringToBytes(report));
+          if (h.toLowerCase() !== body.resultHash.toLowerCase()) {
+            return NextResponse.json(
+              { error: "Sealed report does not match resultHash" },
+              { status: 400 }
+            );
+          }
+        } catch {
           return NextResponse.json(
-            { error: "Sealed report does not match resultHash" },
+            { error: "Could not decrypt sealed report" },
             { status: 400 }
           );
         }
-      } catch {
+      } else {
         return NextResponse.json(
-          { error: "Could not decrypt sealed report" },
-          { status: 400 }
+          {
+            error:
+              "Report not found in durable store and no sealedReport provided. If you just paid, wait a moment and retry reveal — or use Claim free report while sealed blob is still in this browser.",
+          },
+          { status: 410 }
         );
       }
-    } else {
-      return NextResponse.json(
-        {
-          error:
-            "Report cache expired and no sealedReport provided. Re-run is blocked after settle — keep sealedReport from the research response.",
-        },
-        { status: 410 }
-      );
     }
 
     // After unlock: DM research report if Telegram linked (same bot as agent ticks)

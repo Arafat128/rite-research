@@ -363,7 +363,18 @@ function migrateWatch(w: OracastWatch): OracastWatch {
 }
 
 function newId(): string {
-  return `ow_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  // Decision: crypto UUID — not guessable timestamp+Math.random
+  try {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+      return `ow_${crypto.randomUUID().replace(/-/g, "")}`;
+    }
+  } catch {
+    /* */
+  }
+  // Node / serverless
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeCrypto = require("node:crypto") as typeof import("node:crypto");
+  return `ow_${nodeCrypto.randomBytes(16).toString("hex")}`;
 }
 
 /** RIT cost for one successful alert at this frequency. */
@@ -693,6 +704,8 @@ export type CreateWatchInput = {
   frequencyMin: number;
   depositRit: string;
   txHash: Hex;
+  /** Optional client-generated id for pay-then-recover flows */
+  watchId?: string;
 };
 
 function feeRecipient(): `0x${string}` {
@@ -804,6 +817,8 @@ export async function createWatch(
     );
   }
 
+  // Price BEFORE relying on payment for registration (client should also
+  // pre-validate; still re-resolve here). Deposit verify uses actual tx value.
   const quote = await resolvePrice({
     coinId: input.coinId,
     contractAddress: input.contractAddress,
@@ -813,16 +828,26 @@ export async function createWatch(
   const { valueWei } = await verifyDepositTx({
     txHash: input.txHash,
     owner,
-    minValueWei: depositWei < ORACAST_MIN_DEPOSIT_WEI
-      ? ORACAST_MIN_DEPOSIT_WEI
-      : depositWei,
+    minValueWei: ORACAST_MIN_DEPOSIT_WEI,
   });
+  if (valueWei < ORACAST_MIN_DEPOSIT_WEI) {
+    throw new Error(
+      `Deposit must be at least ${ORACAST_MIN_DEPOSIT_RIT} RIT`
+    );
+  }
 
   await markTxUsed(input.txHash);
 
+  // Prefer client-provided recovery id if valid UUID-shaped ow_* token
+  const recoveryId =
+    typeof input.watchId === "string" &&
+    /^ow_[a-f0-9-]{8,64}$/i.test(input.watchId)
+      ? input.watchId
+      : newId();
+
   const now = Date.now();
   const w: OracastWatch = {
-    id: newId(),
+    id: recoveryId,
     owner,
     coinId: input.coinId || quote.coinId,
     contractAddress: input.contractAddress || quote.contractAddress,
@@ -982,16 +1007,17 @@ export async function fundWatch(opts: {
   } catch {
     throw new Error("Invalid amount");
   }
-  if (depositWei < ORACAST_MIN_DEPOSIT_WEI) {
-    throw new Error(
-      `Top-up must be at least ${ORACAST_MIN_DEPOSIT_RIT} RIT`
-    );
-  }
+  // Credit actual on-chain value (not client-declared amount). Min enforced on-chain.
   const { valueWei } = await verifyDepositTx({
     txHash: opts.txHash,
     owner: opts.owner,
-    minValueWei: depositWei,
+    minValueWei: ORACAST_MIN_DEPOSIT_WEI,
   });
+  if (valueWei < ORACAST_MIN_DEPOSIT_WEI) {
+    throw new Error(
+      `Top-up must be at least ${ORACAST_MIN_DEPOSIT_RIT} RIT (tx sent ${valueWei.toString()} wei)`
+    );
+  }
   await markTxUsed(opts.txHash);
   w.depositWei = (BigInt(w.depositWei) + valueWei).toString();
   w.fundedTxs = [...w.fundedTxs, opts.txHash.toLowerCase()].slice(-20);

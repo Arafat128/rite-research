@@ -268,6 +268,20 @@ export const bountyPoolAbi = [
   },
   {
     type: "function",
+    name: "pendingPayouts",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "claimPayout",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [{ name: "amount", type: "uint256" }],
+  },
+  {
+    type: "function",
     name: "lastFinalizedAt",
     stateMutability: "view",
     inputs: [],

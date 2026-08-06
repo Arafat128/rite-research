@@ -51,6 +51,9 @@ type PaidCredit = {
   paymentTx?: string;
   settled: boolean;
   feePaid?: string;
+  /** Required to recover report after settle if server cache is cold */
+  sealedReport?: string;
+  resultHash?: string;
 };
 
 const STEPS = [
@@ -299,7 +302,11 @@ export function ResearchTab() {
     }
   }
 
-  async function signClaim(researchId: string, promptHash: string) {
+  async function signClaim(
+    researchId: string,
+    promptHash: string,
+    purpose: "claim" | "reveal" = "claim"
+  ) {
     const nonce =
       typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
@@ -310,6 +317,7 @@ export function ResearchTab() {
       promptHash,
       nonce,
       expiry,
+      purpose,
     });
     const signature = (await signMessageAsync({ message })) as Hex;
     return { signature, nonce, expiry };
@@ -390,7 +398,7 @@ export function ResearchTab() {
   }) {
     setStatus("Sealed on-chain — revealing report…");
     const promptHash = keccak256(stringToBytes(opts.prompt));
-    const sig = await signClaim(opts.researchId, promptHash);
+    const sig = await signClaim(opts.researchId, promptHash, "reveal");
     const res = await fetch("/api/research/reveal", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -428,7 +436,8 @@ export function ResearchTab() {
     researchId: string,
     resultHash: Hex,
     paidPrompt: string,
-    paymentTx?: string
+    paymentTx?: string,
+    sealedReport?: string
   ): Promise<Hex> {
     if (!address || !publicClient || !RESEARCH_CONTRACT) {
       throw new Error("Wallet not ready to seal research");
@@ -450,13 +459,15 @@ export function ResearchTab() {
       throw new Error("Seal transaction reverted");
     }
 
-    setMeta((m) => ({ ...m, settleTx: settleHash, resultHash }));
+    setMeta((m) => ({ ...m, settleTx: settleHash, resultHash, sealedReport }));
     saveLocalCredit(address, {
       researchId,
       prompt: paidPrompt,
       promptHash: keccak256(stringToBytes(paidPrompt)),
       paymentTx,
       settled: true,
+      sealedReport,
+      resultHash,
     });
     return settleHash;
   }
@@ -532,13 +543,16 @@ export function ResearchTab() {
         promptHash: h,
         paymentTx: data.paymentTx || credit.paymentTx,
         settled: false,
+        sealedReport: data.sealedReport,
+        resultHash: data.resultHash,
       });
 
       await settleRequired(
         data.researchId,
         data.resultHash as Hex,
         clean,
-        data.paymentTx || credit.paymentTx
+        data.paymentTx || credit.paymentTx,
+        data.sealedReport
       );
 
       const plaintext = await revealReport({
@@ -688,13 +702,16 @@ export function ResearchTab() {
         promptHash,
         paymentTx: hash,
         settled: false,
+        sealedReport: data.sealedReport,
+        resultHash: data.resultHash,
       });
 
       await settleRequired(
         data.researchId,
         data.resultHash as Hex,
         clean,
-        hash
+        hash,
+        data.sealedReport
       );
 
       const plaintext = await revealReport({

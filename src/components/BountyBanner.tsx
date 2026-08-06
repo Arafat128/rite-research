@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useAccount } from "wagmi";
+import { useAccount, useWalletClient } from "wagmi";
 import { formatEther, type Address, type Hex, parseAbiItem } from "viem";
 import {
   BOUNTY_CONTRACT,
   bountyPoolAbi,
   getRitualReadClient,
+  ritualChain,
   txUrl,
   addressUrl,
 } from "@/lib/ritual";
@@ -34,10 +35,14 @@ const winnerPaidEvent = parseAbiItem(
 
 export function BountyBanner() {
   const { address, isConnected } = useAccount();
+  const { data: walletClient } = useWalletClient();
   const toast = useToast();
 
   const [info, setInfo] = useState<WinnerInfo | null>(null);
   const [myPoints, setMyPoints] = useState<bigint>(BigInt(0));
+  /** Pull-payment credit awaiting claimPayout() */
+  const [pendingClaim, setPendingClaim] = useState<bigint>(BigInt(0));
+  const [claiming, setClaiming] = useState(false);
   const [payoutTx, setPayoutTx] = useState<Hex | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -91,7 +96,7 @@ export function BountyBanner() {
             sessionStorage.setItem(k, "1");
             toast.success(
               "You won the bounty!",
-              `${Number(formatEther(next.amount)).toFixed(4)} RIT · claim if pull-payout is enabled`
+              `${Number(formatEther(next.amount)).toFixed(4)} RIT credited — use Claim bounty to withdraw`
             );
           }
         } catch {
@@ -111,8 +116,20 @@ export function BountyBanner() {
         } catch {
           setMyPoints(BigInt(0));
         }
+        try {
+          const pending = (await client.readContract({
+            address: BOUNTY_CONTRACT,
+            abi: bountyPoolAbi,
+            functionName: "pendingPayouts",
+            args: [address],
+          })) as bigint;
+          setPendingClaim(pending);
+        } catch {
+          setPendingClaim(BigInt(0));
+        }
       } else {
         setMyPoints(BigInt(0));
+        setPendingClaim(BigInt(0));
       }
 
       if (
@@ -144,6 +161,42 @@ export function BountyBanner() {
       setLoading(false);
     }
   }, [address, toast]);
+
+  async function claimBounty() {
+    if (!address || !walletClient || !BOUNTY_CONTRACT) return;
+    if (pendingClaim <= BigInt(0)) return;
+    setClaiming(true);
+    try {
+      const hash = await walletClient.writeContract({
+        address: BOUNTY_CONTRACT,
+        abi: bountyPoolAbi,
+        functionName: "claimPayout",
+        chain: ritualChain,
+        account: address,
+      });
+      const client = getRitualReadClient();
+      const receipt = await client.waitForTransactionReceipt({
+        hash,
+        confirmations: 1,
+      });
+      if (receipt.status !== "success") {
+        throw new Error("Claim transaction reverted");
+      }
+      toast.success(
+        "Bounty claimed",
+        `${Number(formatEther(pendingClaim)).toFixed(4)} RIT sent to your wallet`
+      );
+      setPendingClaim(BigInt(0));
+      await load();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Claim failed";
+      if (!/reject|denied|user/i.test(msg)) {
+        toast.error("Claim failed", msg);
+      }
+    } finally {
+      setClaiming(false);
+    }
+  }
 
   useEffect(() => {
     void load();
@@ -190,6 +243,8 @@ export function BountyBanner() {
                 {info!.finalizedAt > BigInt(0)
                   ? new Date(Number(info!.finalizedAt) * 1000).toLocaleString()
                   : "—"}
+                {" · "}
+                Payout is pull-based (winner must claim)
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -211,10 +266,22 @@ export function BountyBanner() {
                   href={txUrl(payoutTx)}
                   target="_blank"
                   rel="noreferrer"
-                  className="rounded-full bg-[#c8ff4a] px-3 py-1.5 text-xs font-bold text-black hover:bg-[#d4ff6a]"
+                  className="rounded-full border border-white/20 bg-black/30 px-3 py-1.5 text-xs font-medium text-amber-100 hover:bg-black/50"
                 >
-                  Payout tx ↗
+                  Credit tx ↗
                 </a>
+              )}
+              {isConnected && pendingClaim > BigInt(0) && (
+                <button
+                  type="button"
+                  disabled={claiming || loading}
+                  onClick={() => void claimBounty()}
+                  className="rounded-full bg-[#c8ff4a] px-3 py-1.5 text-xs font-bold text-black hover:bg-[#d4ff6a] disabled:opacity-50"
+                >
+                  {claiming
+                    ? "Claiming…"
+                    : `Claim ${Number(formatEther(pendingClaim)).toFixed(4)} RIT`}
+                </button>
               )}
             </div>
           </div>

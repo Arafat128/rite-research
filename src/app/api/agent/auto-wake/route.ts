@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAddress } from "viem";
+import { isAddress, type Address, type Hex } from "viem";
 import {
   keeperAddress,
   keeperConfigured,
   runDueAgentTicks,
 } from "@/lib/agentKeeper";
+import { verifyAutoWakeSig } from "@/lib/ownerWakeAuth";
 import { clientIp, publicErrorMessage, rateLimit } from "@/lib/security";
 
 export const runtime = "nodejs";
@@ -15,18 +16,16 @@ export const maxDuration = 120;
  * Browser poke for auto-schedule (My Agents tab).
  *
  * Hardened vs open gas grief:
- * - Rate limited per IP
- * - Requires valid `owner` address (scoped ticks)
+ * - Rate limited per IP + per owner
+ * - Requires owner wallet signature (nonce + expiry)
  * - Caps scan size
  * - Only agents already due on-chain are ticked
  *
- * Unattended production wakes should use Bearer-auth `/api/agent/cron`
- * (GitHub Actions / QStash / cron-job.org), not this route.
+ * Unattended production wakes: Bearer-auth `/api/agent/cron` only.
  */
 async function handle(req: NextRequest) {
   try {
     const ip = clientIp(req);
-    // Slightly higher: AppShell + My Agents both poke; multi-agent owners need room
     const rl = rateLimit(`auto-wake:${ip}`, 14, 60_000);
     if (!rl.ok) {
       return NextResponse.json(
@@ -59,6 +58,9 @@ async function handle(req: NextRequest) {
     let agentId: string | undefined;
     let owner: string | undefined;
     let max = 12;
+    let signature: string | undefined;
+    let nonce: string | undefined;
+    let expiry: number | undefined;
 
     if (req.method === "POST") {
       try {
@@ -66,6 +68,9 @@ async function handle(req: NextRequest) {
           agentId?: string;
           owner?: string;
           max?: number;
+          signature?: string;
+          nonce?: string;
+          expiry?: number;
         };
         if (body.agentId && /^\d{1,12}$/.test(String(body.agentId))) {
           agentId = String(body.agentId);
@@ -74,6 +79,9 @@ async function handle(req: NextRequest) {
           owner = body.owner.toLowerCase();
         }
         if (body.max != null) max = Number(body.max);
+        signature = body.signature;
+        nonce = body.nonce;
+        expiry = body.expiry != null ? Number(body.expiry) : undefined;
       } catch {
         /* empty body ok */
       }
@@ -88,7 +96,6 @@ async function handle(req: NextRequest) {
     }
     if (q.get("max")) max = Number(q.get("max"));
 
-    // Require owner scope — prevents unauthenticated full-registry scans
     if (!owner) {
       return NextResponse.json(
         { error: "owner address required" },
@@ -96,8 +103,29 @@ async function handle(req: NextRequest) {
       );
     }
 
+    // Signature required for browser path (GET without sig is rejected)
+    const sigErr = await verifyAutoWakeSig({
+      owner: owner as Address,
+      signature: signature as Hex | undefined,
+      nonce,
+      expiry,
+    });
+    if (sigErr) {
+      return NextResponse.json({ error: sigErr, code: "WAKE_AUTH" }, { status: 401 });
+    }
+
+    const rlOwner = rateLimit(`auto-wake-owner:${owner}`, 20, 60_000);
+    if (!rlOwner.ok) {
+      return NextResponse.json(
+        { error: "Too many auto-wake requests for this owner" },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rlOwner.retryAfterSec) },
+        }
+      );
+    }
+
     const out = await runDueAgentTicks({
-      // Owner-scoped: process more of *their* agents (not just last 12 global ids)
       maxAgents: Math.min(30, Math.max(1, max || 20)),
       onlyAgentId: agentId,
       onlyOwner: owner,
@@ -108,7 +136,6 @@ async function handle(req: NextRequest) {
       autoWake: true,
       at: new Date().toLocaleString(),
       iso: new Date().toISOString(),
-      // Do not advertise keeper EOA unnecessarily
       keeperConfigured: Boolean(keeperAddress()),
       scanned: out.scanned,
       ticked: out.ticked,
@@ -124,8 +151,15 @@ async function handle(req: NextRequest) {
   }
 }
 
-export async function GET(req: NextRequest) {
-  return handle(req);
+/** GET alone is not enough — signature must be POSTed */
+export async function GET() {
+  return NextResponse.json(
+    {
+      error:
+        "POST with owner wallet signature required. Unattended wakes: /api/agent/cron with CRON_SECRET.",
+    },
+    { status: 405 }
+  );
 }
 
 export async function POST(req: NextRequest) {

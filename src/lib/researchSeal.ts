@@ -1,6 +1,6 @@
 /**
  * Encrypt research reports so the API never returns plaintext before settle.
- * Client holds sealed blob; /api/research/reveal decrypts only after on-chain seal.
+ * Sealed blobs + locks + nonces prefer durable KV (Upstash / file).
  */
 
 import {
@@ -9,6 +9,7 @@ import {
   createHash,
   randomBytes,
 } from "crypto";
+import { kvDel, kvGet, kvSet, kvSetNx } from "@/lib/durableKv";
 
 function sealKey(researchId: string): Buffer {
   const secret =
@@ -48,50 +49,152 @@ export function unsealReport(researchId: string, sealed: string): string {
   );
 }
 
-/** In-memory locks + short cache (per instance) */
-const locks = new Map<string, Promise<unknown>>();
-const reportCache = new Map<
+const memLocks = new Map<string, Promise<unknown>>();
+const memCache = new Map<
   string,
-  { report: string; resultHash: string; at: number }
+  { report: string; resultHash: string; sealed?: string; at: number }
 >();
 
-const CACHE_TTL_MS = 60 * 60 * 1000;
+const CACHE_TTL_SEC = 60 * 60 * 24 * 7; // 7 days durable
+const CACHE_TTL_MS = CACHE_TTL_SEC * 1000;
+const LOCK_TTL_SEC = 180;
 
 export async function withResearchLock<T>(
   researchId: string,
   fn: () => Promise<T>
 ): Promise<T> {
-  const existing = locks.get(researchId) as Promise<T> | undefined;
+  // Instance-local coalesce
+  const existing = memLocks.get(researchId) as Promise<T> | undefined;
   if (existing) return existing;
-  const p = fn().finally(() => {
-    if (locks.get(researchId) === p) locks.delete(researchId);
-  });
-  locks.set(researchId, p as Promise<unknown>);
+
+  const lockKey = `rite:rlock:${researchId}`;
+  const token = randomBytes(8).toString("hex");
+  let acquired = false;
+  for (let i = 0; i < 40; i++) {
+    acquired = await kvSetNx(lockKey, token, LOCK_TTL_SEC);
+    if (acquired) break;
+    await new Promise((r) => setTimeout(r, 250 + i * 50));
+  }
+  if (!acquired) {
+    // Peer may have finished — allow fn to hit durable cache; else fail closed
+    const cached = await getCachedReport(researchId);
+    if (!cached) {
+      throw new Error(
+        "Research busy for this id — retry claim in a few seconds (no second fee)"
+      );
+    }
+  }
+
+  // Hold promise so finally can drop memLocks entry (TDZ-safe)
+  let p!: Promise<T>;
+  p = (async () => {
+    try {
+      // fn is idempotent: first line should check getCachedReport
+      return await fn();
+    } finally {
+      if (acquired) {
+        const cur = await kvGet(lockKey);
+        if (cur === token) await kvDel(lockKey);
+      }
+      if (memLocks.get(researchId) === p) memLocks.delete(researchId);
+    }
+  })();
+  memLocks.set(researchId, p as Promise<unknown>);
   return p;
 }
 
-export function cacheReport(
+export async function cacheReport(
   researchId: string,
   resultHash: string,
-  report: string
+  report: string,
+  sealedReport?: string
 ) {
-  reportCache.set(researchId, {
+  const sealed = sealedReport || sealReport(researchId, report);
+  memCache.set(researchId, {
     report,
     resultHash: resultHash.toLowerCase(),
+    sealed,
     at: Date.now(),
   });
+  const payload = JSON.stringify({
+    report,
+    resultHash: resultHash.toLowerCase(),
+    sealed,
+    at: Date.now(),
+  });
+  await kvSet(`rite:report:${researchId}`, payload, CACHE_TTL_SEC);
+  await kvSet(
+    `rite:sealed:${researchId}`,
+    JSON.stringify({ sealed, resultHash: resultHash.toLowerCase() }),
+    CACHE_TTL_SEC
+  );
 }
 
-export function getCachedReport(
+export async function getCachedReport(
   researchId: string
-): { report: string; resultHash: string } | null {
-  const hit = reportCache.get(researchId);
-  if (!hit) return null;
-  if (Date.now() - hit.at > CACHE_TTL_MS) {
-    reportCache.delete(researchId);
+): Promise<{ report: string; resultHash: string; sealed?: string } | null> {
+  const hit = memCache.get(researchId);
+  if (hit && Date.now() - hit.at <= CACHE_TTL_MS) {
+    return {
+      report: hit.report,
+      resultHash: hit.resultHash,
+      sealed: hit.sealed,
+    };
+  }
+  const raw = await kvGet(`rite:report:${researchId}`);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as {
+      report: string;
+      resultHash: string;
+      sealed?: string;
+      at?: number;
+    };
+    if (!parsed.report || !parsed.resultHash) return null;
+    memCache.set(researchId, {
+      report: parsed.report,
+      resultHash: parsed.resultHash,
+      sealed: parsed.sealed,
+      at: parsed.at || Date.now(),
+    });
+    return {
+      report: parsed.report,
+      resultHash: parsed.resultHash,
+      sealed: parsed.sealed,
+    };
+  } catch {
     return null;
   }
-  return { report: hit.report, resultHash: hit.resultHash };
+}
+
+export async function getSealedReportStore(
+  researchId: string
+): Promise<{ sealed: string; resultHash: string } | null> {
+  const raw = await kvGet(`rite:sealed:${researchId}`);
+  if (raw) {
+    try {
+      const p = JSON.parse(raw) as { sealed: string; resultHash: string };
+      if (p.sealed && p.resultHash) return p;
+    } catch {
+      /* */
+    }
+  }
+  const full = await getCachedReport(researchId);
+  if (full?.sealed) {
+    return { sealed: full.sealed, resultHash: full.resultHash };
+  }
+  return null;
+}
+
+/** Consume claim/reveal nonce once (durable). Returns false if already used/invalid. */
+export async function consumeResearchNonce(
+  researcher: string,
+  nonce: string
+): Promise<boolean> {
+  if (!nonce || nonce.length < 8 || nonce.length > 128) return false;
+  const key = `rite:nonce:${researcher.toLowerCase()}:${nonce}`;
+  const ok = await kvSetNx(key, "1", 60 * 60); // 1h retention
+  return ok;
 }
 
 export { buildClaimMessage } from "@/lib/researchClaim";

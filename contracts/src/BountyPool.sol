@@ -3,12 +3,16 @@ pragma solidity ^0.8.24;
 
 /// @title BountyPool — auto bounty for Rite app users / agent makers
 /// @notice 50% of research + agent fees are credited with the payer as entrant.
-///         After INTERACTION_THRESHOLD (20) app/agent fee events, the round
-///         auto-finalizes: one random weighted winner takes the full pool.
+///         After INTERACTION_THRESHOLD app/agent fee events, the round
+///         auto-finalizes: one random weighted winner takes the available pool.
+/// @dev Pending pull-payouts are tracked so liabilities never exceed balance.
 contract BountyPool {
     // -------------------------------------------------------------------------
     // Config
     // -------------------------------------------------------------------------
+
+    /// @notice Hard cap on interactionThreshold (finalize gas bound)
+    uint256 public constant MAX_THRESHOLD = 100;
 
     address public owner;
     /// @notice Fee credits needed this round before auto-draw (research + agent)
@@ -42,6 +46,8 @@ contract BountyPool {
     uint256 public totalRoundsFinalized;
     /// @notice Pull-payment credits (winner claims; prevents push DoS)
     mapping(address => uint256) public pendingPayouts;
+    /// @notice Sum of all pendingPayouts — reserved liability, not drawable pool
+    uint256 public totalPendingPayouts;
     /// @dev Extra entropy mixed into lottery seed each credit
     uint256 private _entropy;
 
@@ -86,6 +92,7 @@ contract BountyPool {
     error TransferFailed();
     error BadThreshold();
     error NothingToClaim();
+    error Insolvency();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -95,7 +102,9 @@ contract BountyPool {
     /// @param _threshold interactions per round before auto-draw (0 → default 20)
     constructor(uint256 _threshold) {
         owner = msg.sender;
-        interactionThreshold = _threshold == 0 ? 20 : _threshold;
+        uint256 t = _threshold == 0 ? 20 : _threshold;
+        if (t == 0 || t > MAX_THRESHOLD) revert BadThreshold();
+        interactionThreshold = t;
         roundStartedAt = block.timestamp;
         emit OwnershipTransferred(address(0), msg.sender);
         emit ThresholdUpdated(0, interactionThreshold);
@@ -112,7 +121,7 @@ contract BountyPool {
     }
 
     function setInteractionThreshold(uint256 next) external onlyOwner {
-        if (next == 0) revert BadThreshold();
+        if (next == 0 || next > MAX_THRESHOLD) revert BadThreshold();
         emit ThresholdUpdated(interactionThreshold, next);
         interactionThreshold = next;
     }
@@ -172,6 +181,13 @@ contract BountyPool {
         return _finalizeIfReady(false);
     }
 
+    /// @dev Balance available for a new winner (excludes reserved pending claims).
+    function availablePool() public view returns (uint256) {
+        uint256 bal = address(this).balance;
+        if (bal <= totalPendingPayouts) return 0;
+        return bal - totalPendingPayouts;
+    }
+
     /// @dev isAuto=true no-ops when not ready; isAuto=false reverts for manual callers.
     function _finalizeIfReady(bool isAuto) internal returns (address winner, uint256 amount) {
         uint256 n = _entrants.length;
@@ -179,7 +195,8 @@ contract BountyPool {
             if (isAuto) return (address(0), 0);
             revert NoEntrants();
         }
-        amount = address(this).balance;
+        // CRITICAL: only credit unreserved funds — never re-credit pending winners
+        amount = availablePool();
         if (amount == 0) {
             if (isAuto) return (address(0), 0);
             revert EmptyPool();
@@ -190,6 +207,7 @@ contract BountyPool {
         }
 
         // Weighted lottery. Still chain-influenced without VRF — prefer commit-reveal/VRF for mainnet.
+        // Uses prevrandao + multi-credit entropy mix; not validator-manipulation-proof.
         uint256 seed = uint256(
             keccak256(
                 abi.encodePacked(
@@ -203,7 +221,8 @@ contract BountyPool {
                     n,
                     amount,
                     _entropy,
-                    msg.sender
+                    msg.sender,
+                    address(this)
                 )
             )
         );
@@ -225,8 +244,9 @@ contract BountyPool {
         uint256 interactions = interactionCount;
         _resetRound();
 
-        // Pull payment — avoids DoS if winner rejects ETH
+        // Pull payment — track liability so later rounds cannot re-credit this ETH
         pendingPayouts[winner] += amount;
+        totalPendingPayouts += amount;
 
         lastWinner = winner;
         lastPayout = amount;
@@ -246,10 +266,15 @@ contract BountyPool {
     function claimPayout() external returns (uint256 amount) {
         amount = pendingPayouts[msg.sender];
         if (amount == 0) revert NothingToClaim();
+        // CEI: zero liability before transfer
         pendingPayouts[msg.sender] = 0;
+        if (totalPendingPayouts < amount) revert Insolvency();
+        totalPendingPayouts -= amount;
+
         (bool ok,) = msg.sender.call{value: amount}("");
         if (!ok) {
             pendingPayouts[msg.sender] = amount;
+            totalPendingPayouts += amount;
             revert TransferFailed();
         }
         emit PayoutClaimed(msg.sender, amount);
@@ -273,8 +298,9 @@ contract BountyPool {
     // Views
     // -------------------------------------------------------------------------
 
+    /// @notice Unreserved pool (safe for next prize) — not raw contract balance
     function poolBalance() external view returns (uint256) {
-        return address(this).balance;
+        return availablePool();
     }
 
     function entrantCount() external view returns (uint256) {
@@ -298,7 +324,7 @@ contract BountyPool {
         return interactionCount >= interactionThreshold
             && _entrants.length > 0
             && totalPoints > 0
-            && address(this).balance > 0;
+            && availablePool() > 0;
     }
 
     /// @notice Snapshot for the top-of-app banner.
@@ -322,7 +348,7 @@ contract BountyPool {
         amount = lastPayout;
         finalizedAt = lastFinalizedAt;
         wonRoundId = lastRoundId;
-        currentPool = address(this).balance;
+        currentPool = availablePool();
         currentEntrants = _entrants.length;
         currentRoundId = roundId;
         interactions = interactionCount;
@@ -330,7 +356,7 @@ contract BountyPool {
         ready = interactionCount >= interactionThreshold
             && _entrants.length > 0
             && totalPoints > 0
-            && address(this).balance > 0;
+            && availablePool() > 0;
     }
 
     receive() external payable {}

@@ -50,6 +50,56 @@ type PublicWatch = {
 const LS_WATCH_PREFIX = "rite_oracast_watches_v2:";
 /** Local tombstones — prevent browser backup from resurrecting cancelled watches */
 const LS_DELETED_PREFIX = "rite_oracast_deleted_v1:";
+/** Deposit paid but createWatch not confirmed — avoid double-send on retry */
+const LS_PENDING_DEPOSIT = "rite_oracast_pending_deposit_v1:";
+
+type PendingDeposit = {
+  txHash: string;
+  owner: string;
+  coinId?: string;
+  contractAddress?: string;
+  frequencyMin: number;
+  depositRit: string;
+  at: number;
+};
+
+function loadPendingDeposit(owner: string): PendingDeposit | null {
+  try {
+    const raw = localStorage.getItem(
+      `${LS_PENDING_DEPOSIT}${owner.toLowerCase()}`
+    );
+    if (!raw) return null;
+    const p = JSON.parse(raw) as PendingDeposit;
+    if (!p?.txHash || p.owner?.toLowerCase() !== owner.toLowerCase()) return null;
+    // Drop after 24h
+    if (Date.now() - (p.at || 0) > 24 * 60 * 60 * 1000) {
+      localStorage.removeItem(`${LS_PENDING_DEPOSIT}${owner.toLowerCase()}`);
+      return null;
+    }
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+function savePendingDeposit(p: PendingDeposit) {
+  try {
+    localStorage.setItem(
+      `${LS_PENDING_DEPOSIT}${p.owner.toLowerCase()}`,
+      JSON.stringify(p)
+    );
+  } catch {
+    /* */
+  }
+}
+
+function clearPendingDeposit(owner: string) {
+  try {
+    localStorage.removeItem(`${LS_PENDING_DEPOSIT}${owner.toLowerCase()}`);
+  } catch {
+    /* */
+  }
+}
 
 function loadLocalWatches(owner: string): PublicWatch[] {
   try {
@@ -366,20 +416,62 @@ export function OracastMarketTab() {
         );
       }
 
-      setMsg("Confirm deposit in wallet…");
-      const hash = await walletClient.sendTransaction({
-        chain: ritualChain,
-        account: address,
-        to: depositTo as `0x${string}`,
-        value,
-      });
-      setMsg(`Deposit sent ${hash.slice(0, 12)}… waiting for confirmation`);
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash,
-        timeout: 120_000,
-      });
-      if (receipt.status !== "success") {
-        throw new Error("Deposit transaction failed");
+      // Prefer reusing an unregistered deposit instead of sending RIT again
+      let hash: Hex;
+      const pending = loadPendingDeposit(address);
+      if (pending?.txHash) {
+        setMsg(
+          `Recovering prior deposit ${pending.txHash.slice(0, 12)}… (no new payment)`
+        );
+        hash = pending.txHash as Hex;
+      } else {
+        // Preflight price so we fail before wallet spend when token is unknown
+        setMsg("Checking price…");
+        {
+          const q =
+            mode === "pick"
+              ? `coinId=${encodeURIComponent(coinId)}`
+              : `contract=${encodeURIComponent(contract.trim())}`;
+          const pre = await fetch(`/api/oracast/price?${q}`, {
+            cache: "no-store",
+          });
+          const preData = await pre.json();
+          if (!pre.ok) {
+            throw new Error(preData.error || "Could not resolve token price");
+          }
+          setPreview({
+            price: preData.price,
+            symbol: preData.symbol,
+            name: preData.name,
+            source: preData.source,
+            priceLabel: preData.priceLabel,
+          });
+        }
+
+        setMsg("Confirm deposit in wallet…");
+        hash = await walletClient.sendTransaction({
+          chain: ritualChain,
+          account: address,
+          to: depositTo as `0x${string}`,
+          value,
+        });
+        setMsg(`Deposit sent ${hash.slice(0, 12)}… waiting for confirmation`);
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: 120_000,
+        });
+        if (receipt.status !== "success") {
+          throw new Error("Deposit transaction failed");
+        }
+        savePendingDeposit({
+          txHash: hash,
+          owner: address,
+          coinId: mode === "pick" ? coinId : undefined,
+          contractAddress: mode === "contract" ? contract.trim() : undefined,
+          frequencyMin,
+          depositRit: depositRit || String(ORACAST_MIN_DEPOSIT_RIT),
+          at: Date.now(),
+        });
       }
 
       setMsg("Registering Oracast watch…");
@@ -393,12 +485,13 @@ export function OracastMarketTab() {
           contractAddress: mode === "contract" ? contract.trim() : undefined,
           frequencyMin,
           depositRit,
-          txHash: hash as Hex,
+          txHash: hash,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "create failed");
 
+      clearPendingDeposit(address);
       setMsg(
         `Watching ${data.watch.symbol} · ~${data.watch.alertsRemaining ?? "?"} alerts · every ${frequencyMin}m`
       );
@@ -429,8 +522,12 @@ export function OracastMarketTab() {
       });
       rememberErrorReport(report);
       setErrorReport(report);
-      setErr(report.userMessage);
-      toast.error("Oracast watch failed", report.userMessage);
+      const pendingLeft = address ? loadPendingDeposit(address) : null;
+      const hint = pendingLeft
+        ? ` Deposit ${pendingLeft.txHash.slice(0, 12)}… is saved — click Start again to recover without paying twice.`
+        : "";
+      setErr(report.userMessage + hint);
+      toast.error("Oracast watch failed", report.userMessage + hint);
     } finally {
       setBusy(false);
     }
@@ -489,13 +586,25 @@ export function OracastMarketTab() {
     try {
       await ensureWallet();
       const value = parseEther(depositRit || String(ORACAST_MIN_DEPOSIT_RIT));
+      // Client gate before wallet send — server also rejects below min
+      if (value < parseEther(String(ORACAST_MIN_DEPOSIT_RIT))) {
+        throw new Error(
+          `Top-up must be at least ${ORACAST_MIN_DEPOSIT_RIT} RIT`
+        );
+      }
       const hash = await walletClient.sendTransaction({
         chain: ritualChain,
         account: address,
         to: depositTo as `0x${string}`,
         value,
       });
-      await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: 120_000,
+      });
+      if (receipt.status !== "success") {
+        throw new Error("Top-up transaction reverted");
+      }
       const res = await fetch("/api/oracast/watch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
