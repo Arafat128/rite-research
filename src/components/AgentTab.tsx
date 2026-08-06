@@ -707,10 +707,10 @@ export function AgentTab({
     const scheduleNext = (ms: number) => {
       if (cancelled) return;
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => void poke("poll"), Math.max(2_500, ms));
+      timer = setTimeout(() => void poke(), Math.max(2_500, ms));
     };
 
-    const poke = async (_reason: string) => {
+    const poke = async () => {
       if (cancelled) return;
       if (inFlight || ticking || writeBusy) {
         pendingPoke = true;
@@ -1024,9 +1024,9 @@ export function AgentTab({
       }
     };
 
-    void poke("start");
+    void poke();
     const onVis = () => {
-      if (document.visibilityState === "visible") void poke("focus");
+      if (document.visibilityState === "visible") void poke();
     };
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("focus", onVis);
