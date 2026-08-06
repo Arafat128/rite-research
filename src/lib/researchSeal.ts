@@ -86,8 +86,8 @@ export async function withResearchLock<T>(
   }
 
   // Hold promise so finally can drop memLocks entry (TDZ-safe)
-  let p!: Promise<T>;
-  p = (async () => {
+  const box: { p?: Promise<T> } = {};
+  box.p = (async () => {
     try {
       // fn is idempotent: first line should check getCachedReport
       return await fn();
@@ -96,11 +96,11 @@ export async function withResearchLock<T>(
         const cur = await kvGet(lockKey);
         if (cur === token) await kvDel(lockKey);
       }
-      if (memLocks.get(researchId) === p) memLocks.delete(researchId);
+      if (memLocks.get(researchId) === box.p) memLocks.delete(researchId);
     }
   })();
-  memLocks.set(researchId, p as Promise<unknown>);
-  return p;
+  memLocks.set(researchId, box.p as Promise<unknown>);
+  return box.p;
 }
 
 export async function cacheReport(

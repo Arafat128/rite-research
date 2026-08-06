@@ -1001,9 +1001,9 @@ export async function fundWatch(opts: {
   if (w.owner.toLowerCase() !== opts.owner.toLowerCase()) {
     throw new Error("Not your watch");
   }
-  let depositWei: bigint;
+  // Validate client amount format only; credit uses on-chain tx value.
   try {
-    depositWei = parseEther(String(opts.depositRit || "0"));
+    parseEther(String(opts.depositRit || "0"));
   } catch {
     throw new Error("Invalid amount");
   }
