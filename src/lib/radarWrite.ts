@@ -264,6 +264,13 @@ export function decodeRadarRevert(
     if (/user rejected|denied|rejected the request/i.test(raw)) {
       return "Transaction rejected in wallet.";
     }
+    if (/nonce too low|already known|replacement transaction underpriced/i.test(raw)) {
+      return (
+        "Wallet nonce out of sync with Ritual (a previous tx already used this nonce). " +
+        "Wait 2–3s and retry. If it keeps failing: MetaMask → Settings → Advanced → " +
+        "Clear activity tab data, then reconnect and try again."
+      );
+    }
     if (
       /transaction creation failed|opcodenotfound/i.test(raw) &&
       /estimate|gas|rpc/i.test(raw)

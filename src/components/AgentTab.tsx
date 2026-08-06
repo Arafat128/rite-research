@@ -1127,6 +1127,7 @@ export function AgentTab({
   /**
    * Write to Radar with simulate + explicit legacy gasPrice.
    * Fixes MetaMask "gas unavailable" on Ritual for withdraw/kill refunds.
+   * Retries once on "nonce too low" (common after rapid status / deploy / wake).
    */
   async function radarWrite(opts: {
     functionName:
@@ -1145,24 +1146,64 @@ export function AgentTab({
   }) {
     if (!address) throw new Error("Wallet not ready");
     if (!RADAR_CONTRACT) throw new Error("Radar contract not configured");
-    const fees = await prepareRadarWrite({
-      account: address,
-      functionName: opts.functionName,
-      args: opts.args,
-      value: opts.value,
-      gasFloor: opts.gasFloor,
-    });
-    assertWalletCanPayGas(walletBal?.value, fees, opts.value ?? BigInt(0));
-    return writeContractAsync({
-      address: RADAR_CONTRACT,
-      abi: radarAgentAbi,
-      functionName: opts.functionName,
-      args: (opts.args ?? []) as never,
-      chainId: ritualChain.id,
-      gas: fees.gas,
-      gasPrice: fees.gasPrice,
-      ...(opts.value != null ? { value: opts.value } : {}),
-    } as never);
+
+    const sendOnce = async (usePendingNonce: boolean) => {
+      const fees = await prepareRadarWrite({
+        account: address,
+        functionName: opts.functionName,
+        args: opts.args,
+        value: opts.value,
+        gasFloor: opts.gasFloor,
+      });
+      assertWalletCanPayGas(walletBal?.value, fees, opts.value ?? BigInt(0));
+
+      // Fresh nonce from chain (pending) so MetaMask does not reuse a mined nonce
+      let nonce: number | undefined;
+      if (usePendingNonce) {
+        try {
+          const n = await getRitualReadClient(true).getTransactionCount({
+            address,
+            blockTag: "pending",
+          });
+          nonce = Number(n);
+        } catch {
+          nonce = undefined;
+        }
+      }
+
+      return writeContractAsync({
+        address: RADAR_CONTRACT,
+        abi: radarAgentAbi,
+        functionName: opts.functionName,
+        args: (opts.args ?? []) as never,
+        chainId: ritualChain.id,
+        gas: fees.gas,
+        gasPrice: fees.gasPrice,
+        ...(nonce != null && Number.isFinite(nonce) ? { nonce } : {}),
+        ...(opts.value != null ? { value: opts.value } : {}),
+      } as never);
+    };
+
+    try {
+      // Prefer pending nonce on first try (avoids most "nonce too low" races)
+      return await sendOnce(true);
+    } catch (e1) {
+      const blob = decodeRadarRevert(e1, opts.functionName);
+      const isNonce =
+        /nonce too low|already known|replacement transaction underpriced/i.test(
+          `${blob} ${e1 instanceof Error ? e1.message : String(e1)}`
+        );
+      if (!isNonce) throw e1;
+
+      // Brief wait for MetaMask / RPC to catch up, then retry with fresh pending nonce
+      await new Promise((r) => setTimeout(r, 1_800));
+      try {
+        return await sendOnce(true);
+      } catch (e2) {
+        // Surface the friendly nonce message from decoder
+        throw new Error(decodeRadarRevert(e2, opts.functionName));
+      }
+    }
   }
 
   async function createAgent() {
@@ -1585,15 +1626,33 @@ export function AgentTab({
       setErr("");
       await ensureWallet();
       if (agent?.status === 4) throw new Error("Agent is dead");
+      // Skip wallet prompt if already in the requested state (avoids nonce spam)
+      if (active && agent?.status === 1) {
+        setMsg("Already LIVE");
+        toast.success("Already LIVE");
+        return;
+      }
+      if (!active && agent?.status === 2) {
+        setMsg("Already paused");
+        toast.success("Already paused");
+        return;
+      }
       setMsg(active ? "Activating…" : "Pausing…");
       const hash = await radarWrite({
         functionName: active ? "setActive" : "setPaused",
         args: [selectedId],
       });
-      await waitTx(hash);
+      const receipt = await waitTx(hash);
+      if (receipt.status !== "success") {
+        throw new Error("Status transaction reverted");
+      }
+      // Optimistic local update so UI does not wait on flaky re-fetch
+      if (agent) {
+        setAgent({ ...agent, status: active ? 1 : 2 });
+      }
       setMsg(active ? "Agent LIVE" : "Agent Paused");
       toast.success(active ? "Agent is LIVE" : "Agent paused");
-      await refresh();
+      await refresh({ soft: true });
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.status", "Status update failed");
