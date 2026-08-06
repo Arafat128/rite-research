@@ -5,36 +5,46 @@ import { sustainUnattendedCoverage } from "@/lib/unattendedKeeper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+/** Hobby max 60s — chain sleep is ≤55s so pass + HTTP rearm must fit. */
+export const maxDuration = 60;
 
 /**
  * Arm closed-tab keeper chain (and optional immediate kick).
- * Called after Activate / Deploy so ticks continue without the browser.
+ * Called after Activate / Deploy, and by the keeper self-chain HTTP rearm.
  *
- * Body: { owner?: string, agentId?: string, kick?: boolean }
+ * Body: { owner?: string, agentId?: string, kick?: boolean, force?: boolean }
  */
 export async function POST(req: NextRequest) {
   try {
     const ip = clientIp(req);
-    const rl = rateLimit(`arm-unattended:${ip}`, 20, 60_000);
-    if (!rl.ok) {
-      return NextResponse.json(
-        { error: "Too many arm requests" },
-        { status: 429 }
-      );
+    const isChain =
+      req.headers.get("x-rite-chain") === "1" ||
+      req.nextUrl.searchParams.get("chain") === "1";
+
+    // Internal chain rearm must not die on IP rate limits (shared egress)
+    if (!isChain) {
+      const rl = rateLimit(`arm-unattended:${ip}`, 30, 60_000);
+      if (!rl.ok) {
+        return NextResponse.json(
+          { error: "Too many arm requests" },
+          { status: 429 }
+        );
+      }
     }
 
     let owner: string | undefined;
     let agentId: string | undefined;
-    // Default false: immediate kick raced browser auto-wake and double-sealed
-    // agents when on-chain TooEarly is missing (Radar 0x50a3).
+    // Default false: immediate kick raced browser auto-wake (agent #68).
     let kick = false;
+    // Always force a fresh chain from this endpoint (Activate + HTTP rearm).
+    let force = true;
 
     try {
       const body = (await req.json()) as {
         owner?: string;
         agentId?: string;
         kick?: boolean;
+        force?: boolean;
       };
       if (body.owner && isAddress(body.owner)) {
         owner = body.owner.toLowerCase();
@@ -43,19 +53,24 @@ export async function POST(req: NextRequest) {
         agentId = String(body.agentId);
       }
       if (body.kick === true) kick = true;
+      if (body.force === false) force = false;
     } catch {
       /* empty */
     }
 
     const out = await sustainUnattendedCoverage({
       kickNow: kick,
+      forceArm: force,
       onlyOwner: owner,
       onlyAgentId: agentId,
+      // Slightly under 1m so due windows are hit; fits Hobby 60s with margin
+      delayMs: isChain ? 48_000 : 50_000,
     });
 
     return NextResponse.json({
       ok: true,
       at: new Date().toISOString(),
+      chain: isChain,
       ...out,
       kick: out.kick
         ? {

@@ -1,10 +1,10 @@
 /**
  * Keep Radar agents + Oracast ticking when the browser tab is closed.
  *
- * Impactful design:
- * - Do NOT rely on HTTP self-fetch to /api/agent/cron (breaks on wrong APP_URL,
- *   protection bypass, or cold isolation).
- * - Run keeper work IN-PROCESS after delay via waitUntil.
+ * Design (Hobby-safe):
+ * - Do NOT rely on infinite nested waitUntil (dies after ~60s maxDuration).
+ * - One waitUntil: sleep → keeper pass → HTTP POST arm-unattended to start a
+ *   *new* invocation for the next loop (survives freeze / tab close).
  * - GitHub Action every 5m as external heartbeat (cancel-in-progress: false).
  * - Optional QStash true 1m if QSTASH_TOKEN is set.
  */
@@ -19,6 +19,9 @@ import { kvSetNx, kvGet, kvSet, kvDel } from "@/lib/durableKv";
 
 const CHAIN_LOCK = "rite:keeper:chain:v2";
 const QSTASH_ARMED = "rite:keeper:qstash:armed:v1";
+
+/** ~1m agents: poke a bit under a minute so due windows aren't missed. */
+const DEFAULT_CHAIN_DELAY_MS = 50_000;
 
 export function appPublicBaseUrl(): string | null {
   const explicit =
@@ -41,6 +44,14 @@ export function appPublicBaseUrl(): string | null {
 
 function cronSecret(): string | null {
   return process.env.CRON_SECRET?.trim() || null;
+}
+
+function protectionBypass(): string | null {
+  return (
+    process.env.VERCEL_AUTOMATION_BYPASS_SECRET?.trim() ||
+    process.env.VERCEL_PROTECTION_BYPASS?.trim() ||
+    null
+  );
 }
 
 export type KeeperPassResult = {
@@ -101,7 +112,58 @@ export async function runKeeperPassInProcess(opts?: {
 }
 
 /**
- * Schedule an in-process keeper pass after delayMs.
+ * Continue the chain in a *new* serverless invocation.
+ * Nested waitUntil alone dies when the parent function hits maxDuration (Hobby ~60s).
+ */
+async function httpRearmChain(): Promise<{ ok: boolean; status?: number; reason: string }> {
+  const base = appPublicBaseUrl();
+  if (!base) return { ok: false, reason: "no_app_url" };
+
+  const bypass = protectionBypass();
+  const secret = cronSecret();
+  const url = new URL(`${base}/api/agent/arm-unattended`);
+  if (bypass) {
+    url.searchParams.set("x-vercel-protection-bypass", bypass);
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-rite-chain": "1",
+    "User-Agent": "rite-unattended-chain/1.0",
+  };
+  if (secret) headers.Authorization = `Bearer ${secret}`;
+  if (bypass) headers["x-vercel-protection-bypass"] = bypass;
+
+  try {
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ kick: false, force: true }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    });
+    const text = await res.text().catch(() => "");
+    console.info(
+      "[unattendedKeeper] http rearm",
+      res.status,
+      text.slice(0, 120)
+    );
+    return {
+      ok: res.ok,
+      status: res.status,
+      reason: res.ok ? "http_rearm" : `http_${res.status}`,
+    };
+  } catch (e) {
+    console.warn("[unattendedKeeper] http rearm failed", e);
+    return {
+      ok: false,
+      reason: e instanceof Error ? e.message.slice(0, 80) : "http_error",
+    };
+  }
+}
+
+/**
+ * Schedule an in-process keeper pass after delayMs, then HTTP-rearm.
  * Survives tab close when started via waitUntil on a completed request.
  */
 export async function armNextKeeperPoke(opts?: {
@@ -109,17 +171,17 @@ export async function armNextKeeperPoke(opts?: {
   force?: boolean;
 }): Promise<{ armed: boolean; reason: string }> {
   const delayMs = Math.min(
-    90_000,
-    Math.max(15_000, opts?.delayMs ?? 50_000)
+    55_000,
+    Math.max(25_000, opts?.delayMs ?? DEFAULT_CHAIN_DELAY_MS)
   );
 
   if (!opts?.force) {
-    const got = await kvSetNx(CHAIN_LOCK, String(Date.now()), 65);
+    const got = await kvSetNx(CHAIN_LOCK, String(Date.now()), 70);
     if (!got) {
       return { armed: false, reason: "chain_already_armed" };
     }
   } else {
-    await kvSet(CHAIN_LOCK, String(Date.now()), 65);
+    await kvSet(CHAIN_LOCK, String(Date.now()), 70);
   }
 
   const run = async () => {
@@ -133,22 +195,21 @@ export async function armNextKeeperPoke(opts?: {
         out.oracastNotified,
         out.error || "ok"
       );
-      try {
-        await kvDel(CHAIN_LOCK);
-      } catch {
-        /* */
-      }
-      // Always re-arm so 1m agents keep firing with tab closed
-      void armNextKeeperPoke({ delayMs: 50_000 }).catch(() => undefined);
     } catch (e) {
       console.warn("[unattendedKeeper] chain error", e);
+    } finally {
       try {
         await kvDel(CHAIN_LOCK);
       } catch {
         /* */
       }
-      // Retry arm after failure (shorter backoff)
-      void armNextKeeperPoke({ delayMs: 30_000, force: true }).catch(
+    }
+
+    // New invocation continues the chain (do not nest waitUntil forever)
+    const rearm = await httpRearmChain();
+    if (!rearm.ok) {
+      // Last-resort nested arm — may only live one more cycle on Hobby
+      void armNextKeeperPoke({ delayMs: 40_000, force: true }).catch(
         () => undefined
       );
     }
@@ -215,11 +276,14 @@ export async function ensureQStashMinuteSchedule(): Promise<{
 
 /**
  * Arm closed-tab chain. Optionally run a pass immediately (e.g. after Activate).
+ * forceArm: always schedule a fresh waitUntil (Activate / HTTP rearm / cron).
  */
 export async function sustainUnattendedCoverage(opts?: {
   kickNow?: boolean;
+  forceArm?: boolean;
   onlyOwner?: string;
   onlyAgentId?: string;
+  delayMs?: number;
 }): Promise<{
   armed: { armed: boolean; reason: string };
   kick?: KeeperPassResult;
@@ -249,10 +313,12 @@ export async function sustainUnattendedCoverage(opts?: {
     );
   }
 
-  // Force re-arm so Activate always starts a fresh chain
+  // forceArm (Activate / HTTP rearm / cron) always starts a fresh waitUntil
+  const force = opts?.forceArm === true || opts?.kickNow === true;
+
   const armed = await armNextKeeperPoke({
-    delayMs: 50_000,
-    force: Boolean(opts?.kickNow),
+    delayMs: opts?.delayMs ?? DEFAULT_CHAIN_DELAY_MS,
+    force,
   });
 
   return { armed, kick, qstash };

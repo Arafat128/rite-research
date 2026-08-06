@@ -3,24 +3,26 @@
 # Secrets: APP_URL=https://rite-woad.vercel.app , CRON_SECRET
 # Optional: VERCEL_AUTOMATION_BYPASS_SECRET
 #
-# Server also self-chains ~50s after each arm/activate for denser coverage.
+# Server also HTTP self-chains ~50s after each arm for denser coverage.
 
 name: Agent keeper (unattended)
 
 on:
   schedule:
+    # GH schedules can drift; 5m is the practical free-tier cadence
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
   group: agent-keeper
+  # Never cancel — long ticks must finish; concurrent pokes are ok (server locks)
   cancel-in-progress: false
 
 jobs:
   wake:
     name: Keeper poke
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
       - name: Check secrets
         env:
@@ -54,7 +56,7 @@ jobs:
             -X POST \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             -H "Content-Type: application/json" \
-            -H "User-Agent: rite-agent-keeper/4.0" \
+            -H "User-Agent: rite-agent-keeper/5.0" \
             -d '{}' \
             "$url" || echo "000")
 
@@ -63,6 +65,16 @@ jobs:
 
           if [ "$code" != "200" ]; then
             echo "::error::Keeper poke failed HTTP $code"
+            # Also try arm-unattended so chain restarts even if cron auth drifted
+            arm_code=$(curl -sS -o /tmp/arm.json -w "%{http_code}" \
+              --max-time 30 \
+              -X POST \
+              -H "Content-Type: application/json" \
+              -H "x-rite-chain: 1" \
+              -d '{"force":true,"kick":false}' \
+              "${BASE}/api/agent/arm-unattended" || echo "000")
+            echo "arm-unattended HTTP $arm_code"
+            cat /tmp/arm.json 2>/dev/null; echo
             exit 1
           fi
 
@@ -77,6 +89,6 @@ jobs:
                   print("OK", r.get("agentId"), r.get("telegram"), str(r.get("txHash") or "")[:16])
               elif r.get("error"):
                   print("ERR", r.get("agentId"), str(r.get("error"))[:100])
-              elif r.get("skipped") in ("not_active","insufficient_balance"):
+              elif r.get("skipped") in ("not_active","insufficient_balance","tick_in_flight_or_cooldown"):
                   print("NEED", r.get("agentId"), r.get("skipped"))
           PY

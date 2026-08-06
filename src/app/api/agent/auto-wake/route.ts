@@ -120,8 +120,12 @@ async function handle(req: NextRequest) {
       );
     }
 
-    // Arm closed-tab chain (in-process waitUntil — no HTTP self-call)
-    void sustainUnattendedCoverage({ kickNow: false }).catch(() => undefined);
+    // After a seal, force-arm so closed-tab chain continues even if user leaves.
+    // Idle polls only arm if no chain is already scheduled.
+    void sustainUnattendedCoverage({
+      kickNow: false,
+      forceArm: out.ticked > 0,
+    }).catch(() => undefined);
 
     return NextResponse.json({
       ok: true,
