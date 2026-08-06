@@ -266,6 +266,7 @@ export function AgentTab({
   const [ticking, setTicking] = useState(false);
 
   // deploy form
+  // Default Persistent — Sovereign dies after 3 ticks (bad for 1m closed-tab agents)
   const [agentKind, setAgentKind] = useState<AgentKindId>(AGENT_KIND.Persistent);
   const [name, setName] = useState("Data Radar");
   const [dataKind, setDataKind] = useState<DataKindId>("fear_greed");
@@ -2437,25 +2438,27 @@ export function AgentTab({
                       Auto-wake
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      Schedule was set at deploy (
+                      Schedule set at deploy (
                       <b className="text-[#c8ff4a]">
                         {formatInterval(agent.wakeIntervalBlocks)}
                       </b>
-                      ). While any Rite tab is open with your wallet connected,
-                      due agents tick automatically — no signature needed.{" "}
-                      <b className="text-white/60">Persistent</b> for ongoing
-                      runs; Sovereign stops after {SOVEREIGN_MAX_RUNS} ticks.
-                      Tab closed: keep GitHub “Agent keeper” or QStash cron.
+                      ). Auto-ticks while Rite is open; after you leave, the
+                      server self-chains + GitHub keeper continue unattended.
+                      Use <b className="text-white/70">Persistent</b> for 1m
+                      Telegram agents (Sovereign dies after{" "}
+                      {SOVEREIGN_MAX_RUNS} ticks).
                     </p>
-                    {agent.kind === AGENT_KIND.Sovereign &&
-                      agent.status === 1 && (
-                        <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
-                          <b>Sovereign</b> · {agent.runCount.toString()}/
-                          {SOVEREIGN_MAX_RUNS} ticks. After{" "}
-                          {SOVEREIGN_MAX_RUNS} seals it finishes. Deploy{" "}
-                          <b>Persistent</b> for ongoing auto-wake.
-                        </p>
-                      )}
+                    {agent.kind === AGENT_KIND.Sovereign && (
+                      <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
+                        <b>Sovereign</b> · {agent.runCount.toString()}/
+                        {SOVEREIGN_MAX_RUNS} ticks
+                        {agent.status === 4
+                          ? " — finished (Dead). Deploy a Persistent agent for ongoing 1m DMs."
+                          : agent.status === 1
+                            ? `. Stops forever after ${SOVEREIGN_MAX_RUNS} seals — switch to Persistent for continuous Telegram.`
+                            : "."}
+                      </p>
+                    )}
                     {autoWakeNote && mode === "manage" && (
                       <p
                         className={`mb-2 rounded-lg border px-2 py-1.5 text-[11px] ${

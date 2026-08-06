@@ -6,6 +6,7 @@ import {
   runDueAgentTicks,
 } from "@/lib/agentKeeper";
 import { clientIp, publicErrorMessage, rateLimit } from "@/lib/security";
+import { sustainUnattendedCoverage } from "@/lib/unattendedKeeper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -108,6 +109,9 @@ async function handle(req: NextRequest) {
       onlyAgentId: agentId,
       onlyOwner: owner,
     });
+
+    // Arm closed-tab follow-up so leaving the site does not stop ticks for ~1m+
+    void sustainUnattendedCoverage().catch(() => undefined);
 
     return NextResponse.json({
       ok: true,

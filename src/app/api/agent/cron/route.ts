@@ -8,6 +8,7 @@ import {
 import { tickOracastWatches } from "@/lib/oracastWatch";
 import { tickOfficialAgentAlerts } from "@/lib/officialAgentRegistry";
 import { publicErrorMessage } from "@/lib/security";
+import { sustainUnattendedCoverage } from "@/lib/unattendedKeeper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,12 +82,14 @@ async function handle(req: NextRequest) {
         keeper: addr,
         keeperOnChain: onChain,
         oracast: oracastStatus,
+        closedTab:
+          "Unattended: GitHub Agent keeper (*/10) + server self-chain after each poke. Set APP_URL=https://rite-woad.vercel.app. Optional QSTASH_TOKEN for true 1m.",
         hint:
           onChain === false
             ? "Call setKeeper(keeperAddress, true) as Radar admin or auto runTick will NotAuthorized"
             : onChain === true
               ? "Keeper is allowlisted on Radar"
-              : "Could not read isKeeper — check Radar ABI/RPC",
+              : "Could not read isKeeper — ticks may still work if setKeeper was already called",
       });
     }
 
@@ -124,6 +127,9 @@ async function handle(req: NextRequest) {
     }
 
     const [oracast, official] = await Promise.all([oracastP, officialP]);
+
+    // Keep closed-tab coverage warm (self-chain + optional QStash)
+    void sustainUnattendedCoverage().catch(() => undefined);
 
     return NextResponse.json({
       ok: true,
