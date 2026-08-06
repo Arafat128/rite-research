@@ -1686,7 +1686,9 @@ export function AgentTab({
       }
       setMsg(active ? "Agent LIVE" : "Agent Paused");
       toast.success(active ? "Agent is LIVE" : "Agent paused");
-      // Critical for closed-tab: arm unattended keeper + optional immediate tick
+      // Arm closed-tab chain only — do NOT kickNow.
+      // Kick raced auto-wake on Radar without TooEarly (agent #68 run1+run2 in 1s).
+      // My Agents auto-wake seals the first tick; chain handles tab-closed.
       if (active && address) {
         void fetch("/api/agent/arm-unattended", {
           method: "POST",
@@ -1694,7 +1696,7 @@ export function AgentTab({
           body: JSON.stringify({
             owner: address,
             agentId: selectedId.toString(),
-            kick: true,
+            kick: false,
           }),
           cache: "no-store",
         }).catch(() => undefined);

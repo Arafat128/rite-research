@@ -26,7 +26,9 @@ export async function POST(req: NextRequest) {
 
     let owner: string | undefined;
     let agentId: string | undefined;
-    let kick = true;
+    // Default false: immediate kick raced browser auto-wake and double-sealed
+    // agents when on-chain TooEarly is missing (Radar 0x50a3).
+    let kick = false;
 
     try {
       const body = (await req.json()) as {
@@ -40,7 +42,7 @@ export async function POST(req: NextRequest) {
       if (body.agentId && /^\d{1,12}$/.test(String(body.agentId))) {
         agentId = String(body.agentId);
       }
-      if (body.kick === false) kick = false;
+      if (body.kick === true) kick = true;
     } catch {
       /* empty */
     }

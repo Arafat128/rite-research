@@ -2,8 +2,9 @@
  * Server-side agent keeper: fetch Surf data + runTick for due agents.
  * Fee comes from agent balance; keeper only pays gas.
  *
- * On-chain schedule is **block-based** (lastTickBlock + wakeIntervalBlocks).
- * Time-based UI uses BLOCK_TIME_SEC (~0.25s Ritual default) for display only.
+ * Deployed Radar 0x50a3… has no lastTickBlock/TooEarly — schedule is enforced
+ * off-chain (lastRunAt time math + Upstash post-seal cooldown for full interval).
+ * Time uses BLOCK_TIME_SEC (~0.25s Ritual) for blocks→seconds only.
  */
 
 import {
@@ -35,7 +36,7 @@ import { BLOCK_TIME_SEC, computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
 import { cacheKeeperTick } from "@/lib/keeperCache";
 import { notifyAgentTick } from "@/lib/telegram";
-import { kvDel, kvSetNx } from "@/lib/durableKv";
+import { kvDel, kvSet, kvSetNx } from "@/lib/durableKv";
 
 export type KeeperTickResult = {
   agentId: string;
@@ -304,22 +305,41 @@ async function explainFailedRunTick(
 
 /**
  * Serialize ticks per agent:
- * 1) in-process Map (same isolate: auto-wake + arm-unattended kick)
- * 2) Upstash SET NX (multi-instance: AppShell + AgentTab fire at once)
+ * 1) in-process Map (same isolate)
+ * 2) Upstash SET NX (multi-instance)
  *
- * Without (2), two serverless instances both see lastTickBlock=0 on a fresh
- * Activate and can both send runTick before TooEarly applies — double Telegram.
+ * Production Radar 0x50a3… has NO lastTickBlock/TooEarly in bytecode — schedule
+ * is off-chain only. Releasing the lock right after a tick lets arm-kick +
+ * auto-wake both seal within 1s (agent #68 run1@50:06 + run2@50:07).
+ * After a successful seal we HOLD the key for the full wake interval.
  */
 const agentTickLocks = new Map<string, Promise<unknown>>();
 
-type TickLockOutcome<T> =
-  | { kind: "busy"; skipped: string }
-  | { kind: "ran"; value: T };
+type TickLockInner =
+  | { kind: "skip"; skipped: string }
+  | { kind: "fail"; error: string; txHash?: Hex }
+  | {
+      kind: "ok";
+      hash: Hex;
+      snapshot: SurfDataSnapshot;
+      fresh: AgentView;
+      postAgent: AgentView;
+      newCount: bigint;
+    };
 
-async function withAgentTickLock<T>(
+type TickLockOutcome =
+  | { kind: "busy"; skipped: string }
+  | { kind: "ran"; value: TickLockInner };
+
+function intervalSecFromBlocks(wakeIntervalBlocks: bigint): number {
+  return Math.max(1, Math.round(Number(wakeIntervalBlocks) * BLOCK_TIME_SEC));
+}
+
+async function withAgentTickLock(
   agentId: string,
-  fn: () => Promise<T>
-): Promise<TickLockOutcome<T>> {
+  wakeIntervalBlocks: bigint,
+  fn: () => Promise<TickLockInner>
+): Promise<TickLockOutcome> {
   const prev = agentTickLocks.get(agentId) || Promise.resolve();
   let release!: () => void;
   const gate = new Promise<void>((r) => {
@@ -330,21 +350,44 @@ async function withAgentTickLock<T>(
   await prev.catch(() => undefined);
 
   const distKey = `rite:agent:ticklock:${agentId}`;
+  const intervalSec = intervalSecFromBlocks(wakeIntervalBlocks);
+  // Hold long enough for one tick attempt; success extends to full interval
+  const attemptTtl = Math.max(90, Math.min(intervalSec + 30, 600));
+
   try {
-    // TTL covers Surf fetch + runTick + receipt (~45s) with headroom
-    const got = await kvSetNx(distKey, String(Date.now()), 90);
+    const got = await kvSetNx(distKey, `attempt:${Date.now()}`, attemptTtl);
     if (!got) {
-      return { kind: "busy", skipped: "tick_in_flight" };
+      return { kind: "busy", skipped: "tick_in_flight_or_cooldown" };
     }
     try {
       const value = await fn();
+      if (value.kind === "ok") {
+        // Keep peers out for the full schedule (off-chain TooEarly substitute)
+        const holdSec = Math.max(intervalSec, 55);
+        try {
+          await kvSet(
+            distKey,
+            `sealed:${value.newCount.toString()}:${Date.now()}`,
+            holdSec
+          );
+        } catch {
+          /* TTL on NX key still covers attemptTtl */
+        }
+      } else {
+        try {
+          await kvDel(distKey);
+        } catch {
+          /* */
+        }
+      }
       return { kind: "ran", value };
-    } finally {
+    } catch (e) {
       try {
         await kvDel(distKey);
       } catch {
-        /* expire via TTL */
+        /* */
       }
+      throw e;
     }
   } finally {
     release();
@@ -696,106 +739,134 @@ export async function runDueAgentTicks(opts?: {
         continue;
       }
 
-      // Serialize per-agent ticks across instances (auto-wake + arm kick race)
-      const locked = await withAgentTickLock(String(i), async () => {
-        // Light re-check with fresh head (another wake may have just sealed)
-        const due2 = await isAgentDueFast(
-          client,
-          id,
-          agent.wakeIntervalBlocks,
-          agent.lastRunAt,
-          null
-        );
-        if (!due2.due) {
-          return {
-            kind: "skip" as const,
-            skipped: `not_due_${due2.detail}`,
-          };
-        }
+      // Serialize + post-seal cooldown (Radar 0x50a3 has no on-chain TooEarly)
+      const locked = await withAgentTickLock(
+        String(i),
+        agent.wakeIntervalBlocks,
+        async () => {
+          // Fresh agent read — catch RPC lag after a peer just sealed
+          let live = agent;
+          try {
+            live = (await client.readContract({
+              address: RADAR_CONTRACT as Address,
+              abi: radarAgentAbi,
+              functionName: "getAgent",
+              args: [id],
+            })) as AgentView;
+          } catch {
+            /* use pre */
+          }
+          if (live.runCount > agent.runCount) {
+            return {
+              kind: "skip" as const,
+              skipped: `not_due_peer_sealed_run${live.runCount.toString()}`,
+            };
+          }
+          if (live.status !== 1) {
+            return {
+              kind: "skip" as const,
+              skipped: live.status === 4 ? "dead" : "not_active",
+            };
+          }
 
-        // Short Surf timeout — do not hold the poll for 45s
-        const snapshot = await fetchSurfData(track.kind, track.target, {
-          timeoutMs: 12_000,
-        });
-        const digestPayload = JSON.stringify({
-          kind: snapshot.kind,
-          target: snapshot.target,
-          summary: snapshot.summary,
-          highlights: snapshot.highlights,
-          fetchedAt: snapshot.fetchedAt,
-          agentId: String(i),
-          keeper: true,
-        });
-        const digest = keccak256(stringToBytes(digestPayload));
+          const due2 = await isAgentDueFast(
+            client,
+            id,
+            live.wakeIntervalBlocks,
+            live.lastRunAt,
+            null
+          );
+          if (!due2.due) {
+            return {
+              kind: "skip" as const,
+              skipped: `not_due_${due2.detail}`,
+            };
+          }
 
-        const hash = await sendKeeperRunTick({
-          wallet,
-          client,
-          account,
-          agentId: id,
-          digest,
-        });
+          // Short Surf timeout — do not hold the poll for 45s
+          const snapshot = await fetchSurfData(track.kind, track.target, {
+            timeoutMs: 12_000,
+          });
+          const digestPayload = JSON.stringify({
+            kind: snapshot.kind,
+            target: snapshot.target,
+            summary: snapshot.summary,
+            highlights: snapshot.highlights,
+            fetchedAt: snapshot.fetchedAt,
+            agentId: String(i),
+            keeper: true,
+          });
+          const digest = keccak256(stringToBytes(digestPayload));
 
-        // Ritual ~0.2s blocks — poll aggressively; 45s max wait
-        const receipt = await client.waitForTransactionReceipt({
-          hash,
-          timeout: 45_000,
-          confirmations: 1,
-          pollingInterval: 400,
-        });
-
-        const receiptOk =
-          receipt.status === "success" ||
-          (receipt as { status?: unknown }).status === 1 ||
-          (receipt as { status?: unknown }).status === "0x1";
-
-        let postAgent = agent;
-        try {
-          postAgent = (await client.readContract({
-            address: RADAR_CONTRACT as Address,
-            abi: radarAgentAbi,
-            functionName: "getAgent",
-            args: [id],
-          })) as AgentView;
-        } catch {
-          /* keep pre */
-        }
-
-        const runAdvanced = postAgent.runCount > agent.runCount;
-        if (!receiptOk && !runAdvanced) {
-          const reason = await explainFailedRunTick(client, {
-            hash,
-            from: account.address,
+          const hash = await sendKeeperRunTick({
+            wallet,
+            client,
+            account,
             agentId: id,
             digest,
-            gasUsed: receipt.gasUsed,
-            gasLimit: BigInt(350_000),
           });
+
+          // Ritual ~0.2s blocks — poll aggressively; 45s max wait
+          const receipt = await client.waitForTransactionReceipt({
+            hash,
+            timeout: 45_000,
+            confirmations: 1,
+            pollingInterval: 400,
+          });
+
+          const receiptOk =
+            receipt.status === "success" ||
+            (receipt as { status?: unknown }).status === 1 ||
+            (receipt as { status?: unknown }).status === "0x1";
+
+          let postAgent = live;
+          try {
+            postAgent = (await client.readContract({
+              address: RADAR_CONTRACT as Address,
+              abi: radarAgentAbi,
+              functionName: "getAgent",
+              args: [id],
+            })) as AgentView;
+          } catch {
+            /* keep pre */
+          }
+
+          const runAdvanced = postAgent.runCount > live.runCount;
+          if (!receiptOk && !runAdvanced) {
+            const reason = await explainFailedRunTick(client, {
+              hash,
+              from: account.address,
+              agentId: id,
+              digest,
+              gasUsed: receipt.gasUsed,
+              gasLimit: BigInt(350_000),
+            });
+            return {
+              kind: "fail" as const,
+              error: reason,
+              txHash: hash,
+            };
+          }
+          if (!receiptOk && runAdvanced) {
+            console.warn(
+              `[agentKeeper] agent ${i} receipt status=${String(receipt.status)} but runCount advanced — treating as success`,
+              hash
+            );
+          }
+
           return {
-            kind: "fail" as const,
-            error: reason,
-            txHash: hash,
+            kind: "ok" as const,
+            hash,
+            snapshot,
+            fresh: live,
+            postAgent,
+            newCount:
+              postAgent.runCount > live.runCount
+                ? postAgent.runCount
+                : live.runCount + BigInt(1),
           };
         }
-        if (!receiptOk && runAdvanced) {
-          console.warn(
-            `[agentKeeper] agent ${i} receipt status=${String(receipt.status)} but runCount advanced — treating as success`,
-            hash
-          );
-        }
-
-        return {
-          kind: "ok" as const,
-          hash,
-          snapshot,
-          fresh: agent,
-          postAgent,
-          newCount:
-            postAgent.runCount > agent.runCount
-              ? postAgent.runCount
-              : agent.runCount + BigInt(1),
-        };
-      });
+      );
 
       if (locked.kind === "busy") {
         results.push({
