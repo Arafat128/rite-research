@@ -8,13 +8,11 @@ import {
   useDisconnect,
   useSwitchChain,
   useBalance,
-  useSignMessage,
 } from "wagmi";
 import { formatEther } from "viem";
 import { ritualChain } from "@/lib/ritual";
 import { OpenOnRadar } from "@/components/OpenOnRadar";
 import { RITUAL_RADAR_URL } from "@/lib/ritualRadar";
-import { getAutoWakeAuth } from "@/lib/ownerWakeAuth";
 
 /** Lazy-load heavy tabs so first paint stays fast */
 const ResearchTab = dynamic(
@@ -82,22 +80,16 @@ export function AppShell() {
   const { disconnect } = useDisconnect();
   const { switchChain, isPending: switching } = useSwitchChain();
   const { data: bal } = useBalance({ address });
-  const { signMessageAsync } = useSignMessage();
 
   const wrongChain = isConnected && chainId !== ritualChain.id;
 
   /**
    * Keepalive while ANY Rite tab is open (wallet connected):
-   * - Oracast 5m/15m price DMs
-   * - Radar data-agent auto-wake (was only on My Agents — switching tabs
-   *   stopped the 3rd+ tick)
-   * Visibility/focus re-poke (background tabs throttle timers).
-   * Fully closed tab → Agent keeper GH Action long loop.
+   * - Oracast 5m/15m price DMs only (server-side, no wallet prompt)
    *
-   * Auto-wake requires owner wallet signature (see ownerWakeAuth) so
-   * unsigned POSTs from a half-finished audit fix no longer 401 silently.
-   * First successful sign may prompt MetaMask once; later pokes reuse
-   * a fresh short-lived signed message each interval.
+   * Do NOT call signMessage / auto-wake here. Opening the site used to
+   * spam MetaMask with signature requests every ~25s. Radar auto-wake is
+   * opt-in on My Agents (or unattended via /api/agent/cron + CRON_SECRET).
    */
   useEffect(() => {
     if (!address || !isConnected) return;
@@ -110,41 +102,18 @@ export function AppShell() {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        void fetch("/api/oracast/tick", {
+        await fetch("/api/oracast/tick", {
           method: "POST",
           headers,
           body: bodyOracast,
           cache: "no-store",
         }).catch(() => undefined);
-
-        // Signed auto-wake — reuses cached sig until near expiry (no MetaMask spam)
-        try {
-          const auth = await getAutoWakeAuth(address, async (message) =>
-            signMessageAsync({ message })
-          );
-          if (cancelled) return;
-          await fetch("/api/agent/auto-wake", {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              owner: address,
-              max: 30,
-              signature: auth.signature,
-              nonce: auth.nonce,
-              expiry: auth.expiry,
-            }),
-            cache: "no-store",
-          });
-        } catch {
-          // User reject / wallet lock — Oracast still pokes; My Agents path can sign
-        }
       } finally {
         inFlight = false;
       }
     };
 
     void poke();
-    // 25s: under auto-wake rate limit even if My Agents also pokes
     const t = setInterval(() => void poke(), 25_000);
     const onVis = () => {
       if (document.visibilityState === "visible") void poke();
@@ -157,7 +126,7 @@ export function AppShell() {
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
     };
-  }, [address, isConnected, signMessageAsync]);
+  }, [address, isConnected]);
 
   async function onConnect() {
     const injected = connectors.find((c) => c.id === "injected") || connectors[0];

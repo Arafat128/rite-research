@@ -689,11 +689,55 @@ export function AgentTab({
     return () => clearInterval(t);
   }, [isConnected, selectedId, refreshNetwork]);
 
+  /** One-time opt-in: sign once, then background poll uses cache only. */
+  async function enableAutoWake() {
+    if (!address || !isConnected) {
+      setAutoWakeNote("Connect wallet first");
+      return;
+    }
+    if (writeBusy || ticking) return;
+    setAutoWakeBusy(true);
+    try {
+      const { requestAutoWakeAuth } = await import("@/lib/ownerWakeAuth");
+      setAutoWakeNote("Confirm signature in wallet (not a payment)…");
+      const auth = await requestAutoWakeAuth(address, async (message) =>
+        signMessageAsync({ message })
+      );
+      // Immediate poke with fresh auth (no second sign)
+      void fetch("/api/agent/auto-wake", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: address,
+          max: 20,
+          signature: auth.signature,
+          nonce: auth.nonce,
+          expiry: auth.expiry,
+        }),
+        cache: "no-store",
+      }).catch(() => undefined);
+      setAutoWakeNote("Auto-wake enabled · watching schedule (~5 min)");
+      toast.success("Auto-wake enabled", "Background polls for ~5 minutes");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Signature cancelled";
+      if (/reject|denied|cancel/i.test(msg)) {
+        setAutoWakeNote(
+          "Auto-wake off · enable with one wallet signature when ready"
+        );
+      } else {
+        setAutoWakeNote(`Auto-wake enable failed: ${msg.slice(0, 80)}`);
+      }
+    } finally {
+      setAutoWakeBusy(false);
+    }
+  }
+
   /**
    * Auto-schedule: schedule alone does NOT fire ticks.
-   * Vercel Hobby cron is once/day — so while My Agents is open we poke
-   * /api/agent/auto-wake every ~20s. Server only runTicks agents that are
-   * due on-chain (block interval); early calls no-op.
+   * While My Agents is open we poll /api/agent/auto-wake every ~20s — but
+   * ONLY with a cached owner signature. We never call signMessage from this
+   * effect (that was spamming MetaMask on site open / every poll).
+   * User must click "Enable auto-wake" once per ~5 min session.
    */
   useEffect(() => {
     if (mode !== "manage" || !isConnected || !address) {
@@ -706,14 +750,23 @@ export function AgentTab({
 
     const poke = async (reason: string) => {
       if (cancelled || inFlight || autoWakeBusy || ticking || writeBusy) return;
-      // Only when we have at least one non-dead agent (or none yet — still poke owner)
       inFlight = true;
       setAutoWakeBusy(true);
       try {
-        const { getAutoWakeAuth } = await import("@/lib/ownerWakeAuth");
-        const auth = await getAutoWakeAuth(address, async (message) =>
-          signMessageAsync({ message })
+        const { peekAutoWakeAuth, isAutoWakeDeclined } = await import(
+          "@/lib/ownerWakeAuth"
         );
+        const auth = peekAutoWakeAuth(address);
+        if (!auth) {
+          if (!cancelled) {
+            setAutoWakeNote(
+              isAutoWakeDeclined(address)
+                ? "Auto-wake off · enable with one wallet signature when ready"
+                : "Auto-wake idle · click Enable auto-wake (one signature, ~5 min)"
+            );
+          }
+          return;
+        }
         const res = await fetch("/api/agent/auto-wake", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2408,11 +2461,20 @@ export function AgentTab({
                       Wake schedule
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      How often this agent may wake. While this tab is open,
-                      auto-wake can fire when due. Use{" "}
+                      How often this agent may wake. Auto-wake needs one{" "}
+                      <b className="text-white/60">signature</b> (not a payment)
+                      — it never prompts when you just open the site. Use{" "}
                       <b className="text-[#c8ff4a]">Persistent</b> for long-running
                       agents — Sovereign stops after {SOVEREIGN_MAX_RUNS} ticks.
                     </p>
+                    <button
+                      type="button"
+                      disabled={writeBusy || ticking || autoWakeBusy}
+                      onClick={() => void enableAutoWake()}
+                      className="mb-2 rounded-lg border border-[#c8ff4a]/35 bg-[#c8ff4a]/10 px-3 py-1.5 text-[11px] font-semibold text-[#c8ff4a] hover:bg-[#c8ff4a]/20 disabled:opacity-50"
+                    >
+                      {autoWakeBusy ? "…" : "Enable auto-wake (sign once)"}
+                    </button>
                     {agent.kind === AGENT_KIND.Sovereign &&
                       agent.status === 1 && (
                         <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
