@@ -3,7 +3,7 @@
  * Fee comes from agent balance; keeper only pays gas.
  *
  * On-chain schedule is **block-based** (lastTickBlock + wakeIntervalBlocks).
- * Time-based UI (~2s/block) is approximate only.
+ * Time-based UI uses BLOCK_TIME_SEC (~0.25s Ritual default) for display only.
  */
 
 import {
@@ -31,7 +31,7 @@ import {
   fetchSurfData,
   type SurfDataSnapshot,
 } from "@/lib/surfData";
-import { computeDue } from "@/lib/agentSchedule";
+import { BLOCK_TIME_SEC, computeDue } from "@/lib/agentSchedule";
 import type { AgentView } from "@/lib/radarRead";
 import { cacheKeeperTick } from "@/lib/keeperCache";
 import { notifyAgentTick } from "@/lib/telegram";
@@ -65,7 +65,40 @@ export type KeeperTickResult = {
 function publicClient() {
   return createPublicClient({
     chain: ritualChain,
-    transport: http(RPC_URL, { timeout: 25_000, retryCount: 2 }),
+    transport: http(RPC_URL, {
+      // Keep reads snappy — long hangs block the whole due-scan
+      timeout: 12_000,
+      retryCount: 1,
+    }),
+  });
+}
+
+/** Bound a promise so Telegram / slow RPC cannot stall the tick path forever */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    let done = false;
+    const t = setTimeout(() => {
+      if (!done) {
+        done = true;
+        resolve(fallback);
+      }
+    }, ms);
+    p.then(
+      (v) => {
+        if (!done) {
+          done = true;
+          clearTimeout(t);
+          resolve(v);
+        }
+      },
+      () => {
+        if (!done) {
+          done = true;
+          clearTimeout(t);
+          resolve(fallback);
+        }
+      }
+    );
   });
 }
 
@@ -138,9 +171,17 @@ async function sendKeeperRunTick(opts: {
   const gas = BigInt(350_000);
 
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const block = await opts.client.getBlock({ blockTag: "latest" });
+      // Parallel fee + balance + nonce — shaves a round-trip off each tick
+      const [block, bal, nonce] = await Promise.all([
+        opts.client.getBlock({ blockTag: "latest" }),
+        opts.client.getBalance({ address: opts.account.address }),
+        opts.client.getTransactionCount({
+          address: opts.account.address,
+          blockTag: "pending",
+        }),
+      ]);
       const base = block.baseFeePerGas ?? BigInt(1);
       // tip + 2× base — stays cheap on Ritual (do NOT force 1 gwei)
       const maxPriorityFeePerGas = BigInt(1_000_000); // 0.001 gwei
@@ -153,9 +194,6 @@ async function sendKeeperRunTick(opts: {
       const cap = BigInt(50_000_000_000); // 50 gwei
       if (maxFeePerGas > cap) maxFeePerGas = cap;
 
-      const bal = await opts.client.getBalance({
-        address: opts.account.address,
-      });
       const need = gas * maxFeePerGas;
       if (bal < need) {
         throw new Error(
@@ -163,11 +201,6 @@ async function sendKeeperRunTick(opts: {
             `Send a little RIT to ${opts.account.address} — agent balance cannot pay gas.`
         );
       }
-
-      const nonce = await opts.client.getTransactionCount({
-        address: opts.account.address,
-        blockTag: "pending",
-      });
 
       // Fully specified EIP-1559 — Ritual rejects legacy type-0
       const hash = await opts.wallet.sendTransaction({
@@ -193,8 +226,8 @@ async function sendKeeperRunTick(opts: {
       ) {
         break;
       }
-      if (!isRpcFlake(e) || attempt === 4) break;
-      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      if (!isRpcFlake(e) || attempt === 2) break;
+      await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
     }
   }
   throw lastErr instanceof Error
@@ -328,39 +361,40 @@ export async function isKeeperOnChain(addr?: Address | null): Promise<
  * Prefer on-chain lastTickBlock + interval (matches runTick TooEarly).
  * Some Radar deploys revert on lastTickBlock() — fall back to time-based
  * lastRunAt + approx block time (same as UI countdown).
+ *
+ * Pass `cachedHead` when scanning many agents so we only call getBlockNumber once.
  */
-export async function isAgentDue(
+export async function isAgentDueFast(
+  client: PublicClient,
   agentId: bigint,
   wakeIntervalBlocks: bigint,
-  lastRunAt: bigint
+  lastRunAt: bigint,
+  cachedHead: bigint | null
 ): Promise<{
   due: boolean;
   mode: "blocks" | "time";
   secondsUntilDue: number;
   detail: string;
 }> {
-  const client = publicClient();
   try {
-    const [lastB, blockNumber] = await Promise.all([
-      client.readContract({
-        address: RADAR_CONTRACT as Address,
-        abi: radarAgentAbi,
-        functionName: "lastTickBlock",
-        args: [agentId],
-      }) as Promise<bigint>,
-      client.getBlockNumber(),
-    ]);
+    const lastB = (await client.readContract({
+      address: RADAR_CONTRACT as Address,
+      abi: radarAgentAbi,
+      functionName: "lastTickBlock",
+      args: [agentId],
+    })) as bigint;
+    const blockNumber =
+      cachedHead != null ? cachedHead : await client.getBlockNumber();
     const interval =
       wakeIntervalBlocks === BigInt(0) ? BigInt(1) : wakeIntervalBlocks;
     const nextDue = lastB === BigInt(0) ? blockNumber : lastB + interval;
     const due = lastB === BigInt(0) || blockNumber >= nextDue;
     const blocksUntilDue =
       due || nextDue <= blockNumber ? BigInt(0) : nextDue - blockNumber;
-    const blockSec = Math.max(
-      1,
-      Number(process.env.NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC || "2") || 2
+    const secondsUntilDue = Math.max(
+      0,
+      Math.ceil(Number(blocksUntilDue) * BLOCK_TIME_SEC)
     );
-    const secondsUntilDue = Number(blocksUntilDue) * blockSec;
     return {
       due,
       mode: "blocks",
@@ -380,6 +414,25 @@ export async function isAgentDue(
       detail: t.due ? "due" : `${t.secondsUntilDue}s`,
     };
   }
+}
+
+export async function isAgentDue(
+  agentId: bigint,
+  wakeIntervalBlocks: bigint,
+  lastRunAt: bigint
+): Promise<{
+  due: boolean;
+  mode: "blocks" | "time";
+  secondsUntilDue: number;
+  detail: string;
+}> {
+  return isAgentDueFast(
+    publicClient(),
+    agentId,
+    wakeIntervalBlocks,
+    lastRunAt,
+    null
+  );
 }
 
 export async function runDueAgentTicks(opts?: {
@@ -407,32 +460,31 @@ export async function runDueAgentTicks(opts?: {
   const wallet = createWalletClient({
     account,
     chain: ritualChain,
-    transport: http(RPC_URL, { timeout: 60_000 }),
+    transport: http(RPC_URL, { timeout: 35_000 }),
   });
 
-  let keeperOnChain: boolean | null = null;
-  try {
-    keeperOnChain = (await client.readContract({
-      address: RADAR_CONTRACT as Address,
+  // Parallel bootstrap reads
+  const [keeperOnChainRaw, runFee, nextId] = await Promise.all([
+    client
+      .readContract({
+        address: RADAR_CONTRACT as Address,
+        abi: radarAgentAbi,
+        functionName: "isKeeper",
+        args: [account.address],
+      })
+      .catch(() => null) as Promise<boolean | null>,
+    client.readContract({
+      address: RADAR_CONTRACT,
       abi: radarAgentAbi,
-      functionName: "isKeeper",
-      args: [account.address],
-    })) as boolean;
-  } catch {
-    keeperOnChain = null;
-  }
-
-  const runFee = (await client.readContract({
-    address: RADAR_CONTRACT,
-    abi: radarAgentAbi,
-    functionName: "runFee",
-  })) as bigint;
-
-  const nextId = (await client.readContract({
-    address: RADAR_CONTRACT,
-    abi: radarAgentAbi,
-    functionName: "nextAgentId",
-  })) as bigint;
+      functionName: "runFee",
+    }) as Promise<bigint>,
+    client.readContract({
+      address: RADAR_CONTRACT,
+      abi: radarAgentAbi,
+      functionName: "nextAgentId",
+    }) as Promise<bigint>,
+  ]);
+  const keeperOnChain = keeperOnChainRaw;
 
   const total = nextId > BigInt(1) ? Number(nextId - BigInt(1)) : 0;
   const maxAgents = opts?.maxAgents ?? 40;
@@ -468,7 +520,51 @@ export async function runDueAgentTicks(opts?: {
       for (let i = start; i <= total; i++) idsToScan.push(i);
     }
   } else {
-    for (let i = start; i <= total; i++) idsToScan.push(i);
+    /**
+     * Global cron: newest agents are often dead Sovereigns (3-tick life).
+     * Walking only [total-max..total] misses older LIVE Persistent agents.
+     * Pre-scan newest→oldest (capped), keep Active ids first, then fill.
+     */
+    const lookback = Math.min(total, Math.max(maxAgents * 4, 80));
+    const from = Math.max(1, total - lookback + 1);
+    const candidates: number[] = [];
+    for (let i = total; i >= from; i--) candidates.push(i);
+
+    // Batch getAgent to prefer LIVE (status===1) without full sequential ticks
+    const liveIds: number[] = [];
+    const otherIds: number[] = [];
+    const BATCH = 12;
+    for (let b = 0; b < candidates.length; b += BATCH) {
+      if (liveIds.length >= maxAgents) break;
+      const chunk = candidates.slice(b, b + BATCH);
+      const rows = await Promise.all(
+        chunk.map(async (id) => {
+          try {
+            const agent = (await client.readContract({
+              address: RADAR_CONTRACT as Address,
+              abi: radarAgentAbi,
+              functionName: "getAgent",
+              args: [BigInt(id)],
+            })) as AgentView;
+            return { id, status: Number(agent.status) };
+          } catch {
+            return { id, status: -1 };
+          }
+        })
+      );
+      for (const row of rows) {
+        if (row.status === 1) liveIds.push(row.id);
+        else if (row.status >= 0) otherIds.push(row.id);
+      }
+    }
+    // LIVE first (newest among them already ordered), then others as filler
+    idsToScan = [...liveIds, ...otherIds].slice(
+      0,
+      Math.min(lookback, Math.max(maxAgents * 2, 40))
+    );
+    if (idsToScan.length === 0) {
+      for (let i = start; i <= total; i++) idsToScan.push(i);
+    }
   }
 
   const results: KeeperTickResult[] = [];
@@ -483,8 +579,16 @@ export async function runDueAgentTicks(opts?: {
   const maxTicked = opts?.onlyAgentId
     ? 1
     : ownerFilter
-      ? Math.min(2, Math.max(1, maxAgents))
-      : Math.min(3, Math.max(1, maxAgents));
+      ? Math.min(4, Math.max(1, maxAgents))
+      : Math.min(5, Math.max(1, maxAgents));
+
+  // Shared head for due checks — one RPC for the whole scan pass
+  let headBlock: bigint | null = null;
+  try {
+    headBlock = await client.getBlockNumber();
+  } catch {
+    headBlock = null;
+  }
 
   for (const i of idsToScan) {
     if (ticked >= maxTicked) {
@@ -532,10 +636,12 @@ export async function runDueAgentTicks(opts?: {
         continue;
       }
 
-      const dueInfo = await isAgentDue(
+      const dueInfo = await isAgentDueFast(
+        client,
         id,
         agent.wakeIntervalBlocks,
-        agent.lastRunAt
+        agent.lastRunAt,
+        headBlock
       );
       if (!dueInfo.due) {
         results.push({
@@ -564,31 +670,13 @@ export async function runDueAgentTicks(opts?: {
 
       // Serialize per-agent ticks on this instance (auto-wake + cron race)
       const locked = await withAgentTickLock(String(i), async () => {
-        // Re-read after wait — prior tick may have just landed
-        let fresh = agent;
-        try {
-          fresh = (await client.readContract({
-            address: RADAR_CONTRACT as Address,
-            abi: radarAgentAbi,
-            functionName: "getAgent",
-            args: [id],
-          })) as AgentView;
-        } catch {
-          /* use stale */
-        }
-        if (fresh.status !== 1) {
-          return {
-            kind: "skip" as const,
-            skipped: fresh.status === 4 ? "dead" : "not_active",
-          };
-        }
-        if (fresh.balance < runFee) {
-          return { kind: "skip" as const, skipped: "insufficient_balance" };
-        }
-        const due2 = await isAgentDue(
+        // Light re-check with fresh head (another wake may have just sealed)
+        const due2 = await isAgentDueFast(
+          client,
           id,
-          fresh.wakeIntervalBlocks,
-          fresh.lastRunAt
+          agent.wakeIntervalBlocks,
+          agent.lastRunAt,
+          null
         );
         if (!due2.due) {
           return {
@@ -597,7 +685,10 @@ export async function runDueAgentTicks(opts?: {
           };
         }
 
-        const snapshot = await fetchSurfData(track.kind, track.target);
+        // Short Surf timeout — do not hold the poll for 45s
+        const snapshot = await fetchSurfData(track.kind, track.target, {
+          timeoutMs: 12_000,
+        });
         const digestPayload = JSON.stringify({
           kind: snapshot.kind,
           target: snapshot.target,
@@ -617,10 +708,12 @@ export async function runDueAgentTicks(opts?: {
           digest,
         });
 
+        // Ritual ~0.2s blocks — poll aggressively; 45s max wait
         const receipt = await client.waitForTransactionReceipt({
           hash,
-          timeout: 90_000,
+          timeout: 45_000,
           confirmations: 1,
+          pollingInterval: 400,
         });
 
         const receiptOk =
@@ -628,7 +721,7 @@ export async function runDueAgentTicks(opts?: {
           (receipt as { status?: unknown }).status === 1 ||
           (receipt as { status?: unknown }).status === "0x1";
 
-        let postAgent = fresh;
+        let postAgent = agent;
         try {
           postAgent = (await client.readContract({
             address: RADAR_CONTRACT as Address,
@@ -640,7 +733,7 @@ export async function runDueAgentTicks(opts?: {
           /* keep pre */
         }
 
-        const runAdvanced = postAgent.runCount > fresh.runCount;
+        const runAdvanced = postAgent.runCount > agent.runCount;
         if (!receiptOk && !runAdvanced) {
           const reason = await explainFailedRunTick(client, {
             hash,
@@ -667,12 +760,12 @@ export async function runDueAgentTicks(opts?: {
           kind: "ok" as const,
           hash,
           snapshot,
-          fresh,
+          fresh: agent,
           postAgent,
           newCount:
-            postAgent.runCount > fresh.runCount
+            postAgent.runCount > agent.runCount
               ? postAgent.runCount
-              : fresh.runCount + BigInt(1),
+              : agent.runCount + BigInt(1),
         };
       });
 
@@ -719,26 +812,26 @@ export async function runDueAgentTicks(opts?: {
         snapshot,
       });
 
-      // Await notify so durable prefs + send finish in this request
-      const telegram = await notifyAgentTick({
-        owner: fresh.owner,
-        agentId: String(i),
-        agentName: fresh.name,
-        runCount: newCount.toString(),
-        summary: snapshot.summary,
-        kindLabel: snapshot.kindLabel,
-        target: snapshot.target,
-        txHash: hash,
-        died,
-        rows: snapshot.rows,
-        highlights: snapshot.highlights,
-      });
+      // Cap Telegram wait — never stall the next due agent on DM latency
+      const telegram = await withTimeout(
+        notifyAgentTick({
+          owner: fresh.owner,
+          agentId: String(i),
+          agentName: fresh.name,
+          runCount: newCount.toString(),
+          summary: snapshot.summary,
+          kindLabel: snapshot.kindLabel,
+          target: snapshot.target,
+          txHash: hash,
+          died,
+          rows: snapshot.rows,
+          highlights: snapshot.highlights,
+        }),
+        2_500,
+        { sent: false, reason: "notify_timeout" }
+      );
 
       ticked += 1;
-      // Space multi-agent ticks so Telegram is not a single burst
-      if (ticked < maxTicked) {
-        await new Promise((r) => setTimeout(r, 1_500));
-      }
       results.push({
         agentId: String(i),
         ok: true,
@@ -787,10 +880,12 @@ export async function runDueAgentTicks(opts?: {
           "Ritual rejected tx type — auto-wake must use EIP-1559 (deploy update if you still see this).";
       } else if (isRpcFlake(e)) {
         error =
-          "Ritual RPC flake during auto-wake send — retrying on next poll (~20s).";
+          "Ritual RPC flake during auto-wake send — retrying on next poll (~3–8s).";
       } else if (/getAgent/i.test(msg)) {
         // Don't dump raw viem getAgent reverts into the My Agents auto-wake line
         error = "Could not read agent on-chain (RPC). Retrying next poll.";
+      } else if (/timed out|timeout|AbortError/i.test(msg)) {
+        error = "Data fetch timed out — retrying next poll.";
       }
       console.error(`[agentKeeper] agent ${i} tick failed:`, msg.slice(0, 200));
       results.push({

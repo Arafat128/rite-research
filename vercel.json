@@ -9,10 +9,10 @@
       "maxDuration": 60
     },
     "src/app/api/agent/cron/route.ts": {
-      "maxDuration": 60
+      "maxDuration": 120
     },
     "src/app/api/agent/auto-wake/route.ts": {
-      "maxDuration": 60
+      "maxDuration": 120
     },
     "src/app/api/oracast/tick/route.ts": {
       "maxDuration": 60

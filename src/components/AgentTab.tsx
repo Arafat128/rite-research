@@ -50,6 +50,7 @@ import {
 import { sanitizeHttpUrl } from "@/lib/safeUrl";
 import {
   BLOCK_TIME_SEC,
+  autoWakePollMs,
   computeDue,
   formatChainTime,
   formatCountdown,
@@ -716,8 +717,11 @@ export function AgentTab({
         }),
         cache: "no-store",
       }).catch(() => undefined);
-      setAutoWakeNote("Auto-wake enabled · watching schedule (~5 min)");
-      toast.success("Auto-wake enabled", "Background polls for ~5 minutes");
+      setAutoWakeNote("Auto-wake enabled · watching schedule (~30 min)");
+      toast.success(
+        "Auto-wake enabled",
+        "Background polls for ~30 minutes — re-enable if it expires"
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Signature cancelled";
       if (/reject|denied|cancel/i.test(msg)) {
@@ -734,10 +738,9 @@ export function AgentTab({
 
   /**
    * Auto-schedule: schedule alone does NOT fire ticks.
-   * While My Agents is open we poll /api/agent/auto-wake every ~20s — but
-   * ONLY with a cached owner signature. We never call signMessage from this
-   * effect (that was spamming MetaMask on site open / every poll).
-   * User must click "Enable auto-wake" once per ~5 min session.
+   * Adaptive poll (3–15s) while My Agents is open — ONLY with a cached
+   * owner signature. Never signMessage from this effect.
+   * User clicks "Enable auto-wake" once per ~30 min session.
    */
   useEffect(() => {
     if (mode !== "manage" || !isConnected || !address) {
@@ -747,10 +750,26 @@ export function AgentTab({
 
     let cancelled = false;
     let inFlight = false;
+    let pendingPoke = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    /** Shortest not_due seconds from last response — drives adaptive cadence */
+    let lastSecondsUntilDue: number | null = null;
+
+    const scheduleNext = (ms: number) => {
+      if (cancelled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void poke("poll"), Math.max(2_500, ms));
+    };
 
     const poke = async (reason: string) => {
-      if (cancelled || inFlight || autoWakeBusy || ticking || writeBusy) return;
+      if (cancelled) return;
+      if (inFlight || autoWakeBusy || ticking || writeBusy) {
+        // Don't drop due windows — re-run as soon as the current path frees
+        pendingPoke = true;
+        return;
+      }
       inFlight = true;
+      pendingPoke = false;
       setAutoWakeBusy(true);
       try {
         const { peekAutoWakeAuth, isAutoWakeDeclined } = await import(
@@ -762,11 +781,14 @@ export function AgentTab({
             setAutoWakeNote(
               isAutoWakeDeclined(address)
                 ? "Auto-wake off · enable with one wallet signature when ready"
-                : "Auto-wake idle · click Enable auto-wake (one signature, ~5 min)"
+                : "Auto-wake idle · click Enable auto-wake (one signature, ~30 min)"
             );
           }
+          scheduleNext(12_000);
           return;
         }
+
+        // Scan all owner agents (do not pin onlyAgentId — that starves siblings)
         const res = await fetch("/api/agent/auto-wake", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -807,10 +829,51 @@ export function AgentTab({
               data.error || "Auto-wake temporarily unavailable. Try again shortly."
             );
           }
+          // Back off on 429; otherwise retry soon
+          const retryAfter = Number(res.headers.get("Retry-After") || "0");
+          scheduleNext(
+            res.status === 429
+              ? Math.max(8_000, (retryAfter || 8) * 1000)
+              : 6_000
+          );
           return;
         }
 
         const ticked = data.ticked ?? 0;
+        const hadBudgetSkip = (data.results || []).some(
+          (r) => r.skipped === "tick_budget"
+        );
+
+        // Parse nearest not_due for adaptive schedule
+        let nearestDue: number | null = null;
+        for (const r of data.results || []) {
+          const m = r.skipped?.match(/^not_due_(?:.+?_~)?(\d+)s$/);
+          if (m) {
+            const s = Number(m[1]);
+            if (Number.isFinite(s)) {
+              nearestDue =
+                nearestDue == null ? s : Math.min(nearestDue, s);
+            }
+          } else if (r.skipped?.startsWith("not_due_")) {
+            const m2 = r.skipped.match(/(\d+)s/);
+            if (m2) {
+              const s = Number(m2[1]);
+              if (Number.isFinite(s)) {
+                nearestDue =
+                  nearestDue == null ? s : Math.min(nearestDue, s);
+              }
+            }
+          }
+        }
+        if (ticked > 0 || hadBudgetSkip) {
+          // Just sealed or more due agents waiting — poll ASAP
+          lastSecondsUntilDue = 0;
+        } else if (nearestDue != null) {
+          lastSecondsUntilDue = nearestDue;
+        } else if (dueInfo) {
+          lastSecondsUntilDue = dueInfo.secondsUntilDue;
+        }
+
         if (ticked > 0) {
           const hits = (data.results || []).filter((r) => r.ok);
           const first = hits[0];
@@ -1000,6 +1063,13 @@ export function AgentTab({
             }
           }
         }
+
+        // Immediate re-poke if budget left more due agents, else adaptive delay
+        if (hadBudgetSkip || pendingPoke) {
+          scheduleNext(2_500);
+        } else {
+          scheduleNext(autoWakePollMs(lastSecondsUntilDue));
+        }
       } catch (e) {
         if (!cancelled) {
           setAutoWakeNote(
@@ -1008,18 +1078,29 @@ export function AgentTab({
               : "Auto-wake error"
           );
         }
+        scheduleNext(8_000);
       } finally {
         inFlight = false;
         if (!cancelled) setAutoWakeBusy(false);
+        if (pendingPoke && !cancelled) {
+          pendingPoke = false;
+          scheduleNext(1_500);
+        }
       }
     };
 
-    // Immediate check when opening My Agents / agent becomes LIVE
+    // Immediate check when opening My Agents
     void poke("start");
-    const t = setInterval(() => void poke("poll"), 20_000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") void poke("focus");
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
     return () => {
       cancelled = true;
-      clearInterval(t);
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
     };
     // Intentionally not depending on autoWakeBusy/ticking every render
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2130,8 +2211,9 @@ export function AgentTab({
                   </select>
                 </div>
                 <p className="mt-1 text-[10px] text-white/35">
-                  Stores as {wakeBlocksForCreate.toString()} blocks (~
-                  {BLOCK_TIME_SEC}s/block) · {formatInterval(wakeBlocksForCreate)}
+                  Stores as {wakeBlocksForCreate.toString()} blocks (
+                  ~{BLOCK_TIME_SEC}s/block on Ritual) ·{" "}
+                  {formatInterval(wakeBlocksForCreate)}
                 </p>
               </div>
             </div>
@@ -2462,10 +2544,14 @@ export function AgentTab({
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
                       How often this agent may wake. Auto-wake needs one{" "}
-                      <b className="text-white/60">signature</b> (not a payment)
-                      — it never prompts when you just open the site. Use{" "}
+                      <b className="text-white/60">signature</b> (~30 min session,
+                      not a payment). Polls adaptively every ~3–15s while this
+                      tab is open. Use{" "}
                       <b className="text-[#c8ff4a]">Persistent</b> for long-running
                       agents — Sovereign stops after {SOVEREIGN_MAX_RUNS} ticks.
+                      After updating the app, re-<b className="text-white/60">Save
+                      schedule</b> so 1 min maps to the correct block count on
+                      Ritual (~0.25s/block).
                     </p>
                     <button
                       type="button"
@@ -2473,7 +2559,7 @@ export function AgentTab({
                       onClick={() => void enableAutoWake()}
                       className="mb-2 rounded-lg border border-[#c8ff4a]/35 bg-[#c8ff4a]/10 px-3 py-1.5 text-[11px] font-semibold text-[#c8ff4a] hover:bg-[#c8ff4a]/20 disabled:opacity-50"
                     >
-                      {autoWakeBusy ? "…" : "Enable auto-wake (sign once)"}
+                      {autoWakeBusy ? "…" : "Enable auto-wake (sign once · ~30 min)"}
                     </button>
                     {agent.kind === AGENT_KIND.Sovereign &&
                       agent.status === 1 && (
@@ -2542,7 +2628,7 @@ export function AgentTab({
                         }`}
                       >
                         {dueInfo.due
-                          ? "Interval elapsed — auto-wake will fire on next poll (~20s) or click Wake now."
+                          ? "Interval elapsed — auto-wake will fire within a few seconds (or click Wake now)."
                           : `Next interval in ${formatCountdown(dueInfo.secondsUntilDue)} · ${new Date(dueInfo.nextRunAt * 1000).toLocaleString()}`}
                       </p>
                     )}
@@ -2744,7 +2830,7 @@ export function AgentTab({
                 On-chain run count is <b className="text-white/80">0</b>.
                 After manual Wake or auto-wake, full table data appears here.
                 Keep <b className="text-white/70">My Agents</b> open for 1m
-                auto-wake (polls keeper every ~20s).
+                auto-wake (adaptive poll ~3–15s while this tab is open).
               </p>
             </div>
           )}

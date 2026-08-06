@@ -90,65 +90,53 @@ async function handle(req: NextRequest) {
       });
     }
 
-    // Oracast price watches + official TEE agent activity (no keeper key required)
-    let oracast: Awaited<ReturnType<typeof tickOracastWatches>> | null = null;
-    let official: Awaited<ReturnType<typeof tickOfficialAgentAlerts>> | null =
-      null;
-    try {
-      oracast = await tickOracastWatches({ max: 40 });
-    } catch (e) {
-      console.error("[api/agent/cron] oracast", e);
-    }
-    try {
-      official = await tickOfficialAgentAlerts({ max: 40 });
-    } catch (e) {
-      console.error("[api/agent/cron] official", e);
-    }
-
-    // Radar agent ticks need keeper + Surf
-    if (!keeperConfigured()) {
-      return NextResponse.json({
-        ok: true,
-        autoWake: false,
-        at: new Date().toISOString(),
-        ticked: 0,
-        scanned: 0,
-        results: [],
-        oracast,
-        official,
-        hint:
-          "Oracast + official agents ticked. Radar auto-wake needs KEEPER_PRIVATE_KEY.",
-      });
-    }
-    if (!process.env.SURF_API_KEY) {
-      return NextResponse.json({
-        ok: true,
-        autoWake: false,
-        at: new Date().toISOString(),
-        ticked: 0,
-        scanned: 0,
-        results: [],
-        oracast,
-        official,
-        error: "SURF_API_KEY not configured (Radar ticks skipped)",
-      });
-    }
-
+    // Run Oracast + official + Radar in parallel so radar 1m agents are not
+    // starved waiting on price/official fan-out.
     const only = req.nextUrl.searchParams.get("agentId") || undefined;
     const max = Number(req.nextUrl.searchParams.get("max") || "25");
 
-    const out = await runDueAgentTicks({
-      maxAgents: Math.min(50, Math.max(1, max || 25)),
-      onlyAgentId: only || undefined,
+    const oracastP = tickOracastWatches({ max: 40 }).catch((e) => {
+      console.error("[api/agent/cron] oracast", e);
+      return null;
     });
+    const officialP = tickOfficialAgentAlerts({ max: 40 }).catch((e) => {
+      console.error("[api/agent/cron] official", e);
+      return null;
+    });
+
+    let radar: Awaited<ReturnType<typeof runDueAgentTicks>> | null = null;
+    let radarError: string | undefined;
+    if (!keeperConfigured()) {
+      radarError =
+        "Oracast + official agents ticked. Radar auto-wake needs KEEPER_PRIVATE_KEY.";
+    } else if (!process.env.SURF_API_KEY) {
+      radarError = "SURF_API_KEY not configured (Radar ticks skipped)";
+    } else {
+      try {
+        radar = await runDueAgentTicks({
+          maxAgents: Math.min(50, Math.max(1, max || 25)),
+          onlyAgentId: only || undefined,
+        });
+      } catch (e) {
+        console.error("[api/agent/cron] radar", e);
+        radarError = publicErrorMessage(e, "Radar ticks failed");
+      }
+    }
+
+    const [oracast, official] = await Promise.all([oracastP, officialP]);
 
     return NextResponse.json({
       ok: true,
-      autoWake: true,
+      autoWake: Boolean(radar),
       at: new Date().toISOString(),
-      ...out,
+      ticked: radar?.ticked ?? 0,
+      scanned: radar?.scanned ?? 0,
+      results: radar?.results ?? [],
+      keeper: radar?.keeper,
+      keeperOnChain: radar?.keeperOnChain,
       oracast,
       official,
+      ...(radarError ? { error: radarError, hint: radarError } : {}),
     });
   } catch (e: unknown) {
     console.error("[api/agent/cron]", e);

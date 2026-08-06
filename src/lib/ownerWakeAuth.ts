@@ -1,6 +1,6 @@
 /**
  * Browser auto-wake owner proof (not CRON_SECRET).
- * Decision: short-lived signed message (5 min) bound to owner + chain + purpose.
+ * Decision: signed message (~30 min) bound to owner + chain + purpose.
  * Prevents attackers from waking arbitrary owners and burning keeper gas.
  *
  * Nonces are NOT server-consumed (only verified) so the same signed payload
@@ -8,6 +8,8 @@
  *
  * UX: never auto-prompt the wallet. Cache signatures in sessionStorage after
  * an explicit opt-in sign. Peeks never call signMessage.
+ *
+ * 30 min (was 5) so 1-minute agents keep firing without constant re-sign.
  */
 import { verifyMessage, type Address, type Hex } from "viem";
 
@@ -135,7 +137,8 @@ export async function requestAutoWakeAuth(
     typeof crypto !== "undefined" && crypto.randomUUID
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const expiry = Math.floor(Date.now() / 1000) + 5 * 60;
+  // 30 min session — enough for many 1m ticks without re-prompt
+  const expiry = Math.floor(Date.now() / 1000) + 30 * 60;
   const message = buildAutoWakeMessage({ owner, nonce, expiry });
   const signature = await sign(message);
   const auth = { signature, nonce, expiry };
@@ -175,8 +178,13 @@ export async function verifyAutoWakeSig(opts: {
     return "Wallet signature required for auto-wake (owner, signature, nonce, expiry)";
   }
   const now = Math.floor(Date.now() / 1000);
-  if (opts.expiry < now) return "Auto-wake signature expired — refresh the My Agents tab";
-  if (opts.expiry > now + 10 * 60) return "Auto-wake expiry too far in the future";
+  if (opts.expiry < now) {
+    return "Auto-wake signature expired — click Enable auto-wake again";
+  }
+  // Allow up to 35 min (client issues 30 min)
+  if (opts.expiry > now + 35 * 60) {
+    return "Auto-wake expiry too far in the future";
+  }
   if (opts.nonce.length < 8 || opts.nonce.length > 128) return "Invalid auto-wake nonce";
 
   const message = buildAutoWakeMessage({

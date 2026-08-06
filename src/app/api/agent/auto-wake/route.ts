@@ -26,7 +26,8 @@ export const maxDuration = 120;
 async function handle(req: NextRequest) {
   try {
     const ip = clientIp(req);
-    const rl = rateLimit(`auto-wake:${ip}`, 14, 60_000);
+    // Adaptive client polls every ~3–15s when near due — allow burst
+    const rl = rateLimit(`auto-wake:${ip}`, 40, 60_000);
     if (!rl.ok) {
       return NextResponse.json(
         { error: "Too many auto-wake requests — try again shortly" },
@@ -114,7 +115,7 @@ async function handle(req: NextRequest) {
       return NextResponse.json({ error: sigErr, code: "WAKE_AUTH" }, { status: 401 });
     }
 
-    const rlOwner = rateLimit(`auto-wake-owner:${owner}`, 20, 60_000);
+    const rlOwner = rateLimit(`auto-wake-owner:${owner}`, 50, 60_000);
     if (!rlOwner.ok) {
       return NextResponse.json(
         { error: "Too many auto-wake requests for this owner" },

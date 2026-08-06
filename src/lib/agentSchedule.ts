@@ -1,13 +1,23 @@
 /**
  * Agent wake schedule helpers.
  * On-chain stores wakeIntervalBlocks; time-based UI converts via block time.
+ *
+ * Ritual testnet block time is sub-second (~0.2–0.35s measured). Using 2s here
+ * made "1 minute" schedules only ~30 blocks (~6s real), and Math.max(1, …)
+ * previously *prevented* correct sub-second env overrides.
  */
 
-/** Approximate Ritual block time (seconds). Override with NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC */
-export const BLOCK_TIME_SEC = Math.max(
-  1,
-  Number(process.env.NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC || "2") || 2
-);
+/**
+ * Approximate Ritual block time (seconds).
+ * Measured ~0.21s on public RPC; docs ~0.35s. Default 0.25 is a safe middle.
+ * Override with NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC (e.g. "0.22").
+ */
+export const BLOCK_TIME_SEC = (() => {
+  const raw = Number(process.env.NEXT_PUBLIC_RITUAL_BLOCK_TIME_SEC || "0.25");
+  if (!Number.isFinite(raw) || raw <= 0) return 0.25;
+  // Allow sub-second; clamp absurd values
+  return Math.min(5, Math.max(0.05, raw));
+})();
 
 /**
  * Ritual `block.timestamp` is milliseconds (not unix seconds).
@@ -54,7 +64,10 @@ export function blocksToSeconds(blocks: bigint | number): number {
 
 export function formatInterval(blocks: bigint | number): string {
   const sec = blocksToSeconds(blocks);
-  if (sec < 120) return `~${sec}s (${blocks.toString()} blocks)`;
+  if (sec < 90) {
+    const s = Math.max(1, Math.round(sec));
+    return `~${s}s (${blocks.toString()} blocks)`;
+  }
   if (sec < 7200) {
     const m = Math.round(sec / 60);
     return `~${m} min (${blocks.toString()} blocks)`;
@@ -74,6 +87,9 @@ export type DueInfo = {
  * Time-based due check using lastRunAt + interval from blocks.
  * lastRunAt === 0 → due immediately (never run).
  * lastRunAt may be Ritual ms timestamp — normalized via chainTimeToSec.
+ *
+ * Note: on-chain runTick uses lastTickBlock (authoritative). This is for UI
+ * countdown; auto-wake keeper uses block mode when lastTickBlock is available.
  */
 export function computeDue(
   lastRunAt: bigint | number,
@@ -81,7 +97,7 @@ export function computeDue(
   nowSec = Math.floor(Date.now() / 1000)
 ): DueInfo {
   const last = chainTimeToSec(lastRunAt);
-  const intervalSec = blocksToSeconds(wakeIntervalBlocks);
+  const intervalSec = Math.max(1, Math.round(blocksToSeconds(wakeIntervalBlocks)));
   const nextRunAt = last === 0 ? nowSec : last + intervalSec;
   const secondsUntilDue = Math.max(0, nextRunAt - nowSec);
   return {
@@ -90,6 +106,21 @@ export function computeDue(
     intervalSec,
     secondsUntilDue,
   };
+}
+
+/**
+ * Adaptive client poll delay (ms) so near-due agents wake quickly
+ * without hammering the API when the next tick is far away.
+ */
+export function autoWakePollMs(secondsUntilDue: number | null | undefined): number {
+  if (secondsUntilDue == null || !Number.isFinite(secondsUntilDue)) {
+    return 8_000;
+  }
+  if (secondsUntilDue <= 0) return 3_000; // overdue — hammer lightly
+  if (secondsUntilDue <= 15) return 4_000;
+  if (secondsUntilDue <= 45) return 6_000;
+  if (secondsUntilDue <= 120) return 10_000;
+  return 15_000;
 }
 
 export function formatCountdown(seconds: number): string {

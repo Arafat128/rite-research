@@ -248,13 +248,16 @@ function takeLast<T>(arr: T[], n: number): T[] {
   return arr.slice(arr.length - n);
 }
 
-async function surfGet(path: string): Promise<Record<string, unknown>> {
+async function surfGet(
+  path: string,
+  timeoutMs = 45_000
+): Promise<Record<string, unknown>> {
   const endpoint = `${baseUrl()}${path.startsWith("/") ? path : `/${path}`}`;
   if (!endpoint.startsWith(baseUrl())) {
     throw new Error("Invalid data endpoint");
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45_000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
     res = await fetch(endpoint, {
@@ -1172,7 +1175,8 @@ async function fetchRitualNetwork(): Promise<
 
 export async function fetchSurfData(
   kindId: DataKindId,
-  target: string
+  target: string,
+  opts?: { timeoutMs?: number }
 ): Promise<SurfDataSnapshot> {
   // Map legacy kinds from old agents
   const resolvedId = (LEGACY_KIND_MAP[kindId] || kindId) as DataKindId;
@@ -1181,6 +1185,7 @@ export async function fetchSurfData(
 
   const t =
     sanitizeDataTarget(target || kind.defaultTarget, 48) || kind.defaultTarget;
+  const surfTimeout = opts?.timeoutMs ?? 45_000;
 
   let shaped: Omit<
     SurfDataSnapshot,
@@ -1190,17 +1195,17 @@ export async function fetchSurfData(
 
   switch (resolvedId) {
     case "market_price": {
-      const json = await surfGet(kind.path(t));
+      const json = await surfGet(kind.path(t), surfTimeout);
       shaped = summarizeMarketPrice(json, t);
       break;
     }
     case "fear_greed": {
-      const json = await surfGet(kind.path(t));
+      const json = await surfGet(kind.path(t), surfTimeout);
       shaped = summarizeFearGreed(json);
       break;
     }
     case "news_feed": {
-      const json = await surfGet(kind.path(t));
+      const json = await surfGet(kind.path(t), surfTimeout);
       shaped = summarizeNews(json);
       break;
     }
@@ -1223,13 +1228,15 @@ export async function fetchSurfData(
         : `${t.toUpperCase()}-USDT`;
       try {
         const json = await surfGet(
-          `/exchange/perp?pair=${encodeURIComponent(pair)}`
+          `/exchange/perp?pair=${encodeURIComponent(pair)}`,
+          surfTimeout
         );
         const oi = summarizeOiSkew(json, pair);
         // Optional L/S enrich
         try {
           const ls = await surfGet(
-            `/exchange/long-short-ratio?pair=${encodeURIComponent(pair)}`
+            `/exchange/long-short-ratio?pair=${encodeURIComponent(pair)}`,
+            Math.min(surfTimeout, 8_000)
           );
           const data = Array.isArray(ls.data)
             ? (ls.data[0] as Record<string, unknown>)
@@ -1267,7 +1274,8 @@ export async function fetchSurfData(
         // last resort: liquidations (if restored)
         try {
           const json = await surfGet(
-            `/market/liquidations?symbol=${encodeURIComponent(t.toUpperCase())}&limit=2`
+            `/market/liquidations?symbol=${encodeURIComponent(t.toUpperCase())}&limit=2`,
+            surfTimeout
           );
           shaped = summarizeWhale(json, t);
           endpoint = "/market/liquidations";
@@ -1283,12 +1291,14 @@ export async function fetchSurfData(
         ? t.toUpperCase()
         : `${t.toUpperCase()}-USDT`;
       const json = await surfGet(
-        `/exchange/perp?pair=${encodeURIComponent(pair)}`
+        `/exchange/perp?pair=${encodeURIComponent(pair)}`,
+        surfTimeout
       );
       shaped = summarizeOiSkew(json, pair);
       try {
         const ls = await surfGet(
-          `/exchange/long-short-ratio?pair=${encodeURIComponent(pair)}`
+          `/exchange/long-short-ratio?pair=${encodeURIComponent(pair)}`,
+          Math.min(surfTimeout, 8_000)
         );
         const data = Array.isArray(ls.data)
           ? (ls.data[0] as Record<string, unknown>)
@@ -1326,12 +1336,13 @@ export async function fetchSurfData(
       const q = t && t !== "_" ? t : "crypto";
       try {
         const json = await surfGet(
-          `/news/feed?limit=8&q=${encodeURIComponent(q)}`
+          `/news/feed?limit=8&q=${encodeURIComponent(q)}`,
+          surfTimeout
         );
         shaped = summarizeNews(json);
         shaped.summary = `News for “${q}” · ${shaped.summary}`;
       } catch {
-        const json = await surfGet(`/news/feed?limit=8`);
+        const json = await surfGet(`/news/feed?limit=8`, surfTimeout);
         shaped = summarizeNews(json);
       }
       endpoint = "/news/feed";
