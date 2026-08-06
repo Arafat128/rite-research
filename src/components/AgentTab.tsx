@@ -1298,8 +1298,21 @@ export function AgentTab({
       );
       toast.success(
         `Agent #${newId} deployed`,
-        "Open My Agents to activate & wake"
+        "Open My Agents → Activate (LIVE) for auto ticks + Telegram"
       );
+      // Pre-arm unattended chain (still need Activate for LIVE status)
+      if (address) {
+        void fetch("/api/agent/arm-unattended", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            owner: address,
+            agentId: newId.toString(),
+            kick: false,
+          }),
+          cache: "no-store",
+        }).catch(() => undefined);
+      }
       await refresh();
     } catch (e: unknown) {
       setMsg("");
@@ -1652,6 +1665,19 @@ export function AgentTab({
       }
       setMsg(active ? "Agent LIVE" : "Agent Paused");
       toast.success(active ? "Agent is LIVE" : "Agent paused");
+      // Critical for closed-tab: arm unattended keeper + optional immediate tick
+      if (active && address) {
+        void fetch("/api/agent/arm-unattended", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            owner: address,
+            agentId: selectedId.toString(),
+            kick: true,
+          }),
+          cache: "no-store",
+        }).catch(() => undefined);
+      }
       await refresh({ soft: true });
     } catch (e: unknown) {
       setMsg("");

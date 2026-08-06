@@ -128,8 +128,8 @@ async function handle(req: NextRequest) {
 
     const [oracast, official] = await Promise.all([oracastP, officialP]);
 
-    // Keep closed-tab coverage warm (self-chain + optional QStash)
-    void sustainUnattendedCoverage().catch(() => undefined);
+    // Keep closed-tab coverage warm (in-process self-chain + optional QStash)
+    void sustainUnattendedCoverage({ kickNow: false }).catch(() => undefined);
 
     return NextResponse.json({
       ok: true,

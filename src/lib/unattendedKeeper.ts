@@ -1,17 +1,23 @@
 /**
  * Keep Radar agents + Oracast ticking when the browser tab is closed.
  *
- * Strategy (layered):
- * 1. GitHub Action agent-keeper.yml — every 10m, 9×1m pokes (must not cancel mid-loop)
- * 2. Vercel Cron → /api/agent/cron (Hobby = daily only; Pro can be * * * * *)
- * 3. QStash 1m schedule if QSTASH_TOKEN is set
- * 4. Server self-chain: after each successful keeper poke, schedule +55s follow-up
- *    via waitUntil (survives tab close as long as the chain is warm)
+ * Impactful design:
+ * - Do NOT rely on HTTP self-fetch to /api/agent/cron (breaks on wrong APP_URL,
+ *   protection bypass, or cold isolation).
+ * - Run keeper work IN-PROCESS after delay via waitUntil.
+ * - GitHub Action every 5m as external heartbeat (cancel-in-progress: false).
+ * - Optional QStash true 1m if QSTASH_TOKEN is set.
  */
 
-import { kvSetNx, kvGet, kvSet } from "@/lib/durableKv";
+import {
+  keeperConfigured,
+  runDueAgentTicks,
+} from "@/lib/agentKeeper";
+import { tickOracastWatches } from "@/lib/oracastWatch";
+import { tickOfficialAgentAlerts } from "@/lib/officialAgentRegistry";
+import { kvSetNx, kvGet, kvSet, kvDel } from "@/lib/durableKv";
 
-const CHAIN_LOCK = "rite:keeper:chain:v1";
+const CHAIN_LOCK = "rite:keeper:chain:v2";
 const QSTASH_ARMED = "rite:keeper:qstash:armed:v1";
 
 export function appPublicBaseUrl(): string | null {
@@ -24,7 +30,6 @@ export function appPublicBaseUrl(): string | null {
   const prod = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
   if (prod) return `https://${prod.replace(/^https?:\/\//, "")}`;
 
-  // Prefer production alias when available
   if (process.env.VERCEL_ENV === "production") {
     return "https://rite-woad.vercel.app";
   }
@@ -38,114 +43,127 @@ function cronSecret(): string | null {
   return process.env.CRON_SECRET?.trim() || null;
 }
 
+export type KeeperPassResult = {
+  ok: boolean;
+  ticked: number;
+  oracastNotified: number;
+  error?: string;
+};
+
 /**
- * Fire the full unattended keeper endpoint once (Radar + Oracast + official).
+ * Full unattended pass — same work as /api/agent/cron, in-process.
  */
-export async function pokeFullKeeper(opts?: {
-  max?: number;
-  reason?: string;
-}): Promise<{ ok: boolean; status: number; body?: string }> {
-  const base = appPublicBaseUrl();
-  const secret = cronSecret();
-  if (!base || !secret) {
-    return { ok: false, status: 0, body: "APP_URL/CRON_SECRET missing" };
-  }
-  const max = opts?.max ?? 40;
-  const url = `${base}/api/agent/cron?max=${max}&_src=${encodeURIComponent(opts?.reason || "chain")}`;
+export async function runKeeperPassInProcess(opts?: {
+  onlyOwner?: string;
+  onlyAgentId?: string;
+  maxAgents?: number;
+}): Promise<KeeperPassResult> {
+  let ticked = 0;
+  let oracastNotified = 0;
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        "Content-Type": "application/json",
-        "User-Agent": "rite-unattended-keeper/1.0",
-      },
-      body: "{}",
-      cache: "no-store",
+    const oracastP = tickOracastWatches({
+      onlyOwner: opts?.onlyOwner,
+      max: 40,
+    }).catch((e) => {
+      console.error("[unattendedKeeper] oracast", e);
+      return null;
     });
-    const text = await res.text().catch(() => "");
-    return { ok: res.ok, status: res.status, body: text.slice(0, 400) };
+    const officialP = tickOfficialAgentAlerts({ max: 40 }).catch((e) => {
+      console.error("[unattendedKeeper] official", e);
+      return null;
+    });
+
+    if (keeperConfigured() && process.env.SURF_API_KEY) {
+      try {
+        const radar = await runDueAgentTicks({
+          maxAgents: opts?.maxAgents ?? 40,
+          onlyAgentId: opts?.onlyAgentId,
+          onlyOwner: opts?.onlyOwner,
+        });
+        ticked = radar.ticked;
+      } catch (e) {
+        console.error("[unattendedKeeper] radar", e);
+      }
+    }
+
+    const [oracast] = await Promise.all([oracastP, officialP]);
+    oracastNotified = oracast?.notified ?? 0;
+
+    return { ok: true, ticked, oracastNotified };
   } catch (e) {
     return {
       ok: false,
-      status: 0,
-      body: e instanceof Error ? e.message : "fetch failed",
+      ticked,
+      oracastNotified,
+      error: e instanceof Error ? e.message : "keeper pass failed",
     };
   }
 }
 
 /**
- * After a successful keeper/auto-wake pass, arm a +55s follow-up so closed-tab
- * coverage continues without the browser. Uses durable NX lock so only one
- * chain runs fleet-wide.
+ * Schedule an in-process keeper pass after delayMs.
+ * Survives tab close when started via waitUntil on a completed request.
  */
 export async function armNextKeeperPoke(opts?: {
   delayMs?: number;
   force?: boolean;
 }): Promise<{ armed: boolean; reason: string }> {
-  const secret = cronSecret();
-  const base = appPublicBaseUrl();
-  if (!secret || !base) {
-    return { armed: false, reason: "missing_app_url_or_cron_secret" };
-  }
-
   const delayMs = Math.min(
     90_000,
-    Math.max(20_000, opts?.delayMs ?? 55_000)
+    Math.max(15_000, opts?.delayMs ?? 50_000)
   );
 
-  // Only one pending chain across all instances
   if (!opts?.force) {
-    const got = await kvSetNx(CHAIN_LOCK, String(Date.now()), 70);
+    const got = await kvSetNx(CHAIN_LOCK, String(Date.now()), 65);
     if (!got) {
       return { armed: false, reason: "chain_already_armed" };
     }
   } else {
-    await kvSet(CHAIN_LOCK, String(Date.now()), 70);
+    await kvSet(CHAIN_LOCK, String(Date.now()), 65);
   }
 
   const run = async () => {
     try {
       await new Promise((r) => setTimeout(r, delayMs));
-      const out = await pokeFullKeeper({ reason: "self_chain" });
-      // Clear lock so a later poke can re-arm
+      const out = await runKeeperPassInProcess({ maxAgents: 40 });
+      console.info(
+        "[unattendedKeeper] chain pass ticked=",
+        out.ticked,
+        "oracast=",
+        out.oracastNotified,
+        out.error || "ok"
+      );
       try {
-        const { kvDel } = await import("@/lib/durableKv");
         await kvDel(CHAIN_LOCK);
       } catch {
         /* */
       }
-      if (!out.ok) {
-        console.warn(
-          "[unattendedKeeper] self_chain poke failed",
-          out.status,
-          out.body
-        );
-        return;
-      }
-      // Continue the chain for closed-tab coverage
-      void armNextKeeperPoke({ delayMs: 55_000 }).catch(() => undefined);
+      // Always re-arm so 1m agents keep firing with tab closed
+      void armNextKeeperPoke({ delayMs: 50_000 }).catch(() => undefined);
     } catch (e) {
       console.warn("[unattendedKeeper] chain error", e);
+      try {
+        await kvDel(CHAIN_LOCK);
+      } catch {
+        /* */
+      }
+      // Retry arm after failure (shorter backoff)
+      void armNextKeeperPoke({ delayMs: 30_000, force: true }).catch(
+        () => undefined
+      );
     }
   };
 
-  // Prefer Vercel waitUntil so work continues after the HTTP response
   try {
     const { waitUntil } = await import("@vercel/functions");
     waitUntil(run());
     return { armed: true, reason: "waitUntil" };
   } catch {
-    // Local / no package — still schedule in process (best effort)
     void run();
     return { armed: true, reason: "background" };
   }
 }
 
-/**
- * Ensure a QStash * * * * * schedule exists (one-time arm).
- * Requires QSTASH_TOKEN + CRON_SECRET + resolvable APP_URL.
- */
 export async function ensureQStashMinuteSchedule(): Promise<{
   ok: boolean;
   reason: string;
@@ -177,7 +195,11 @@ export async function ensureQStashMinuteSchedule(): Promise<{
     );
     const text = await res.text();
     if (!res.ok) {
-      console.warn("[unattendedKeeper] qstash schedule failed", res.status, text.slice(0, 200));
+      console.warn(
+        "[unattendedKeeper] qstash schedule failed",
+        res.status,
+        text.slice(0, 200)
+      );
       return { ok: false, reason: `qstash_${res.status}` };
     }
     await kvSet(QSTASH_ARMED, "1", 86400 * 7);
@@ -191,16 +213,39 @@ export async function ensureQStashMinuteSchedule(): Promise<{
   }
 }
 
-/** Call from browser pokes + cron so unattended path stays hot */
-export async function sustainUnattendedCoverage(): Promise<void> {
+/**
+ * Arm closed-tab chain. Optionally run a pass immediately (e.g. after Activate).
+ */
+export async function sustainUnattendedCoverage(opts?: {
+  kickNow?: boolean;
+  onlyOwner?: string;
+  onlyAgentId?: string;
+}): Promise<{
+  armed: { armed: boolean; reason: string };
+  kick?: KeeperPassResult;
+  qstash?: { ok: boolean; reason: string };
+}> {
+  let qstash: { ok: boolean; reason: string } | undefined;
   try {
-    await ensureQStashMinuteSchedule();
+    qstash = await ensureQStashMinuteSchedule();
   } catch {
-    /* optional */
+    qstash = { ok: false, reason: "qstash_error" };
   }
-  try {
-    await armNextKeeperPoke({ delayMs: 55_000 });
-  } catch (e) {
-    console.warn("[unattendedKeeper] arm failed", e);
+
+  let kick: KeeperPassResult | undefined;
+  if (opts?.kickNow) {
+    kick = await runKeeperPassInProcess({
+      onlyOwner: opts.onlyOwner,
+      onlyAgentId: opts.onlyAgentId,
+      maxAgents: 20,
+    });
   }
+
+  // Force re-arm so Activate always starts a fresh chain
+  const armed = await armNextKeeperPoke({
+    delayMs: 50_000,
+    force: Boolean(opts?.kickNow),
+  });
+
+  return { armed, kick, qstash };
 }

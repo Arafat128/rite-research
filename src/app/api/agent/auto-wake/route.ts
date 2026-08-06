@@ -110,8 +110,8 @@ async function handle(req: NextRequest) {
       onlyOwner: owner,
     });
 
-    // Arm closed-tab follow-up so leaving the site does not stop ticks for ~1m+
-    void sustainUnattendedCoverage().catch(() => undefined);
+    // Arm closed-tab chain (in-process waitUntil — no HTTP self-call)
+    void sustainUnattendedCoverage({ kickNow: false }).catch(() => undefined);
 
     return NextResponse.json({
       ok: true,

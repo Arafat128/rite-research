@@ -1,34 +1,26 @@
-# Closed-tab coverage: Radar auto-wake + Oracast DMs + official agents.
+# Closed-tab: poke production keeper every 5 minutes (single pass, reliable).
 #
-# CRITICAL: do NOT use cancel-in-progress: true with long loops.
-# Old config scheduled every 15m with cancel-in-progress → each new run
-# aborted the previous 50m poke loop, so closed-tab ticks almost never ran.
-#
-# Design: every 10 minutes, run ~9 pokes at 60s spacing (finishes before next).
-# Overlap allowed (cancel-in-progress: false) so coverage never gaps.
-#
-# Secrets: APP_URL (https://rite-woad.vercel.app), CRON_SECRET
+# Secrets: APP_URL=https://rite-woad.vercel.app , CRON_SECRET
 # Optional: VERCEL_AUTOMATION_BYPASS_SECRET
-# Best extra: Upstash QStash 1m (scripts/setup-qstash-cron.mjs)
+#
+# Server also self-chains ~50s after each arm/activate for denser coverage.
 
 name: Agent keeper (unattended)
 
 on:
   schedule:
-    # Every 10 minutes — reliable enough for 1m agents (server also self-chains)
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
   group: agent-keeper
-  # NEVER cancel — that was killing the poke loop every 15 minutes
   cancel-in-progress: false
 
 jobs:
   wake:
-    name: Keeper loop (1m × 9)
+    name: Keeper poke
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 5
     steps:
       - name: Check secrets
         env:
@@ -36,16 +28,15 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           if [ -z "$APP_URL" ]; then
-            echo "::error::Missing secret APP_URL (use https://rite-woad.vercel.app)"
+            echo "::error::Missing secret APP_URL (https://rite-woad.vercel.app)"
             exit 1
           fi
           if [ -z "$CRON_SECRET" ]; then
             echo "::error::Missing secret CRON_SECRET"
             exit 1
           fi
-          echo "APP_URL configured"
 
-      - name: Poke loop
+      - name: Poke production cron
         env:
           APP_URL: ${{ secrets.APP_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -53,84 +44,39 @@ jobs:
         run: |
           set -u
           BASE="${APP_URL%/}"
+          url="${BASE}/api/agent/cron?max=40"
+          if [ -n "${BYPASS:-}" ]; then
+            url="${url}&x-vercel-protection-bypass=${BYPASS}"
+          fi
 
-          curl_auth() {
-            local method="$1" out="$2" path="$3"
-            shift 3
-            local url="${BASE}${path}"
-            if [ -n "${BYPASS:-}" ]; then
-              case "$url" in
-                *\?*) url="${url}&x-vercel-protection-bypass=${BYPASS}" ;;
-                *)    url="${url}?x-vercel-protection-bypass=${BYPASS}" ;;
-              esac
-            fi
-            curl -sS -o "$out" -w "%{http_code}" \
-              --max-time 110 \
-              -X "$method" \
-              -H "Authorization: Bearer ${CRON_SECRET}" \
-              -H "Content-Type: application/json" \
-              -H "User-Agent: rite-agent-keeper/3.0" \
-              "$@" \
-              "$url" || echo "000"
-          }
+          code=$(curl -sS -o /tmp/cron.json -w "%{http_code}" \
+            --max-time 110 \
+            -X POST \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: rite-agent-keeper/4.0" \
+            -d '{}' \
+            "$url" || echo "000")
 
-          poke() {
-            local label="$1"
-            echo ""
-            echo "=== ${label} $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+          echo "cron HTTP $code"
+          cat /tmp/cron.json 2>/dev/null; echo
 
-            code=$(curl_auth GET /tmp/health.json "/api/agent/cron?health=1")
-            echo "health HTTP $code"
-            if [ "$code" != "200" ]; then
-              cat /tmp/health.json 2>/dev/null || true
-              echo
-              return 1
-            fi
+          if [ "$code" != "200" ]; then
+            echo "::error::Keeper poke failed HTTP $code"
+            exit 1
+          fi
 
-            # Full keeper: Radar agents + Oracast + official
-            code=$(curl_auth POST /tmp/cron.json "/api/agent/cron?max=40" -d '{}')
-            echo "cron HTTP $code"
-            cat /tmp/cron.json 2>/dev/null; echo
-
-            if command -v python3 >/dev/null 2>&1; then
-              python3 - <<'PY'
+          python3 - <<'PY' || true
           import json
-          try:
-              d=json.load(open("/tmp/cron.json"))
-              print("ticked=", d.get("ticked"), "scanned=", d.get("scanned"))
-              oc=d.get("oracast") or {}
-              print("oracast notified=", oc.get("notified"), "scanned=", oc.get("scanned"))
-              for r in d.get("results") or []:
-                  if r.get("ok"):
-                      print("OK agent", r.get("agentId"), str(r.get("txHash") or "")[:18], r.get("telegram"))
-                  elif r.get("error"):
-                      print("ERR agent", r.get("agentId"), str(r.get("error"))[:120])
-                  elif r.get("skipped") and "not_due" not in str(r.get("skipped")) and r.get("skipped") not in ("dead","not_active","not_owner","unknown_agent"):
-                      print("SKIP", r.get("agentId"), r.get("skipped"))
-          except Exception as e:
-              print("cron parse", e)
+          d=json.load(open("/tmp/cron.json"))
+          print("ticked=", d.get("ticked"), "scanned=", d.get("scanned"))
+          oc=(d.get("oracast") or {})
+          print("oracast notified=", oc.get("notified"))
+          for r in d.get("results") or []:
+              if r.get("ok"):
+                  print("OK", r.get("agentId"), r.get("telegram"), str(r.get("txHash") or "")[:16])
+              elif r.get("error"):
+                  print("ERR", r.get("agentId"), str(r.get("error"))[:100])
+              elif r.get("skipped") in ("not_active","insufficient_balance"):
+                  print("NEED", r.get("agentId"), r.get("skipped"))
           PY
-            fi
-
-            [ "$code" = "200" ] || return 1
-            return 0
-          }
-
-          fails=0
-          for i in $(seq 1 9); do
-            if poke "${i}/9"; then
-              fails=0
-            else
-              fails=$((fails+1))
-              echo "::warning::poke ${i} failed (fail streak ${fails})"
-              if [ "$fails" -ge 3 ] && [ "$i" -eq 1 ]; then
-                echo "::error::First pokes failed — check APP_URL, CRON_SECRET, Deployment Protection"
-                exit 1
-              fi
-            fi
-            if [ "$i" -lt 9 ]; then
-              sleep 60
-            fi
-          done
-
-          echo "Keeper loop finished"
