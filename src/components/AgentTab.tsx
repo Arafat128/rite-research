@@ -710,7 +710,7 @@ export function AgentTab({
       timer = setTimeout(() => void poke("poll"), Math.max(2_500, ms));
     };
 
-    const poke = async (reason: string) => {
+    const poke = async (_reason: string) => {
       if (cancelled) return;
       if (inFlight || ticking || writeBusy) {
         pendingPoke = true;
