@@ -459,6 +459,7 @@ export function OracastMarketTab() {
         const receipt = await publicClient.waitForTransactionReceipt({
           hash,
           timeout: 120_000,
+          pollingInterval: 400,
         });
         if (receipt.status !== "success") {
           throw new Error("Deposit transaction failed");
@@ -601,6 +602,7 @@ export function OracastMarketTab() {
       const receipt = await publicClient.waitForTransactionReceipt({
         hash,
         timeout: 120_000,
+        pollingInterval: 400,
       });
       if (receipt.status !== "success") {
         throw new Error("Top-up transaction reverted");

@@ -454,7 +454,11 @@ export function ResearchTab() {
       args: [BigInt(researchId), resultHash],
       chainId: ritualChain.id,
     });
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: settleHash });
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: settleHash,
+      timeout: 90_000,
+      pollingInterval: 400,
+    });
     if (receipt.status !== "success") {
       throw new Error("Seal transaction reverted");
     }
@@ -633,7 +637,11 @@ export function ResearchTab() {
       });
       setStatus(`Payment sent ${hash.slice(0, 14)}… waiting for confirmation`);
 
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: 90_000,
+        pollingInterval: 400,
+      });
       if (receipt.status !== "success") throw new Error("Payment tx reverted");
 
       // Keep prompt + tx so claim works even if Surf fails mid-flight

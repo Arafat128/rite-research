@@ -353,13 +353,49 @@ function sleepMs(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Cached eth_gasPrice — avoids an extra RPC on every button click (~0.3–1s). */
+let _gasPriceCache: { at: number; price: bigint } | null = null;
+const GAS_PRICE_TTL_MS = 20_000;
+
+async function getRitualGasPriceCached(): Promise<bigint> {
+  const now = Date.now();
+  if (_gasPriceCache && now - _gasPriceCache.at < GAS_PRICE_TTL_MS) {
+    return _gasPriceCache.price;
+  }
+  let gasPrice: bigint;
+  try {
+    gasPrice = await getRitualReadClient().getGasPrice();
+  } catch {
+    gasPrice = BigInt(1_500_000_000); // 1.5 gwei fallback
+  }
+  // Ritual feeHistory baseFee is ~7 wei — never trust sub-gwei for MetaMask
+  const minGwei = BigInt(1_000_000_000);
+  if (gasPrice < minGwei) gasPrice = minGwei;
+  gasPrice = (gasPrice * BigInt(120)) / BigInt(100);
+  _gasPriceCache = { at: now, price: gasPrice };
+  return gasPrice;
+}
+
+const GAS_FLOORS: Partial<Record<string, bigint>> = {
+  runTick: BigInt(280_000),
+  createAgent: BigInt(350_000),
+  setWatchlist: BigInt(200_000),
+  killAgent: BigInt(200_000),
+  withdraw: BigInt(150_000),
+  setActive: BigInt(120_000),
+  setPaused: BigInt(120_000),
+  fundAgent: BigInt(120_000),
+  setWakeInterval: BigInt(120_000),
+};
+
 /**
  * Simulate + estimate gas for a RadarAgent write.
  * Throws with a decoded message if the call would revert.
  *
- * Ritual public RPC frequently fails eth_estimateGas with
- * "Transaction creation failed" even when runTick is valid — we retry,
- * then fall back to a safe gas floor so Wake still opens the wallet.
+ * Optimized for click→MetaMask latency on Ritual:
+ * - gasPrice fetched in parallel with simulate/estimate
+ * - 2 attempts max (was 3) with short backoff
+ * - floor gas after one flaky estimate (still safe floors)
  */
 export async function prepareRadarWrite(opts: {
   account: Address;
@@ -394,10 +430,13 @@ export async function prepareRadarWrite(opts: {
     ...(opts.value != null ? { value: opts.value } : {}),
   } as const;
 
-  // --- simulate (retries on flaky RPC) ---
+  // Overlap fee fetch with sim/estimate — usually shaves one RTT before wallet
+  const gasPriceP = getRitualGasPriceCached();
+
+  // --- simulate (2 tries on flaky RPC; fail-fast on real reverts) ---
   let simulated = false;
   let lastSimErr: unknown;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 2; i++) {
     const client = getRitualReadClient(i > 0);
     try {
       await client.simulateContract({
@@ -409,8 +448,8 @@ export async function prepareRadarWrite(opts: {
       break;
     } catch (e) {
       lastSimErr = e;
-      if (isRitualRpcFlake(e) && i < 2) {
-        await sleepMs(350 * (i + 1));
+      if (isRitualRpcFlake(e) && i < 1) {
+        await sleepMs(180);
         continue;
       }
       if (!isRitualRpcFlake(e)) {
@@ -422,10 +461,10 @@ export async function prepareRadarWrite(opts: {
     throw new Error(decodeRadarRevert(lastSimErr, opts.functionName));
   }
 
-  // --- estimate gas (retries → floor on RPC flake) ---
+  // --- estimate gas (2 tries → floor on RPC flake) ---
   let gas: bigint | null = null;
   let lastEstErr: unknown;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 2; i++) {
     const client = getRitualReadClient(i > 0);
     try {
       gas = await client.estimateContractGas(base as never);
@@ -433,8 +472,8 @@ export async function prepareRadarWrite(opts: {
       break;
     } catch (e) {
       lastEstErr = e;
-      if (isRitualRpcFlake(e) && i < 2) {
-        await sleepMs(350 * (i + 1));
+      if (isRitualRpcFlake(e) && i < 1) {
+        await sleepMs(180);
         continue;
       }
       if (!isRitualRpcFlake(e)) {
@@ -447,19 +486,7 @@ export async function prepareRadarWrite(opts: {
   }
 
   if (gas == null) {
-    // Flaky eth_estimateGas only — use function-specific safe floor
-    const defaults: Partial<Record<string, bigint>> = {
-      runTick: BigInt(280_000),
-      createAgent: BigInt(350_000),
-      setWatchlist: BigInt(200_000),
-      killAgent: BigInt(200_000),
-      withdraw: BigInt(150_000),
-      setActive: BigInt(120_000),
-      setPaused: BigInt(120_000),
-      fundAgent: BigInt(120_000),
-      setWakeInterval: BigInt(120_000),
-    };
-    gas = defaults[opts.functionName] ?? floor;
+    gas = GAS_FLOORS[opts.functionName] ?? floor;
     if (lastEstErr && !isRitualRpcFlake(lastEstErr)) {
       throw new Error(
         decodeRadarRevert(lastEstErr, opts.functionName) ||
@@ -468,24 +495,34 @@ export async function prepareRadarWrite(opts: {
     }
   } else {
     // Headroom for Ritual RPC variance + refunds (withdraw/kill send value out)
-    gas = (gas * BigInt(150)) / BigInt(100);
+    gas = (gas * BigInt(140)) / BigInt(100);
   }
 
   if (gas < floor) gas = floor;
   if (gas > BigInt(800_000)) gas = BigInt(800_000);
 
-  let gasPrice: bigint;
-  try {
-    gasPrice = await getRitualReadClient(true).getGasPrice();
-  } catch {
-    gasPrice = BigInt(1_500_000_000); // 1.5 gwei fallback
-  }
-  // Ritual feeHistory baseFee is ~7 wei — never trust sub-gwei for MetaMask
-  const minGwei = BigInt(1_000_000_000);
-  if (gasPrice < minGwei) gasPrice = minGwei;
-  gasPrice = (gasPrice * BigInt(120)) / BigInt(100);
+  const gasPrice = await gasPriceP;
 
   return { gas, gasPrice };
+}
+
+/**
+ * Wait for a Ritual tx with aggressive polling.
+ * Ritual ~0.25s blocks; wagmi default ~4s polling feels stuck after MetaMask confirm.
+ */
+export async function waitRitualTxReceipt(
+  hash: `0x${string}`,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client?: { waitForTransactionReceipt: (opts: any) => Promise<any> }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any> {
+  const c = client ?? getRitualReadClient();
+  return c.waitForTransactionReceipt({
+    hash,
+    confirmations: 1,
+    timeout: 90_000,
+    pollingInterval: 350,
+  });
 }
 
 /** Ensure the EOA can pay gas (agent balance cannot). */

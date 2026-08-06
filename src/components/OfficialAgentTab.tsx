@@ -248,6 +248,7 @@ export function OfficialAgentTab({ mode }: Props) {
             const r = await publicClient.waitForTransactionReceipt({
               hash,
               timeout: 180_000,
+              pollingInterval: 400,
             });
             if (r.status !== "success") {
               throw new Error(
@@ -380,6 +381,7 @@ export function OfficialAgentTab({ mode }: Props) {
             const r1 = await publicClient.waitForTransactionReceipt({
               hash: deployHash,
               timeout: 180_000,
+              pollingInterval: 400,
             });
             if (r1.status !== "success") {
               const used = r1.gasUsed;
@@ -458,6 +460,7 @@ export function OfficialAgentTab({ mode }: Props) {
             const r2 = await publicClient.waitForTransactionReceipt({
               hash: cfgHash,
               timeout: 180_000,
+              pollingInterval: 400,
             });
             if (r2.status !== "success") {
               const used = r2.gasUsed;
@@ -537,6 +540,7 @@ export function OfficialAgentTab({ mode }: Props) {
           const receipt = await publicClient.waitForTransactionReceipt({
             hash,
             timeout: 180_000,
+            pollingInterval: 400,
           });
           if (receipt.status !== "success") {
             throw new Error(

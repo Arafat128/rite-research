@@ -178,6 +178,8 @@ export function BountyBanner() {
       const receipt = await client.waitForTransactionReceipt({
         hash,
         confirmations: 1,
+        timeout: 90_000,
+        pollingInterval: 400,
       });
       if (receipt.status !== "success") {
         throw new Error("Claim transaction reverted");

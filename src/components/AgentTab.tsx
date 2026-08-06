@@ -88,6 +88,7 @@ import {
   prepareRadarWrite,
   radarHasKnownKill,
   supportsKillAgent,
+  waitRitualTxReceipt,
 } from "@/lib/radarWrite";
 import { useToast } from "@/components/ToastProvider";
 import { OpenOnRadar } from "@/components/OpenOnRadar";
@@ -530,11 +531,12 @@ export function AgentTab({
       setErrorReport(null);
     }
     try {
-      // Soft ping only — do not hard-fail the whole tab on one empty RPC response
-      const ok = await pingRadar();
-      if (!ok) {
-        // Still try owner reads; RPC often recovers mid-flow
-        console.warn("[radar] ping failed, continuing with retries");
+      // Soft refresh: skip ping + kill probe (known map already set) for snappier post-tx UI
+      if (!opts?.soft) {
+        const ok = await pingRadar();
+        if (!ok) {
+          console.warn("[radar] ping failed, continuing with retries");
+        }
       }
 
       const count = await readOwnerAgentCount(address);
@@ -544,13 +546,14 @@ export function AgentTab({
       }
       setAgentIds(ids);
 
-      // Kill support: known map first, then bytecode (never false on 0x50a3)
-      try {
-        const known = radarHasKnownKill();
-        if (known != null) setCanKillOnChain(known);
-        else setCanKillOnChain(await supportsKillAgent());
-      } catch {
-        setCanKillOnChain(radarHasKnownKill() ?? true);
+      if (!opts?.soft || canKillOnChain == null) {
+        try {
+          const known = radarHasKnownKill();
+          if (known != null) setCanKillOnChain(known);
+          else setCanKillOnChain(await supportsKillAgent());
+        } catch {
+          setCanKillOnChain(radarHasKnownKill() ?? true);
+        }
       }
 
       // Load meta in parallel (big win when user owns many agents)
@@ -1134,12 +1137,10 @@ export function AgentTab({
   }
 
   async function waitTx(hash: `0x${string}`) {
-    const client = publicClient ?? getRitualReadClient(true);
-    const receipt = await client.waitForTransactionReceipt({
-      hash,
-      confirmations: 1,
-    });
-    if (receipt.status !== "success") {
+    // Fast poll — Ritual blocks ~0.25s; default ~4s polling stalls the UI after confirm
+    const client = publicClient ?? getRitualReadClient();
+    const receipt = await waitRitualTxReceipt(hash, client as never);
+    if (receipt.status !== "success" && receipt.status !== 1 && receipt.status !== "0x1") {
       throw new Error(`Transaction reverted (${hash.slice(0, 12)}…)`);
     }
     return receipt;
@@ -1148,7 +1149,7 @@ export function AgentTab({
   /**
    * Write to Radar with simulate + explicit legacy gasPrice.
    * Fixes MetaMask "gas unavailable" on Ritual for withdraw/kill refunds.
-   * Retries once on "nonce too low" (common after rapid status / deploy / wake).
+   * First try: let MetaMask pick nonce (fast). Retry with pending nonce only on conflict.
    */
   async function radarWrite(opts: {
     functionName:
@@ -1178,11 +1179,11 @@ export function AgentTab({
       });
       assertWalletCanPayGas(walletBal?.value, fees, opts.value ?? BigInt(0));
 
-      // Fresh nonce from chain (pending) so MetaMask does not reuse a mined nonce
+      // Only fetch pending nonce on retry — saves an RPC RTT before MetaMask opens
       let nonce: number | undefined;
       if (usePendingNonce) {
         try {
-          const n = await getRitualReadClient(true).getTransactionCount({
+          const n = await getRitualReadClient().getTransactionCount({
             address,
             blockTag: "pending",
           });
@@ -1206,8 +1207,7 @@ export function AgentTab({
     };
 
     try {
-      // Prefer pending nonce on first try (avoids most "nonce too low" races)
-      return await sendOnce(true);
+      return await sendOnce(false);
     } catch (e1) {
       const blob = decodeRadarRevert(e1, opts.functionName);
       const isNonce =
@@ -1217,11 +1217,10 @@ export function AgentTab({
       if (!isNonce) throw e1;
 
       // Brief wait for MetaMask / RPC to catch up, then retry with fresh pending nonce
-      await new Promise((r) => setTimeout(r, 1_800));
+      await new Promise((r) => setTimeout(r, 800));
       try {
         return await sendOnce(true);
       } catch (e2) {
-        // Surface the friendly nonce message from decoder
         throw new Error(decodeRadarRevert(e2, opts.functionName));
       }
     }
@@ -1334,7 +1333,8 @@ export function AgentTab({
           cache: "no-store",
         }).catch(() => undefined);
       }
-      await refresh();
+      // Don't block UI unlock on full list re-fetch
+      void refresh();
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.deploy", "Deploy failed");
@@ -1361,7 +1361,15 @@ export function AgentTab({
       await waitTx(hash);
       setMsg(`Funded +${fundAmt} RITUAL`);
       toast.success("Agent funded", `+${fundAmt} RIT to agent balance`);
-      await refresh();
+      if (agent) {
+        try {
+          const added = parseEther(fundAmt || "0");
+          setAgent({ ...agent, balance: agent.balance + added });
+        } catch {
+          /* */
+        }
+      }
+      void refresh({ soft: true });
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.fund", "Fund failed");
@@ -1432,7 +1440,12 @@ export function AgentTab({
       setMsg(`Withdrew ${formatEther(amount)} RIT to your wallet`);
       toast.success("Withdrawn", `${formatEther(amount)} RIT sent to your wallet`);
       setWithdrawAmt("");
-      await refresh();
+      if (agent) {
+        const left =
+          agent.balance > amount ? agent.balance - amount : BigInt(0);
+        setAgent({ ...agent, balance: left });
+      }
+      void refresh({ soft: true });
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.withdraw", "Withdraw failed");
@@ -1543,7 +1556,7 @@ export function AgentTab({
           setSelectedId(null);
           setAgent(null);
           setErr("");
-          await refresh();
+          void refresh();
           return;
         } catch (killErr: unknown) {
           // Only fall through to soft-close if kill is literally missing
@@ -1624,7 +1637,7 @@ export function AgentTab({
       setSelectedId(null);
       setAgent(null);
       setErr("");
-      await refresh();
+      void refresh();
     } catch (e: unknown) {
       reportFailure(e, "agent.kill", "Kill failed");
       setMsg("");
@@ -1701,7 +1714,8 @@ export function AgentTab({
           cache: "no-store",
         }).catch(() => undefined);
       }
-      await refresh({ soft: true });
+      // Optimistic status already applied — re-fetch in background
+      void refresh({ soft: true });
     } catch (e: unknown) {
       setMsg("");
       reportFailure(e, "agent.status", "Status update failed");
