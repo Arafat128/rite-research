@@ -227,9 +227,28 @@ export function AgentTab({
   /**
    * App-level write lock: true from before wallet prompt until receipt handling
    * finishes. wagmi `writing` alone clears on hash return — too early.
+   *
+   * `actionPending` alone is NOT enough: React state updates are async, so a
+   * double-click (or rapid re-tap) can start two createAgent() calls before
+   * re-render, each calling writeContractAsync → multiple MetaMask popups that
+   * keep appearing after the user rejects the first one.
    */
   const [actionPending, setActionPending] = useState(false);
+  const writeLockRef = useRef(false);
   const writeBusy = writing || actionPending;
+
+  /** Acquire exclusive write lock. Returns false if another write is in flight. */
+  function beginWrite(): boolean {
+    if (writeLockRef.current) return false;
+    writeLockRef.current = true;
+    setActionPending(true);
+    return true;
+  }
+
+  function endWrite() {
+    writeLockRef.current = false;
+    setActionPending(false);
+  }
   /** Last structured error for copy-to-support */
   const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [agentIds, setAgentIds] = useState<bigint[]>([]);
@@ -1079,8 +1098,8 @@ export function AgentTab({
   }
 
   async function createAgent() {
-    if (actionPending) return;
-    setActionPending(true);
+    // Sync ref first — state alone allows double-click → queued MetaMask prompts
+    if (!beginWrite()) return;
     try {
       setErr("");
       setMsg("");
@@ -1134,7 +1153,9 @@ export function AgentTab({
       if (newId == null)
         throw new Error("Agent created but id not found in logs");
 
-      setMsg("Locking data stream on-chain…");
+      // Second wallet prompt: lock stream (only after create mined).
+      // If user rejects here, agent already exists — do not re-call createAgent.
+      setMsg("Confirm lock data stream (2/2)…");
       const wlHash = await radarWrite({
         functionName: "setWatchlist",
         args: [newId, trackCells],
@@ -1175,13 +1196,12 @@ export function AgentTab({
       setMsg("");
       reportFailure(e, "agent.deploy", "Deploy failed");
     } finally {
-      setActionPending(false);
+      endWrite();
     }
   }
 
   async function saveSchedule() {
-    if (selectedId == null || actionPending) return;
-    setActionPending(true);
+    if (selectedId == null || !beginWrite()) return;
     try {
       clearError();
       await ensureWallet();
@@ -1216,13 +1236,12 @@ export function AgentTab({
       setMsg("");
       reportFailure(e, "agent.schedule", "Schedule save failed");
     } finally {
-      setActionPending(false);
+      endWrite();
     }
   }
 
   async function fundSelected() {
-    if (selectedId == null || actionPending) return;
-    setActionPending(true);
+    if (selectedId == null || !beginWrite()) return;
     try {
       clearError();
       await ensureWallet();
@@ -1243,13 +1262,12 @@ export function AgentTab({
       setMsg("");
       reportFailure(e, "agent.fund", "Fund failed");
     } finally {
-      setActionPending(false);
+      endWrite();
     }
   }
 
   async function withdrawSelected(amountWei?: bigint) {
-    if (selectedId == null || !agent || actionPending) return;
-    setActionPending(true);
+    if (selectedId == null || !agent || !beginWrite()) return;
     try {
       setErr("");
       await ensureWallet();
@@ -1330,14 +1348,12 @@ export function AgentTab({
         });
       }
     } finally {
-      // Must clear even on success — earlier partial fix only cleared in catch
-      setActionPending(false);
+      endWrite();
     }
   }
 
   async function killSelected() {
-    if (selectedId == null || !agent || actionPending) return;
-    setActionPending(true);
+    if (selectedId == null || !agent || !beginWrite()) return;
     try {
       setErr("");
       await ensureWallet();
@@ -1530,13 +1546,12 @@ export function AgentTab({
         });
       }
     } finally {
-      setActionPending(false);
+      endWrite();
     }
   }
 
   async function setStatus(active: boolean) {
-    if (selectedId == null || actionPending) return;
-    setActionPending(true);
+    if (selectedId == null || !beginWrite()) return;
     try {
       setErr("");
       await ensureWallet();
@@ -1554,7 +1569,7 @@ export function AgentTab({
       setMsg("");
       reportFailure(e, "agent.status", "Status update failed");
     } finally {
-      setActionPending(false);
+      endWrite();
     }
   }
 
@@ -2095,7 +2110,12 @@ export function AgentTab({
             <button
               type="button"
               disabled={writeBusy || ticking}
-              onClick={createAgent}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                // Only one in-flight deploy — ref lock stops double MetaMask queue
+                void createAgent();
+              }}
               className="btn-primary mt-4 w-full rounded-xl py-3 text-sm"
             >
               {writeBusy
