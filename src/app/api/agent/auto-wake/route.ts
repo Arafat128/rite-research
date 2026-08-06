@@ -120,12 +120,19 @@ async function handle(req: NextRequest) {
       );
     }
 
-    // After a seal, force-arm so closed-tab chain continues even if user leaves.
-    // Idle polls only arm if no chain is already scheduled.
-    void sustainUnattendedCoverage({
-      kickNow: false,
-      forceArm: out.ticked > 0,
-    }).catch(() => undefined);
+    // Await arm registration before response — void async was killed on freeze
+    // (agent #70 never got run 3 after tab close).
+    let armed: { armed: boolean; reason: string } | undefined;
+    try {
+      const cov = await sustainUnattendedCoverage({
+        kickNow: false,
+        forceArm: out.ticked > 0,
+        skipQstash: true,
+      });
+      armed = cov.armed;
+    } catch (e) {
+      console.warn("[api/agent/auto-wake] arm failed", e);
+    }
 
     return NextResponse.json({
       ok: true,
@@ -137,6 +144,7 @@ async function handle(req: NextRequest) {
       ticked: out.ticked,
       results: out.results,
       keeperOnChain: out.keeperOnChain,
+      armed,
     });
   } catch (e: unknown) {
     console.error("[api/agent/auto-wake]", e);

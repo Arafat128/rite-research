@@ -128,12 +128,22 @@ async function handle(req: NextRequest) {
 
     const [oracast, official] = await Promise.all([oracastP, officialP]);
 
-    // Force a fresh closed-tab chain after every external poke (GH / QStash)
-    void sustainUnattendedCoverage({
-      kickNow: false,
-      forceArm: true,
-      delayMs: 48_000,
-    }).catch(() => undefined);
+    // MUST await arm so waitUntil is registered before the response freezes the isolate.
+    // void-fire-and-forget killed the chain after run #70@2 — no run 3 until manual poke.
+    // chain=1 query: still re-arm (sleep→cron), but skip nested panic loops if needed.
+    const fromChain = req.nextUrl.searchParams.get("chain") === "1";
+    let armed: { armed: boolean; reason: string } | undefined;
+    try {
+      const cov = await sustainUnattendedCoverage({
+        kickNow: false,
+        forceArm: true,
+        delayMs: 45_000,
+        skipQstash: true,
+      });
+      armed = cov.armed;
+    } catch (e) {
+      console.warn("[api/agent/cron] arm failed", e);
+    }
 
     return NextResponse.json({
       ok: true,
@@ -146,6 +156,8 @@ async function handle(req: NextRequest) {
       keeperOnChain: radar?.keeperOnChain,
       oracast,
       official,
+      armed,
+      fromChain,
       ...(radarError ? { error: radarError, hint: radarError } : {}),
     });
   } catch (e: unknown) {

@@ -63,8 +63,9 @@ export async function POST(req: NextRequest) {
       forceArm: force,
       onlyOwner: owner,
       onlyAgentId: agentId,
-      // Slightly under 1m so due windows are hit; fits Hobby 60s with margin
-      delayMs: isChain ? 48_000 : 50_000,
+      // Sleep must leave room for HTTP cron fetch under Hobby 60s maxDuration
+      delayMs: isChain ? 42_000 : 45_000,
+      skipQstash: true,
     });
 
     return NextResponse.json({

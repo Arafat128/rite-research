@@ -1,12 +1,12 @@
 /**
  * Keep Radar agents + Oracast ticking when the browser tab is closed.
  *
- * Design (Hobby-safe):
- * - Do NOT rely on infinite nested waitUntil (dies after ~60s maxDuration).
- * - One waitUntil: sleep → keeper pass → HTTP POST arm-unattended to start a
- *   *new* invocation for the next loop (survives freeze / tab close).
- * - GitHub Action every 5m as external heartbeat (cancel-in-progress: false).
- * - Optional QStash true 1m if QSTASH_TOKEN is set.
+ * Hobby-safe chain (critical):
+ * 1) Register waitUntil *before* the HTTP response is sent (callers must await arm).
+ * 2) waitUntil only sleeps, then HTTP-POSTs /api/agent/cron (new invocation, 120s budget).
+ *    Do NOT run heavy Surf+tx inside the sleep invocation (Hobby arm maxDuration=60).
+ * 3) Cron ticks due agents, then awaits arm again → loop continues without the browser.
+ * 4) GitHub Action every 5m as external heartbeat.
  */
 
 import {
@@ -17,11 +17,11 @@ import { tickOracastWatches } from "@/lib/oracastWatch";
 import { tickOfficialAgentAlerts } from "@/lib/officialAgentRegistry";
 import { kvSetNx, kvGet, kvSet, kvDel } from "@/lib/durableKv";
 
-const CHAIN_LOCK = "rite:keeper:chain:v2";
+const CHAIN_LOCK = "rite:keeper:chain:v3";
 const QSTASH_ARMED = "rite:keeper:qstash:armed:v1";
 
-/** ~1m agents: poke a bit under a minute so due windows aren't missed. */
-const DEFAULT_CHAIN_DELAY_MS = 50_000;
+/** Sleep before next cron poke. Must fit Hobby arm maxDuration (60s) + fetch headroom. */
+const DEFAULT_CHAIN_DELAY_MS = 45_000;
 
 export function appPublicBaseUrl(): string | null {
   const explicit =
@@ -111,50 +111,73 @@ export async function runKeeperPassInProcess(opts?: {
   }
 }
 
+function chainFetchHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-rite-chain": "1",
+    "User-Agent": "rite-unattended-chain/2.0",
+  };
+  const secret = cronSecret();
+  const bypass = protectionBypass();
+  if (secret) headers.Authorization = `Bearer ${secret}`;
+  if (bypass) headers["x-vercel-protection-bypass"] = bypass;
+  return headers;
+}
+
 /**
- * Continue the chain in a *new* serverless invocation.
- * Nested waitUntil alone dies when the parent function hits maxDuration (Hobby ~60s).
+ * New invocation: full cron tick + re-arm (120s maxDuration on cron route).
  */
-async function httpRearmChain(): Promise<{ ok: boolean; status?: number; reason: string }> {
+async function httpCronPoke(): Promise<{
+  ok: boolean;
+  status?: number;
+  ticked?: number;
+  reason: string;
+}> {
   const base = appPublicBaseUrl();
+  const secret = cronSecret();
   if (!base) return { ok: false, reason: "no_app_url" };
+  if (!secret) return { ok: false, reason: "no_cron_secret" };
 
   const bypass = protectionBypass();
-  const secret = cronSecret();
-  const url = new URL(`${base}/api/agent/arm-unattended`);
+  const url = new URL(`${base}/api/agent/cron`);
+  url.searchParams.set("max", "40");
+  // Prevent infinite waitUntil→cron→arm→cron loops from stacking same second
+  url.searchParams.set("chain", "1");
   if (bypass) {
     url.searchParams.set("x-vercel-protection-bypass", bypass);
   }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "x-rite-chain": "1",
-    "User-Agent": "rite-unattended-chain/1.0",
-  };
-  if (secret) headers.Authorization = `Bearer ${secret}`;
-  if (bypass) headers["x-vercel-protection-bypass"] = bypass;
-
   try {
     const res = await fetch(url.toString(), {
       method: "POST",
-      headers,
-      body: JSON.stringify({ kick: false, force: true }),
+      headers: chainFetchHeaders(),
+      body: "{}",
       cache: "no-store",
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(110_000),
     });
     const text = await res.text().catch(() => "");
+    let ticked: number | undefined;
+    try {
+      const j = JSON.parse(text) as { ticked?: number };
+      ticked = j.ticked;
+    } catch {
+      /* */
+    }
     console.info(
-      "[unattendedKeeper] http rearm",
+      "[unattendedKeeper] http cron poke",
       res.status,
-      text.slice(0, 120)
+      "ticked=",
+      ticked,
+      text.slice(0, 100)
     );
     return {
       ok: res.ok,
       status: res.status,
-      reason: res.ok ? "http_rearm" : `http_${res.status}`,
+      ticked,
+      reason: res.ok ? "http_cron" : `http_${res.status}`,
     };
   } catch (e) {
-    console.warn("[unattendedKeeper] http rearm failed", e);
+    console.warn("[unattendedKeeper] http cron poke failed", e);
     return {
       ok: false,
       reason: e instanceof Error ? e.message.slice(0, 80) : "http_error",
@@ -163,52 +186,104 @@ async function httpRearmChain(): Promise<{ ok: boolean; status?: number; reason:
 }
 
 /**
- * Schedule an in-process keeper pass after delayMs, then HTTP-rearm.
- * Survives tab close when started via waitUntil on a completed request.
+ * Fallback rearm if cron HTTP fails — starts a new arm-unattended waitUntil.
+ */
+async function httpArmOnly(): Promise<{ ok: boolean; reason: string }> {
+  const base = appPublicBaseUrl();
+  if (!base) return { ok: false, reason: "no_app_url" };
+
+  const bypass = protectionBypass();
+  const url = new URL(`${base}/api/agent/arm-unattended`);
+  if (bypass) {
+    url.searchParams.set("x-vercel-protection-bypass", bypass);
+  }
+
+  try {
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers: chainFetchHeaders(),
+      body: JSON.stringify({ kick: false, force: true }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(25_000),
+    });
+    console.info("[unattendedKeeper] http arm only", res.status);
+    return { ok: res.ok, reason: res.ok ? "http_arm" : `http_arm_${res.status}` };
+  } catch (e) {
+    console.warn("[unattendedKeeper] http arm only failed", e);
+    return {
+      ok: false,
+      reason: e instanceof Error ? e.message.slice(0, 80) : "http_error",
+    };
+  }
+}
+
+/**
+ * Schedule next closed-tab poke: sleep → HTTP cron (new invocation).
+ * Callers MUST await this so waitUntil is registered before the response ends.
  */
 export async function armNextKeeperPoke(opts?: {
   delayMs?: number;
   force?: boolean;
 }): Promise<{ armed: boolean; reason: string }> {
+  // Cap so sleep + fetch always fit Hobby arm maxDuration (60s)
   const delayMs = Math.min(
-    55_000,
-    Math.max(25_000, opts?.delayMs ?? DEFAULT_CHAIN_DELAY_MS)
+    48_000,
+    Math.max(20_000, opts?.delayMs ?? DEFAULT_CHAIN_DELAY_MS)
   );
 
   if (!opts?.force) {
-    const got = await kvSetNx(CHAIN_LOCK, String(Date.now()), 70);
+    const got = await kvSetNx(CHAIN_LOCK, String(Date.now()), 75);
     if (!got) {
       return { armed: false, reason: "chain_already_armed" };
     }
   } else {
-    await kvSet(CHAIN_LOCK, String(Date.now()), 70);
+    await kvSet(CHAIN_LOCK, String(Date.now()), 75);
   }
 
   const run = async () => {
     try {
       await new Promise((r) => setTimeout(r, delayMs));
+    } catch {
+      /* */
+    }
+
+    try {
+      await kvDel(CHAIN_LOCK);
+    } catch {
+      /* */
+    }
+
+    // Prefer new cron invocation (long maxDuration) over in-process tick here
+    const cron = await httpCronPoke();
+    if (cron.ok) {
+      console.info(
+        "[unattendedKeeper] chain→cron ok ticked=",
+        cron.ticked ?? "?"
+      );
+      return;
+    }
+
+    // Fallback: tick in-process then arm a new waitUntil via HTTP
+    console.warn(
+      "[unattendedKeeper] cron http failed, in-process fallback:",
+      cron.reason
+    );
+    try {
       const out = await runKeeperPassInProcess({ maxAgents: 40 });
       console.info(
-        "[unattendedKeeper] chain pass ticked=",
+        "[unattendedKeeper] fallback pass ticked=",
         out.ticked,
         "oracast=",
         out.oracastNotified,
         out.error || "ok"
       );
     } catch (e) {
-      console.warn("[unattendedKeeper] chain error", e);
-    } finally {
-      try {
-        await kvDel(CHAIN_LOCK);
-      } catch {
-        /* */
-      }
+      console.warn("[unattendedKeeper] fallback pass error", e);
     }
 
-    // New invocation continues the chain (do not nest waitUntil forever)
-    const rearm = await httpRearmChain();
-    if (!rearm.ok) {
-      // Last-resort nested arm — may only live one more cycle on Hobby
+    const arm = await httpArmOnly();
+    if (!arm.ok) {
+      // Last resort nested arm (may only last one more cycle)
       void armNextKeeperPoke({ delayMs: 40_000, force: true }).catch(
         () => undefined
       );
@@ -218,6 +293,12 @@ export async function armNextKeeperPoke(opts?: {
   try {
     const { waitUntil } = await import("@vercel/functions");
     waitUntil(run());
+    console.info(
+      "[unattendedKeeper] armed waitUntil delayMs=",
+      delayMs,
+      "force=",
+      Boolean(opts?.force)
+    );
     return { armed: true, reason: "waitUntil" };
   } catch {
     void run();
@@ -275,8 +356,7 @@ export async function ensureQStashMinuteSchedule(): Promise<{
 }
 
 /**
- * Arm closed-tab chain. Optionally run a pass immediately (e.g. after Activate).
- * forceArm: always schedule a fresh waitUntil (Activate / HTTP rearm / cron).
+ * Arm closed-tab chain. Callers must await this before finishing the request.
  */
 export async function sustainUnattendedCoverage(opts?: {
   kickNow?: boolean;
@@ -284,16 +364,23 @@ export async function sustainUnattendedCoverage(opts?: {
   onlyOwner?: string;
   onlyAgentId?: string;
   delayMs?: number;
+  /** Skip QStash ensure (faster arm path) */
+  skipQstash?: boolean;
 }): Promise<{
   armed: { armed: boolean; reason: string };
   kick?: KeeperPassResult;
   qstash?: { ok: boolean; reason: string };
 }> {
   let qstash: { ok: boolean; reason: string } | undefined;
-  try {
-    qstash = await ensureQStashMinuteSchedule();
-  } catch {
-    qstash = { ok: false, reason: "qstash_error" };
+  if (!opts?.skipQstash) {
+    // Non-blocking — never delay arm registration for QStash
+    void ensureQStashMinuteSchedule()
+      .then((r) => {
+        if (!r.ok && r.reason !== "no_qstash_token" && r.reason !== "already_armed") {
+          console.info("[unattendedKeeper] qstash", r.reason);
+        }
+      })
+      .catch(() => undefined);
   }
 
   let kick: KeeperPassResult | undefined;
@@ -313,7 +400,6 @@ export async function sustainUnattendedCoverage(opts?: {
     );
   }
 
-  // forceArm (Activate / HTTP rearm / cron) always starts a fresh waitUntil
   const force = opts?.forceArm === true || opts?.kickNow === true;
 
   const armed = await armNextKeeperPoke({
