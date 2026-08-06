@@ -9,7 +9,6 @@ import {
   useSwitchChain,
   useWriteContract,
   useBalance,
-  useSignMessage,
 } from "wagmi";
 import {
   formatEther,
@@ -220,7 +219,6 @@ export function AgentTab({
     chainId: ritualChain.id,
   });
   const { writeContractAsync, isPending: writing } = useWriteContract();
-  const { signMessageAsync } = useSignMessage();
   const toast = useToast();
 
   const [msg, setMsg] = useState("");
@@ -254,6 +252,9 @@ export function AgentTab({
   const [errorReport, setErrorReport] = useState<ErrorReport | null>(null);
   const [agentIds, setAgentIds] = useState<bigint[]>([]);
   const [selectedId, setSelectedId] = useState<bigint | null>(null);
+  useEffect(() => {
+    setDueHintUntil(null);
+  }, [selectedId]);
   /** Always-current selection — written only by select/deploy/kill/auto-pick. */
   const selectedIdRef = useRef<bigint | null>(null);
   /** Bumps on every user select so in-flight refresh/load cannot paint the wrong agent. */
@@ -272,8 +273,7 @@ export function AgentTab({
   const [extraFund, setExtraFund] = useState("0.02");
   const [schedValue, setSchedValue] = useState("15");
   const [schedUnit, setSchedUnit] = useState<ScheduleUnit>("minutes");
-  const [editSchedValue, setEditSchedValue] = useState("15");
-  const [editSchedUnit, setEditSchedUnit] = useState<ScheduleUnit>("minutes");
+
   const [fundAmt, setFundAmt] = useState("0.01");
   const [withdrawAmt, setWithdrawAmt] = useState("");
   const [nowTick, setNowTick] = useState(() => Math.floor(Date.now() / 1000));
@@ -296,6 +296,8 @@ export function AgentTab({
   /** In-app auto-wake poller status (My Agents) */
   const [autoWakeNote, setAutoWakeNote] = useState("");
   const [autoWakeBusy, setAutoWakeBusy] = useState(false);
+  /** Absolute unix sec for next due from server auto-wake (overrides stale lastRunAt) */
+  const [dueHintUntil, setDueHintUntil] = useState<number | null>(null);
 
   /**
    * On-chain Dead, or soft-closed on THIS Radar only.
@@ -374,8 +376,21 @@ export function AgentTab({
 
   const dueInfo = useMemo(() => {
     if (!agent) return null;
-    return computeDue(agent.lastRunAt, agent.wakeIntervalBlocks, nowTick);
-  }, [agent, nowTick]);
+    const base = computeDue(agent.lastRunAt, agent.wakeIntervalBlocks, nowTick);
+    // Prefer server auto-wake not_due hint so "DUE NOW" is not stuck while waiting
+    if (dueHintUntil != null) {
+      const left = Math.max(0, dueHintUntil - nowTick);
+      if (left > 0) {
+        return {
+          ...base,
+          due: false,
+          secondsUntilDue: left,
+          nextRunAt: dueHintUntil,
+        };
+      }
+    }
+    return base;
+  }, [agent, nowTick, dueHintUntil]);
 
   // Live countdown for schedule
   useEffect(() => {
@@ -385,23 +400,6 @@ export function AgentTab({
     );
     return () => clearInterval(t);
   }, []);
-
-  // Sync edit schedule fields when agent loads
-  useEffect(() => {
-    if (!agent) return;
-    const blocks = Number(agent.wakeIntervalBlocks);
-    const sec = blocks * BLOCK_TIME_SEC;
-    if (sec >= 3600 && sec % 3600 < BLOCK_TIME_SEC * 2) {
-      setEditSchedUnit("hours");
-      setEditSchedValue(String(Math.max(1, Math.round(sec / 3600))));
-    } else if (sec >= 60) {
-      setEditSchedUnit("minutes");
-      setEditSchedValue(String(Math.max(1, Math.round(sec / 60))));
-    } else {
-      setEditSchedUnit("blocks");
-      setEditSchedValue(String(Math.max(1, blocks)));
-    }
-  }, [agent?.wakeIntervalBlocks, selectedId]);
 
   const { data: runFee } = useReadContract({
     address: RADAR_CONTRACT || undefined,
@@ -690,57 +688,9 @@ export function AgentTab({
     return () => clearInterval(t);
   }, [isConnected, selectedId, refreshNetwork]);
 
-  /** One-time opt-in: sign once, then background poll uses cache only. */
-  async function enableAutoWake() {
-    if (!address || !isConnected) {
-      setAutoWakeNote("Connect wallet first");
-      return;
-    }
-    if (writeBusy || ticking) return;
-    setAutoWakeBusy(true);
-    try {
-      const { requestAutoWakeAuth } = await import("@/lib/ownerWakeAuth");
-      setAutoWakeNote("Confirm signature in wallet (not a payment)…");
-      const auth = await requestAutoWakeAuth(address, async (message) =>
-        signMessageAsync({ message })
-      );
-      // Immediate poke with fresh auth (no second sign)
-      void fetch("/api/agent/auto-wake", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          owner: address,
-          max: 20,
-          signature: auth.signature,
-          nonce: auth.nonce,
-          expiry: auth.expiry,
-        }),
-        cache: "no-store",
-      }).catch(() => undefined);
-      setAutoWakeNote("Auto-wake enabled · watching schedule (~30 min)");
-      toast.success(
-        "Auto-wake enabled",
-        "Background polls for ~30 minutes — re-enable if it expires"
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Signature cancelled";
-      if (/reject|denied|cancel/i.test(msg)) {
-        setAutoWakeNote(
-          "Auto-wake off · enable with one wallet signature when ready"
-        );
-      } else {
-        setAutoWakeNote(`Auto-wake enable failed: ${msg.slice(0, 80)}`);
-      }
-    } finally {
-      setAutoWakeBusy(false);
-    }
-  }
-
   /**
-   * Auto-schedule: schedule alone does NOT fire ticks.
-   * Adaptive poll (3–15s) while My Agents is open — ONLY with a cached
-   * owner signature. Never signMessage from this effect.
-   * User clicks "Enable auto-wake" once per ~30 min session.
+   * Auto-wake: no signature. While My Agents is open, poll keeper for due agents.
+   * AppShell also pokes auto-wake on any Rite tab. Tab closed → cron / GitHub Action.
    */
   useEffect(() => {
     if (mode !== "manage" || !isConnected || !address) {
@@ -752,7 +702,6 @@ export function AgentTab({
     let inFlight = false;
     let pendingPoke = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    /** Shortest not_due seconds from last response — drives adaptive cadence */
     let lastSecondsUntilDue: number | null = null;
 
     const scheduleNext = (ms: number) => {
@@ -763,42 +712,17 @@ export function AgentTab({
 
     const poke = async (reason: string) => {
       if (cancelled) return;
-      if (inFlight || autoWakeBusy || ticking || writeBusy) {
-        // Don't drop due windows — re-run as soon as the current path frees
+      if (inFlight || ticking || writeBusy) {
         pendingPoke = true;
         return;
       }
       inFlight = true;
-      pendingPoke = false;
       setAutoWakeBusy(true);
       try {
-        const { peekAutoWakeAuth, isAutoWakeDeclined } = await import(
-          "@/lib/ownerWakeAuth"
-        );
-        const auth = peekAutoWakeAuth(address);
-        if (!auth) {
-          if (!cancelled) {
-            setAutoWakeNote(
-              isAutoWakeDeclined(address)
-                ? "Auto-wake off · enable with one wallet signature when ready"
-                : "Auto-wake idle · click Enable auto-wake (one signature, ~30 min)"
-            );
-          }
-          scheduleNext(12_000);
-          return;
-        }
-
-        // Scan all owner agents (do not pin onlyAgentId — that starves siblings)
         const res = await fetch("/api/agent/auto-wake", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            owner: address,
-            max: 20,
-            signature: auth.signature,
-            nonce: auth.nonce,
-            expiry: auth.expiry,
-          }),
+          body: JSON.stringify({ owner: address, max: 20 }),
           cache: "no-store",
         });
         const data = (await res.json()) as {
@@ -826,10 +750,10 @@ export function AgentTab({
         if (!res.ok) {
           if (!cancelled) {
             setAutoWakeNote(
-              data.error || "Auto-wake temporarily unavailable. Try again shortly."
+              data.error ||
+                "Auto-wake temporarily unavailable. Retrying shortly."
             );
           }
-          // Back off on 429; otherwise retry soon
           const retryAfter = Number(res.headers.get("Retry-After") || "0");
           scheduleNext(
             res.status === 429
@@ -844,42 +768,48 @@ export function AgentTab({
           (r) => r.skipped === "tick_budget"
         );
 
-        // Parse nearest not_due for adaptive schedule
         let nearestDue: number | null = null;
         for (const r of data.results || []) {
           const m = r.skipped?.match(/^not_due_(?:.+?_~)?(\d+)s$/);
           if (m) {
             const s = Number(m[1]);
             if (Number.isFinite(s)) {
-              nearestDue =
-                nearestDue == null ? s : Math.min(nearestDue, s);
+              nearestDue = nearestDue == null ? s : Math.min(nearestDue, s);
             }
           } else if (r.skipped?.startsWith("not_due_")) {
             const m2 = r.skipped.match(/(\d+)s/);
             if (m2) {
               const s = Number(m2[1]);
               if (Number.isFinite(s)) {
-                nearestDue =
-                  nearestDue == null ? s : Math.min(nearestDue, s);
+                nearestDue = nearestDue == null ? s : Math.min(nearestDue, s);
               }
             }
           }
         }
         if (ticked > 0 || hadBudgetSkip) {
-          // Just sealed or more due agents waiting — poll ASAP
           lastSecondsUntilDue = 0;
         } else if (nearestDue != null) {
           lastSecondsUntilDue = nearestDue;
-        } else if (dueInfo) {
-          lastSecondsUntilDue = dueInfo.secondsUntilDue;
+        }
+
+        // Server-driven due hint for selected agent (fixes stuck "DUE NOW")
+        if (selectedIdRef.current != null) {
+          const sid = selectedIdRef.current.toString();
+          const row = (data.results || []).find((r) => r.agentId === sid);
+          if (row?.skipped?.startsWith("not_due_")) {
+            const m = row.skipped.match(/(\d+)s/);
+            if (m) {
+              setDueHintUntil(Math.floor(Date.now() / 1000) + Number(m[1]));
+            }
+          } else if (row?.ok || (row && !row.skipped?.startsWith("not_due"))) {
+            setDueHintUntil(null);
+          }
         }
 
         if (ticked > 0) {
           const hits = (data.results || []).filter((r) => r.ok);
           const first = hits[0];
 
-          // Persist full Surf snapshots in this browser + show table + Telegram
-          // (server memory cache is lost across Vercel instances / cold starts)
           let chatId: string | undefined;
           try {
             const o = address.toLowerCase();
@@ -923,9 +853,6 @@ export function AgentTab({
             };
             saveTick(rec, RADAR_CONTRACT);
 
-            // Telegram: server notifyAgentTick already sent for keeper wakes.
-            // Browser backup ONLY when server could not resolve link (not_linked).
-            // Never re-push when server sent, duplicate, filtered, or errored mid-send.
             const tg = hit.telegram;
             const runKey = `rite_tg_tick_sent:${hit.agentId}:${hit.runCount || rec.runCount}`;
             let alreadyPushed = false;
@@ -936,6 +863,7 @@ export function AgentTab({
             }
             const serverSent = tg?.sent === true;
             const serverDup = tg?.reason === "duplicate";
+            const serverFiltered = tg?.reason === "filtered";
             if (serverSent || serverDup) {
               try {
                 sessionStorage.setItem(runKey, "1");
@@ -943,11 +871,16 @@ export function AgentTab({
                 /* ignore */
               }
             }
+            // Backup DM whenever server did not confirm send (timeout, not_linked, pending, …)
             const needClientBackup =
-              Boolean(chatId && address && !serverSent && !serverDup && !alreadyPushed) &&
-              (!tg ||
-                tg.reason === "not_linked" ||
-                tg.reason === "telegram_not_configured");
+              Boolean(
+                chatId &&
+                  address &&
+                  !serverSent &&
+                  !serverDup &&
+                  !serverFiltered &&
+                  !alreadyPushed
+              );
             if (needClientBackup) {
               try {
                 sessionStorage.setItem(runKey, "1");
@@ -976,8 +909,6 @@ export function AgentTab({
           }
 
           if (!cancelled) {
-            // Only paint snapshot for the agent the user is viewing — never
-            // switch the panel to another auto-ticked agent (e.g. #10).
             const curSel = selectedIdRef.current;
             const forSelected = hits.find(
               (h) => curSel != null && h.agentId === curSel.toString()
@@ -1004,11 +935,13 @@ export function AgentTab({
             const tgNote =
               first?.telegram?.sent === true
                 ? " · Telegram sent"
-                : chatId
-                  ? " · Telegram push"
-                  : first?.telegram?.reason
-                    ? ` · TG: ${first.telegram.reason}`
-                    : "";
+                : first?.telegram?.reason === "notify_pending"
+                  ? " · Telegram sending…"
+                  : chatId
+                    ? " · Telegram push"
+                    : first?.telegram?.reason
+                      ? ` · TG: ${first.telegram.reason}`
+                      : "";
             setAutoWakeNote(
               `Auto-wake sealed ${ticked} tick(s)` +
                 (first?.agentId ? ` · #${first.agentId}` : "") +
@@ -1025,7 +958,6 @@ export function AgentTab({
                 (first?.txHash ? ` · ${first.txHash.slice(0, 10)}…` : "")
             );
           }
-          // Soft refresh updates meta/ticks only — must not re-pick selection
           await refresh({ soft: true });
         } else {
           const mine = (data.results || []).filter(
@@ -1035,7 +967,6 @@ export function AgentTab({
           const dueWait = mine.find((r) => r.skipped?.startsWith("not_due"));
           const notActive = mine.find((r) => r.skipped === "not_active");
           const dead = mine.find((r) => r.skipped === "dead");
-          // Prefer real tick failures — not raw getAgent/UnknownAgent noise
           const err = mine.find(
             (r) =>
               r.error &&
@@ -1046,17 +977,22 @@ export function AgentTab({
               setAutoWakeNote(err.error.slice(0, 160));
             } else if (dueWait?.skipped) {
               setAutoWakeNote(
-                `Auto-wake on · watching (${reason}) · ${dueWait.skipped.replace(/^not_due_/, "next in ")}`
+                `Auto-wake on · ${dueWait.skipped.replace(/^not_due_/, "next in ")}`
               );
             } else if (notActive) {
               setAutoWakeNote(
                 "Auto-wake on · agent not LIVE — Activate first"
               );
-            } else if (dead && mine.every((r) => r.skipped === "dead" || r.skipped === "not_owner")) {
+            } else if (
+              dead &&
+              mine.every(
+                (r) => r.skipped === "dead" || r.skipped === "not_owner"
+              )
+            ) {
               setAutoWakeNote("Auto-wake on · no live agents to tick");
             } else if (data.keeperOnChain === false) {
               setAutoWakeNote(
-                "Auto-wake is paused — use Wake on this tab, or try again later"
+                "Keeper not allowlisted — use manual Wake, or operator setKeeper"
               );
             } else {
               setAutoWakeNote("Auto-wake on · watching schedule");
@@ -1064,7 +1000,6 @@ export function AgentTab({
           }
         }
 
-        // Immediate re-poke if budget left more due agents, else adaptive delay
         if (hadBudgetSkip || pendingPoke) {
           scheduleNext(2_500);
         } else {
@@ -1089,7 +1024,6 @@ export function AgentTab({
       }
     };
 
-    // Immediate check when opening My Agents
     void poke("start");
     const onVis = () => {
       if (document.visibilityState === "visible") void poke("focus");
@@ -1102,7 +1036,6 @@ export function AgentTab({
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
     };
-    // Intentionally not depending on autoWakeBusy/ticking every render
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, isConnected, address]);
 
@@ -1334,45 +1267,6 @@ export function AgentTab({
     }
   }
 
-  async function saveSchedule() {
-    if (selectedId == null || !beginWrite()) return;
-    try {
-      clearError();
-      await ensureWallet();
-      if (agent?.status === 4) throw new Error("Agent is dead");
-      const n = Number(editSchedValue);
-      if (!Number.isFinite(n) || n <= 0) {
-        throw new Error("Enter a positive schedule value (e.g. 3 minutes)");
-      }
-      const blocks = scheduleToBlocks({
-        value: n,
-        unit: editSchedUnit,
-      });
-      setMsg(`Confirm setWakeInterval · ${formatInterval(blocks)}…`);
-      const hash = await radarWrite({
-        functionName: "setWakeInterval",
-        args: [selectedId, blocks],
-      });
-      await waitTx(hash);
-      // Optimistic UI so dashboard updates immediately
-      if (agent) {
-        setAgent({ ...agent, wakeIntervalBlocks: blocks });
-      }
-      setMsg(
-        `Schedule saved on-chain: ${formatInterval(blocks)}. ` +
-          (agent?.status === 1
-            ? "Use Wake when due — auto-wake runs while this tab is open."
-            : "Activate → LIVE, fund if needed, then Wake.")
-      );
-      toast.success("Schedule saved", formatInterval(blocks));
-      await refresh({ soft: true });
-    } catch (e: unknown) {
-      setMsg("");
-      reportFailure(e, "agent.schedule", "Schedule save failed");
-    } finally {
-      endWrite();
-    }
-  }
 
   async function fundSelected() {
     if (selectedId == null || !beginWrite()) return;
@@ -2540,27 +2434,19 @@ export function AgentTab({
 
                   <div className="mb-4 rounded-xl border border-[#c8ff4a]/20 bg-black/25 p-3">
                     <div className="mb-2 text-xs font-semibold text-[#c8ff4a]">
-                      Wake schedule
+                      Auto-wake
                     </div>
                     <p className="mb-2 text-[11px] text-white/40">
-                      How often this agent may wake. Auto-wake needs one{" "}
-                      <b className="text-white/60">signature</b> (~30 min session,
-                      not a payment). Polls adaptively every ~3–15s while this
-                      tab is open. Use{" "}
-                      <b className="text-[#c8ff4a]">Persistent</b> for long-running
-                      agents — Sovereign stops after {SOVEREIGN_MAX_RUNS} ticks.
-                      After updating the app, re-<b className="text-white/60">Save
-                      schedule</b> so 1 min maps to the correct block count on
-                      Ritual (~0.25s/block).
+                      Schedule was set at deploy (
+                      <b className="text-[#c8ff4a]">
+                        {formatInterval(agent.wakeIntervalBlocks)}
+                      </b>
+                      ). While any Rite tab is open with your wallet connected,
+                      due agents tick automatically — no signature needed.{" "}
+                      <b className="text-white/60">Persistent</b> for ongoing
+                      runs; Sovereign stops after {SOVEREIGN_MAX_RUNS} ticks.
+                      Tab closed: keep GitHub “Agent keeper” or QStash cron.
                     </p>
-                    <button
-                      type="button"
-                      disabled={writeBusy || ticking || autoWakeBusy}
-                      onClick={() => void enableAutoWake()}
-                      className="mb-2 rounded-lg border border-[#c8ff4a]/35 bg-[#c8ff4a]/10 px-3 py-1.5 text-[11px] font-semibold text-[#c8ff4a] hover:bg-[#c8ff4a]/20 disabled:opacity-50"
-                    >
-                      {autoWakeBusy ? "…" : "Enable auto-wake (sign once · ~30 min)"}
-                    </button>
                     {agent.kind === AGENT_KIND.Sovereign &&
                       agent.status === 1 && (
                         <p className="mb-2 rounded-lg border border-amber-400/30 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-100">
@@ -2575,7 +2461,7 @@ export function AgentTab({
                         className={`mb-2 rounded-lg border px-2 py-1.5 text-[11px] ${
                           /sealed|tick/i.test(autoWakeNote)
                             ? "border-emerald-400/30 bg-emerald-950/30 text-emerald-100"
-                            : /NotAuthorized|unavailable|error|not setKeeper/i.test(
+                            : /NotAuthorized|unavailable|error|not setKeeper|allowlisted/i.test(
                                 autoWakeNote
                               )
                               ? "border-amber-400/30 bg-amber-950/30 text-amber-100"
@@ -2586,56 +2472,24 @@ export function AgentTab({
                         {autoWakeNote}
                       </p>
                     )}
-                    <p className="mb-2 text-[11px] text-white/50">
-                      On-chain interval now:{" "}
-                      <b className="text-[#c8ff4a]">
-                        {formatInterval(agent.wakeIntervalBlocks)}
-                      </b>
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      <input
-                        value={editSchedValue}
-                        onChange={(e) => setEditSchedValue(e.target.value)}
-                        className="w-24 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-                        inputMode="numeric"
-                      />
-                      <select
-                        value={editSchedUnit}
-                        onChange={(e) =>
-                          setEditSchedUnit(e.target.value as ScheduleUnit)
-                        }
-                        className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none"
-                      >
-                        <option value="minutes">Minutes</option>
-                        <option value="hours">Hours</option>
-                        <option value="blocks">Blocks</option>
-                      </select>
-                      <button
-                        type="button"
-                        disabled={writeBusy || ticking}
-                        onClick={() => void saveSchedule()}
-                        className="btn-primary rounded-lg px-4 text-sm"
-                      >
-                        Save schedule
-                      </button>
-                    </div>
                     {dueInfo && agent.status === 1 && (
                       <p
-                        className={`mt-2 text-[11px] ${
+                        className={`text-[11px] ${
                           dueInfo.due
                             ? "font-semibold text-amber-200"
                             : "text-white/40"
                         }`}
                       >
                         {dueInfo.due
-                          ? "Interval elapsed — auto-wake will fire within a few seconds (or click Wake now)."
-                          : `Next interval in ${formatCountdown(dueInfo.secondsUntilDue)} · ${new Date(dueInfo.nextRunAt * 1000).toLocaleString()}`}
+                          ? autoWakeBusy
+                            ? "Due — sealing tick…"
+                            : "Due — auto-wake firing shortly (or click Wake)."
+                          : `Next interval in ${formatCountdown(dueInfo.secondsUntilDue)}`}
                       </p>
                     )}
                     {agent.status !== 1 && (
                       <p className="mt-2 text-[11px] text-white/40">
-                        Activate → LIVE (and fund if needed) before schedule /
-                        wake matter.
+                        Activate → LIVE (and fund if needed) before ticks run.
                       </p>
                     )}
                   </div>

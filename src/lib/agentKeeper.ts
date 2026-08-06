@@ -812,24 +812,30 @@ export async function runDueAgentTicks(opts?: {
         snapshot,
       });
 
-      // Cap Telegram wait — never stall the next due agent on DM latency
-      const telegram = await withTimeout(
-        notifyAgentTick({
-          owner: fresh.owner,
-          agentId: String(i),
-          agentName: fresh.name,
-          runCount: newCount.toString(),
-          summary: snapshot.summary,
-          kindLabel: snapshot.kindLabel,
-          target: snapshot.target,
-          txHash: hash,
-          died,
-          rows: snapshot.rows,
-          highlights: snapshot.highlights,
-        }),
-        2_500,
-        { sent: false, reason: "notify_timeout" }
-      );
+      // Give Telegram more time; if still pending, keep notify running in background
+      // so DMs are not dropped when Upstash/Telegram is slow.
+      const tgPromise = notifyAgentTick({
+        owner: fresh.owner,
+        agentId: String(i),
+        agentName: fresh.name,
+        runCount: newCount.toString(),
+        summary: snapshot.summary,
+        kindLabel: snapshot.kindLabel,
+        target: snapshot.target,
+        txHash: hash,
+        died,
+        rows: snapshot.rows,
+        highlights: snapshot.highlights,
+      });
+      const telegram = await withTimeout(tgPromise, 12_000, {
+        sent: false,
+        reason: "notify_pending",
+      });
+      if (telegram.reason === "notify_pending") {
+        void tgPromise.catch((e) =>
+          console.warn("[agentKeeper] delayed telegram", e)
+        );
+      }
 
       ticked += 1;
       results.push({

@@ -27,7 +27,8 @@ async function handle(req: NextRequest) {
 
     if (!isCron) {
       const ip = clientIp(req);
-      const rl = rateLimit(`oracast-tick:${ip}`, 12, 60_000);
+      // AppShell pokes ~every 20s while tab open
+      const rl = rateLimit(`oracast-tick:${ip}`, 30, 60_000);
       if (!rl.ok) {
         return NextResponse.json(
           { error: "Too many tick requests" },

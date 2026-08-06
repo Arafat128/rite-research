@@ -84,37 +84,52 @@ export function AppShell() {
   const wrongChain = isConnected && chainId !== ritualChain.id;
 
   /**
-   * Keepalive while ANY Rite tab is open (wallet connected):
-   * - Oracast 5m/15m price DMs only (server-side, no wallet prompt)
+   * Keepalive while ANY Rite tab is open (wallet connected, no MetaMask prompts):
+   * - Oracast price watches → Telegram
+   * - Radar data-agent auto-wake for this owner (due LIVE agents only)
    *
-   * Do NOT call signMessage / auto-wake here. Opening the site used to
-   * spam MetaMask with signature requests every ~25s. Radar auto-wake is
-   * opt-in on My Agents (or unattended via /api/agent/cron + CRON_SECRET).
+   * Tab closed: GitHub Action / QStash → /api/agent/cron with CRON_SECRET.
    */
   useEffect(() => {
     if (!address || !isConnected) return;
     const headers = { "Content-Type": "application/json" };
-    const bodyOracast = JSON.stringify({ owner: address, max: 12 });
+    const bodyOwner = JSON.stringify({ owner: address, max: 16 });
     let cancelled = false;
     let inFlight = false;
 
     const poke = async () => {
       if (cancelled || inFlight) return;
+      // Pause background ticks when tab is hidden to save quota; resume on focus
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "hidden"
+      ) {
+        return;
+      }
       inFlight = true;
       try {
-        await fetch("/api/oracast/tick", {
-          method: "POST",
-          headers,
-          body: bodyOracast,
-          cache: "no-store",
-        }).catch(() => undefined);
+        await Promise.all([
+          fetch("/api/oracast/tick", {
+            method: "POST",
+            headers,
+            body: bodyOwner,
+            cache: "no-store",
+          }).catch(() => undefined),
+          fetch("/api/agent/auto-wake", {
+            method: "POST",
+            headers,
+            body: bodyOwner,
+            cache: "no-store",
+          }).catch(() => undefined),
+        ]);
       } finally {
         inFlight = false;
       }
     };
 
     void poke();
-    const t = setInterval(() => void poke(), 25_000);
+    // ~20s so 1m agents and 5m Oracast windows get reliable coverage while open
+    const t = setInterval(() => void poke(), 20_000);
     const onVis = () => {
       if (document.visibilityState === "visible") void poke();
     };

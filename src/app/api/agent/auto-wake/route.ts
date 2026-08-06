@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAddress, type Address, type Hex } from "viem";
+import { isAddress } from "viem";
 import {
   keeperAddress,
   keeperConfigured,
   runDueAgentTicks,
 } from "@/lib/agentKeeper";
-import { verifyAutoWakeSig } from "@/lib/ownerWakeAuth";
 import { clientIp, publicErrorMessage, rateLimit } from "@/lib/security";
 
 export const runtime = "nodejs";
@@ -13,21 +12,19 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 /**
- * Browser poke for auto-schedule (My Agents tab).
+ * Browser / keepalive poke for Radar data-agent auto-schedule.
  *
- * Hardened vs open gas grief:
+ * Auth model (product decision — smooth UX, no MetaMask spam):
+ * - Owner address only (must match on-chain agent.owner for any tick)
  * - Rate limited per IP + per owner
- * - Requires owner wallet signature (nonce + expiry)
- * - Caps scan size
- * - Only agents already due on-chain are ticked
+ * - Only due LIVE agents with balance are ticked
  *
- * Unattended production wakes: Bearer-auth `/api/agent/cron` only.
+ * Unattended (tab closed): Bearer `/api/agent/cron` (GitHub Action / QStash).
  */
 async function handle(req: NextRequest) {
   try {
     const ip = clientIp(req);
-    // Adaptive client polls every ~3–15s when near due — allow burst
-    const rl = rateLimit(`auto-wake:${ip}`, 40, 60_000);
+    const rl = rateLimit(`auto-wake:${ip}`, 48, 60_000);
     if (!rl.ok) {
       return NextResponse.json(
         { error: "Too many auto-wake requests — try again shortly" },
@@ -58,10 +55,7 @@ async function handle(req: NextRequest) {
 
     let agentId: string | undefined;
     let owner: string | undefined;
-    let max = 12;
-    let signature: string | undefined;
-    let nonce: string | undefined;
-    let expiry: number | undefined;
+    let max = 20;
 
     if (req.method === "POST") {
       try {
@@ -69,9 +63,6 @@ async function handle(req: NextRequest) {
           agentId?: string;
           owner?: string;
           max?: number;
-          signature?: string;
-          nonce?: string;
-          expiry?: number;
         };
         if (body.agentId && /^\d{1,12}$/.test(String(body.agentId))) {
           agentId = String(body.agentId);
@@ -80,9 +71,6 @@ async function handle(req: NextRequest) {
           owner = body.owner.toLowerCase();
         }
         if (body.max != null) max = Number(body.max);
-        signature = body.signature;
-        nonce = body.nonce;
-        expiry = body.expiry != null ? Number(body.expiry) : undefined;
       } catch {
         /* empty body ok */
       }
@@ -104,18 +92,7 @@ async function handle(req: NextRequest) {
       );
     }
 
-    // Signature required for browser path (GET without sig is rejected)
-    const sigErr = await verifyAutoWakeSig({
-      owner: owner as Address,
-      signature: signature as Hex | undefined,
-      nonce,
-      expiry,
-    });
-    if (sigErr) {
-      return NextResponse.json({ error: sigErr, code: "WAKE_AUTH" }, { status: 401 });
-    }
-
-    const rlOwner = rateLimit(`auto-wake-owner:${owner}`, 50, 60_000);
+    const rlOwner = rateLimit(`auto-wake-owner:${owner}`, 60, 60_000);
     if (!rlOwner.ok) {
       return NextResponse.json(
         { error: "Too many auto-wake requests for this owner" },
@@ -152,15 +129,9 @@ async function handle(req: NextRequest) {
   }
 }
 
-/** GET alone is not enough — signature must be POSTed */
-export async function GET() {
-  return NextResponse.json(
-    {
-      error:
-        "POST with owner wallet signature required. Unattended wakes: /api/agent/cron with CRON_SECRET.",
-    },
-    { status: 405 }
-  );
+export async function GET(req: NextRequest) {
+  // Allow GET ?owner= for simple keepalive probes
+  return handle(req);
 }
 
 export async function POST(req: NextRequest) {
