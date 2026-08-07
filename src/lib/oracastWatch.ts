@@ -1132,10 +1132,95 @@ export function oracastRefundPublicStatus(): {
   }
 }
 
+function errText(e: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let i = 0; i < 6; i++) {
+    if (!cur) break;
+    if (cur instanceof Error) parts.push(cur.message);
+    if (cur && typeof cur === "object") {
+      const o = cur as {
+        shortMessage?: string;
+        details?: string;
+        message?: string;
+        cause?: unknown;
+      };
+      if (o.shortMessage) parts.push(o.shortMessage);
+      if (o.details) parts.push(String(o.details));
+      if (o.message) parts.push(o.message);
+      cur = o.cause;
+    } else break;
+  }
+  return parts.join(" ");
+}
+
+/** Ritual public RPC often flakes eth_sendRawTransaction with this string. */
+function isRitualSendFlake(msg: string): boolean {
+  return /transaction creation failed|opcodenotfound|http request failed|fetch failed|timeout|econnreset|502|503|504|network|internal json-rpc|rate limit/i.test(
+    msg
+  );
+}
+
+type GRefund = typeof globalThis & {
+  __riteOracastRefundLocks?: Map<string, number>;
+};
+
+function refundMemLocks(): Map<string, number> {
+  const g = globalThis as GRefund;
+  if (!g.__riteOracastRefundLocks) g.__riteOracastRefundLocks = new Map();
+  return g.__riteOracastRefundLocks;
+}
+
+/** Multi-instance safe when Upstash is on; otherwise same-isolate only. */
+async function claimRefundLock(watchId: string): Promise<boolean> {
+  const id = watchId.toLowerCase();
+  const locks = refundMemLocks();
+  const now = Date.now();
+  const prev = locks.get(id);
+  if (prev && now - prev < 120_000) return false;
+  locks.set(id, now);
+
+  if (upstashConfigured()) {
+    try {
+      const r = await upstashCmd([
+        "SET",
+        `rite:oracast:refund_lock:${id}`,
+        String(now),
+        "EX",
+        "120",
+        "NX",
+      ]);
+      if (r !== "OK" && r !== true) {
+        locks.delete(id);
+        return false;
+      }
+    } catch {
+      /* mem lock still held */
+    }
+  }
+  return true;
+}
+
+async function releaseRefundLock(watchId: string): Promise<void> {
+  const id = watchId.toLowerCase();
+  refundMemLocks().delete(id);
+  if (!upstashConfigured()) return;
+  try {
+    await upstashCmd(["DEL", `rite:oracast:refund_lock:${id}`]);
+  } catch {
+    /* */
+  }
+}
+
 /**
  * Cancel live alert and refund remaining prepaid RIT to the owner.
  * Deposits were native transfers to fee recipient — refunds MUST be signed
  * by the same fee-recipient key (ORACAST_REFUND_PRIVATE_KEY).
+ *
+ * Ritual facts (same as keeper auto-wake):
+ * - Legacy type-0 is rejected ("transaction type not supported")
+ * - EIP-1559 type-2 is accepted; use tiny maxFee (NOT 1 gwei legacy)
+ * - "Transaction creation failed" is often an RPC flake — retry
  */
 export async function cancelAndWithdrawWatch(opts: {
   watchId: string;
@@ -1151,15 +1236,15 @@ export async function cancelAndWithdrawWatch(opts: {
   if (!/^0x[a-f0-9]{40}$/.test(owner)) {
     throw new Error("Invalid owner");
   }
+  // IDs are ow_ + 32 hex (UUID without dashes) — must match createWatch
+  if (!/^ow_[a-f0-9-]{8,80}$/i.test(opts.watchId)) {
+    throw new Error("Invalid watch id");
+  }
+
   const w = await getWatch(opts.watchId);
   if (!w) throw new Error("Watch not found");
   if (w.owner.toLowerCase() !== owner) {
     throw new Error("Not your watch");
-  }
-  // IDs are ow_ + 32 hex (UUID without dashes) or ow_ + hex with optional dashes.
-  // Old regex required ow_a_b (two segments) and rejected every real watch id → cancel always 400.
-  if (!/^ow_[a-f0-9-]{8,80}$/i.test(opts.watchId)) {
-    throw new Error("Invalid watch id");
   }
 
   let bal = BigInt(0);
@@ -1189,7 +1274,6 @@ export async function cancelAndWithdrawWatch(opts: {
     process.env.ORACAST_REFUND_PRIVATE_KEY?.trim() ||
     process.env.FEE_RECIPIENT_PRIVATE_KEY?.trim();
   if (!pkRaw) {
-    // Leave paused with balance so admin can configure key + user retries
     throw new Error(
       "Refunds not configured. Set ORACAST_REFUND_PRIVATE_KEY on Vercel to the fee-recipient wallet private key, then Redeploy and retry Cancel & withdraw. Alert is paused."
     );
@@ -1198,108 +1282,149 @@ export async function cancelAndWithdrawWatch(opts: {
   const { createWalletClient } = await import("viem");
   const account = privateKeyToAccount(normalizeRefundPk(pkRaw));
   const fee = feeRecipient().toLowerCase();
-  // Hard security: never send from a key that is not the deposit treasury
   if (account.address.toLowerCase() !== fee) {
     throw new Error(
       `Refund key address ${account.address.slice(0, 10)}… does not match fee recipient ${fee.slice(0, 10)}… — refusing to send. Fix ORACAST_REFUND_PRIVATE_KEY.`
     );
   }
 
-  const client = createPublicClient({
-    chain: ritualChain,
-    transport: http(RPC_URL, { timeout: 25_000, retryCount: 2 }),
-  });
-  const wallet = createWalletClient({
-    account,
-    chain: ritualChain,
-    transport: http(RPC_URL, { timeout: 60_000 }),
-  });
-
-  // Ritual: legacy gasPrice is more reliable than EIP-1559 feeHistory (~7 wei base)
-  const gasLimit = BigInt(50_000);
-  let gasPrice = BigInt(1_200_000_000); // 1.2 gwei floor
-  try {
-    const gp = await client.getGasPrice();
-    if (gp > gasPrice) gasPrice = gp;
-  } catch {
-    /* keep floor */
-  }
-  gasPrice = (gasPrice * BigInt(120)) / BigInt(100);
-  if (gasPrice < BigInt(1_000_000_000)) gasPrice = BigInt(1_000_000_000);
-
-  const gasCost = gasLimit * gasPrice;
-  const walletBal = await client.getBalance({ address: account.address });
-  // Keep a small gas reserve on treasury so the key remains usable
-  const gasReserve = parseEther("0.02");
-  if (walletBal < bal + gasCost + gasReserve) {
+  const locked = await claimRefundLock(opts.watchId);
+  if (!locked) {
     throw new Error(
-      `Treasury refund wallet low on RIT (have ${formatEther(walletBal)}, need ~${formatEther(bal + gasCost + gasReserve)} incl. 0.02 gas reserve). Top up fee recipient.`
+      "Refund already in progress for this watch. Wait ~30s and try again."
     );
   }
 
-  // Zero ledger before send so a double-click cannot double-pay
   const refundWei = bal;
-  w.depositWei = "0";
-  await saveWatch(w);
-
-  let txHash: `0x${string}`;
   try {
-    const nonce = await client.getTransactionCount({
-      address: account.address,
-      blockTag: "pending",
+    const client = createPublicClient({
+      chain: ritualChain,
+      transport: http(RPC_URL, { timeout: 30_000, retryCount: 2 }),
     });
-    txHash = await wallet.sendTransaction({
+    const wallet = createWalletClient({
       account,
       chain: ritualChain,
-      to: owner as `0x${string}`,
-      value: refundWei,
-      gas: gasLimit,
-      gasPrice,
-      nonce,
-      type: "legacy",
+      transport: http(RPC_URL, { timeout: 60_000, retryCount: 1 }),
     });
-    const receipt = await client.waitForTransactionReceipt({
-      hash: txHash,
-      timeout: 120_000,
-      pollingInterval: 400,
-    });
-    if (receipt.status !== "success") {
-      // Restore balance so user can retry
-      w.depositWei = refundWei.toString();
-      w.active = false;
-      await saveWatch(w);
-      throw new Error("Refund transaction reverted on-chain");
-    }
-  } catch (e) {
-    // Restore prepaid balance if we zeroed but send failed
-    try {
-      const cur = await getWatch(opts.watchId);
-      if (cur && BigInt(cur.depositWei || "0") === BigInt(0)) {
-        cur.depositWei = refundWei.toString();
-        cur.active = false;
-        await saveWatch(cur);
+
+    // Simple value transfer; 21k base + headroom
+    const gasLimit = BigInt(35_000);
+    // Keep ledger balance until receipt succeeds (no zero-before-send)
+    // so a failed send never "loses" the prepaid claim.
+
+    let txHash: `0x${string}` | undefined;
+    let lastErr: unknown;
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const [block, walletBal, nonce] = await Promise.all([
+          client.getBlock({ blockTag: "latest" }),
+          client.getBalance({ address: account.address }),
+          client.getTransactionCount({
+            address: account.address,
+            blockTag: "pending",
+          }),
+        ]);
+
+        // EIP-1559 only — Ritual rejects legacy type-0
+        const base = block.baseFeePerGas ?? BigInt(1);
+        const maxPriorityFeePerGas = BigInt(1_000_000); // 0.001 gwei tip
+        let maxFeePerGas = base * BigInt(2) + maxPriorityFeePerGas;
+        // Floor so zero-fee isn't dropped; keep cheap (do NOT force 1 gwei)
+        if (maxFeePerGas < BigInt(10_000_000)) {
+          maxFeePerGas = BigInt(10_000_000); // 0.01 gwei
+        }
+        const cap = BigInt(5_000_000_000); // 5 gwei
+        if (maxFeePerGas > cap) maxFeePerGas = cap;
+
+        const gasCost = gasLimit * maxFeePerGas;
+        // Small reserve so the key can send again later
+        const gasReserve = parseEther("0.001");
+        if (walletBal < refundWei + gasCost + gasReserve) {
+          throw new Error(
+            `Treasury low on RIT (have ${formatEther(walletBal)} RIT, need ~${formatEther(refundWei + gasCost + gasReserve)} to refund ${formatEther(refundWei)} + gas). Top up fee recipient ${account.address.slice(0, 10)}…`
+          );
+        }
+
+        txHash = await wallet.sendTransaction({
+          account,
+          chain: ritualChain,
+          to: owner as `0x${string}`,
+          value: refundWei,
+          gas: gasLimit,
+          maxFeePerGas,
+          maxPriorityFeePerGas,
+          nonce,
+          type: "eip1559",
+        });
+
+        const receipt = await client.waitForTransactionReceipt({
+          hash: txHash,
+          timeout: 90_000,
+          pollingInterval: 400,
+        });
+        if (receipt.status !== "success") {
+          throw new Error(
+            `Refund transaction reverted on-chain (${txHash.slice(0, 12)}…)`
+          );
+        }
+        lastErr = undefined;
+        break;
+      } catch (e) {
+        lastErr = e;
+        const blob = errText(e);
+        // Real balance problem — stop immediately
+        if (
+          /treasury low on rit|insufficient funds|exceeds the balance/i.test(
+            blob
+          )
+        ) {
+          break;
+        }
+        // RPC flake — retry with backoff
+        if (isRitualSendFlake(blob) && attempt < 3) {
+          console.warn(
+            `[oracastWatch] refund send flake attempt ${attempt + 1}:`,
+            blob.slice(0, 140)
+          );
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+          continue;
+        }
+        break;
       }
-    } catch {
-      /* best effort */
     }
-    const msg =
-      e instanceof Error ? e.message : "Refund send failed";
-    // Surface short actionable text (not full viem stack)
-    throw new Error(
-      /insufficient funds|gas/i.test(msg)
-        ? `Refund send failed: treasury needs more RIT for gas. ${msg.slice(0, 120)}`
-        : msg.slice(0, 220)
-    );
+
+    if (!txHash) {
+      const blob = errText(lastErr);
+      if (/treasury low on rit|insufficient funds|exceeds the balance/i.test(blob)) {
+        throw new Error(
+          blob.includes("Treasury low")
+            ? blob.slice(0, 280)
+            : `Treasury cannot fund refund + gas. ${blob.slice(0, 160)}`
+        );
+      }
+      if (isRitualSendFlake(blob)) {
+        throw new Error(
+          "Ritual RPC failed to accept the refund tx (network flake). Your prepaid balance is still on the watch — try Cancel & withdraw again in a few seconds."
+        );
+      }
+      throw new Error(
+        `Refund send failed: ${blob.replace(/\s+/g, " ").slice(0, 200)}`
+      );
+    }
+
+    // Only after confirmed success: remove watch + tombstone (cannot re-import)
+    await deleteWatchRecord(opts.watchId, owner);
+
+    return {
+      deleted: true,
+      refundedRit: formatEther(refundWei),
+      refundedWei: refundWei.toString(),
+      txHash,
+    };
+  } finally {
+    await releaseRefundLock(opts.watchId);
   }
-
-  await deleteWatchRecord(opts.watchId, owner);
-
-  return {
-    deleted: true,
-    refundedRit: formatEther(refundWei),
-    refundedWei: refundWei.toString(),
-    txHash,
-  };
 }
 
 /**
