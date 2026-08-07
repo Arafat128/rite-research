@@ -1156,8 +1156,9 @@ export async function cancelAndWithdrawWatch(opts: {
   if (w.owner.toLowerCase() !== owner) {
     throw new Error("Not your watch");
   }
-  // Guard watch id shape (prevent odd store keys)
-  if (!/^ow_[a-z0-9]+_[a-z0-9]+$/i.test(opts.watchId)) {
+  // IDs are ow_ + 32 hex (UUID without dashes) or ow_ + hex with optional dashes.
+  // Old regex required ow_a_b (two segments) and rejected every real watch id → cancel always 400.
+  if (!/^ow_[a-f0-9-]{8,80}$/i.test(opts.watchId)) {
     throw new Error("Invalid watch id");
   }
 
@@ -1214,15 +1215,19 @@ export async function cancelAndWithdrawWatch(opts: {
     transport: http(RPC_URL, { timeout: 60_000 }),
   });
 
-  const gasLimit = BigInt(35_000);
-  const block = await client.getBlock({ blockTag: "latest" });
-  const base = block.baseFeePerGas ?? BigInt(1);
-  const maxPriorityFeePerGas = BigInt(1_000_000);
-  let maxFeePerGas = base * BigInt(3) + maxPriorityFeePerGas;
-  if (maxFeePerGas < BigInt(10_000_000)) maxFeePerGas = BigInt(10_000_000);
-  if (maxFeePerGas > BigInt(5_000_000_000)) maxFeePerGas = BigInt(5_000_000_000);
+  // Ritual: legacy gasPrice is more reliable than EIP-1559 feeHistory (~7 wei base)
+  const gasLimit = BigInt(50_000);
+  let gasPrice = BigInt(1_200_000_000); // 1.2 gwei floor
+  try {
+    const gp = await client.getGasPrice();
+    if (gp > gasPrice) gasPrice = gp;
+  } catch {
+    /* keep floor */
+  }
+  gasPrice = (gasPrice * BigInt(120)) / BigInt(100);
+  if (gasPrice < BigInt(1_000_000_000)) gasPrice = BigInt(1_000_000_000);
 
-  const gasCost = gasLimit * maxFeePerGas;
+  const gasCost = gasLimit * gasPrice;
   const walletBal = await client.getBalance({ address: account.address });
   // Keep a small gas reserve on treasury so the key remains usable
   const gasReserve = parseEther("0.02");
@@ -1249,14 +1254,14 @@ export async function cancelAndWithdrawWatch(opts: {
       to: owner as `0x${string}`,
       value: refundWei,
       gas: gasLimit,
-      maxFeePerGas,
-      maxPriorityFeePerGas,
+      gasPrice,
       nonce,
-      type: "eip1559",
+      type: "legacy",
     });
     const receipt = await client.waitForTransactionReceipt({
       hash: txHash,
       timeout: 120_000,
+      pollingInterval: 400,
     });
     if (receipt.status !== "success") {
       // Restore balance so user can retry
@@ -1277,9 +1282,14 @@ export async function cancelAndWithdrawWatch(opts: {
     } catch {
       /* best effort */
     }
-    throw e instanceof Error
-      ? e
-      : new Error("Refund send failed");
+    const msg =
+      e instanceof Error ? e.message : "Refund send failed";
+    // Surface short actionable text (not full viem stack)
+    throw new Error(
+      /insufficient funds|gas/i.test(msg)
+        ? `Refund send failed: treasury needs more RIT for gas. ${msg.slice(0, 120)}`
+        : msg.slice(0, 220)
+    );
   }
 
   await deleteWatchRecord(opts.watchId, owner);

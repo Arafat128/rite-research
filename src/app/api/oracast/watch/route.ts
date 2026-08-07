@@ -206,9 +206,16 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ error: "unknown action" }, { status: 400 });
   } catch (e) {
+    const msg = e instanceof Error ? e.message : "request failed";
+    console.error("[api/oracast/watch]", msg);
+    // Config / treasury issues are 503; client mistakes stay 400
+    const isConfig =
+      /not configured|does not match fee recipient|low on RIT|Treasury/i.test(
+        msg
+      );
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "request failed" },
-      { status: 400 }
+      { error: msg },
+      { status: isConfig ? 503 : 400 }
     );
   }
 }
